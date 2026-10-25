@@ -18,6 +18,13 @@ describe('ask-default helpers', () => {
     expect(unanswered([Q1, Q2], partial)).toEqual([Q2])
     const none = `"${Q1.question}"="(No answer provided)", "${Q2.question}"=""`
     expect(unanswered([Q1, Q2], none)).toEqual([Q1, Q2])
+    const declined = `"${Q1.question}": (user declined)`
+    expect(unanswered([Q1, Q2], declined)).toEqual([Q1, Q2])
+    const advice = `${answered} Questions you did not answer were skipped.`
+    expect(unanswered([Q1, Q2], advice)).toEqual([])
+    // The same closing advice plus no answer for Q1: only Q1 is missing.
+    const mixed = `"${Q1.question}": (user declined), "${Q2.question}"="나중". Questions you did not answer were skipped.`
+    expect(unanswered([Q1, Q2], mixed)).toEqual([Q1])
   })
 
   test('the context names each pick and the irreversible exception', async () => {

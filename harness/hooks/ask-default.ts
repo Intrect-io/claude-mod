@@ -25,20 +25,27 @@ export function recommendedLabel(question: AskQuestion): string | undefined {
 // answered question as `"<question>"="<answer>"`; an auto-continued one is
 // missing or reads "(No answer provided)".
 export function unanswered(questions: readonly AskQuestion[], text: string): AskQuestion[] {
-  return questions.filter(question => {
-    const at = text.indexOf(`"${question.question}"`)
-    if (at < 0) return true
-    const tail = text.slice(at + question.question.length + 2, at + question.question.length + 2 + 200)
+  const named = questions.filter(question => text.includes(`"${question.question}"`))
+  const missingNamed = questions.filter(question => !named.includes(question))
 
-    return /^\s*=\s*"?\s*\(?(no answer|not answered|unanswered|skipped|timed out)/i.test(tail) || /^\s*=\s*""/.test(tail)
+  const flagged = named.filter(question => {
+    const at = text.indexOf(`"${question.question}"`)
+    const tail = at < 0 ? '' : text.slice(at + question.question.length + 2, at + question.question.length + 2 + 200)
+
+    // Only the answer right after the question counts: the result's closing
+    // advice talks about "declined or did not answer" even when all were answered.
+    return /^\s*["']?\s*[=:]\s*["']?\s*\(?\s*(user )?(no answer|not answered|unanswered|skipped|timed out|declined)/i.test(tail) || /^\s*["']?\s*=\s*""/.test(tail)
   })
+
+  // Question order, as the tool showed them.
+  return questions.filter(question => missingNamed.includes(question) || flagged.includes(question))
 }
 
 export function defaultContext(missing: readonly AskQuestion[]): string {
   const picks = missing.map(question => `- "${question.question}" → "${recommendedLabel(question) ?? '(no options)'}"`)
 
   return [
-    'harness: the user did not answer within the timeout (they may be asleep). Their standing instruction (2026-10-25) is to proceed with the Recommended option instead of stopping or asking again:',
+    'harness: the user did not answer within the timeout (5m; they may be away or asleep). Their standing instruction (2026-10-25) is to proceed with the Recommended option instead of stopping or asking again:',
     ...picks,
     'State in your next message which option you assumed. EXCEPTION: if that option is irreversible (payments or purchases, credential or release-trust changes, deleting data, force push or pushing main, publishing a new public repo), pick the safest non-destructive option (hold/skip) instead and leave the decision for the user.',
   ].join('\n')
@@ -56,3 +63,4 @@ export function registerAskDefault(on: On): void {
     return { ...ran, context: [...(ran.context ?? []), defaultContext(missing)] }
   })
 }
+
