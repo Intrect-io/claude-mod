@@ -1,0 +1,37 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-mod",
+  "description": "Claude Code mods by unohee",
+  "owner": {
+    "name": "unohee"
+  },
+  "plugins": [
+    {
+      "name": "goal-mode",
+      "description": "Claude가 스스로 세션 goal을 걸고, 독립 evaluator(sonnet)가 Stop마다 충족 여부를 판정해 미충족이면 계속 작업시킨다. 네이티브 ProposeGoal이 있으면 그쪽을 쓴다.",
+      "author": {
+        "name": "unohee"
+      },
+      "source": "./goal-mode",
+      "category": "development"
+    },
+    {
+      "name": "harness",
+      "description": "Integrated harness: enforces the user's Claude rules at the tool call (git/worktree/delete/venv/port/Linear/memory guards, merge-and-release gate, report lint), plus session tooling and workflow automation.",
+      "author": {
+        "name": "unohee"
+      },
+      "source": "./harness",
+      "category": "development"
+    },
+    {
+      "name": "model-tier",
+      "description": "Routes each main-loop turn to opus, sonnet or haiku by task complexity, with a set_tier tool the model can call to correct itself",
+      "author": {
+        "name": "unohee"
+      },
+      "source": "./model-tier",
+      "category": "development"
+    }
+  ]
+}

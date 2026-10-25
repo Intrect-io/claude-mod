@@ -1,0 +1,44 @@
+{
+  "name": "model-tier",
+  "version": "0.1.0",
+  "description": "Routes each main-loop turn to opus, sonnet or haiku by task complexity, with a set_tier tool the model can call to correct itself",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "enabled": {
+      "type": "boolean",
+      "title": "Enabled",
+      "description": "Route turns by complexity",
+      "default": true
+    },
+    "downgradeAfterTurns": {
+      "type": "number",
+      "title": "Downgrade after turns",
+      "description": "Consecutive lower verdicts needed before stepping down a tier",
+      "default": 2
+    },
+    "maxTokensForHaiku": {
+      "type": "number",
+      "title": "Max context tokens for haiku",
+      "description": "Above this many prompt tokens the session never drops to haiku",
+      "default": 150000
+    },
+    "maxTokensForDowngrade": {
+      "type": "number",
+      "title": "Max context tokens for any downgrade",
+      "description": "Above this many prompt tokens the tier only goes up: re-billing a large context outside the cache costs more than a cheaper model saves",
+      "default": 200000
+    },
+    "classifierModel": {
+      "type": "string",
+      "title": "Classifier model",
+      "description": "Model that labels each prompt's complexity",
+      "default": "haiku"
+    },
+    "classifierTimeoutMs": {
+      "type": "number",
+      "title": "Classifier timeout (ms)",
+      "description": "Keep the current tier when the classifier takes longer than this",
+      "default": 3000
+    }
+  }
+}

@@ -1,0 +1,68 @@
+# model-tier
+
+A Claude Code mod that routes each main-loop turn to **opus**, **sonnet** or **haiku**
+by task complexity, and lets the model correct the choice itself.
+
+## How it works
+
+- **Classifier (on prompt submit).** `$.model.classify` labels the prompt
+  `trivial` / `standard` / `complex` on a cheap model (haiku by default), mapped
+  to haiku / sonnet / opus.
+- **Self-correction.** The mod registers a `set_tier` tool
+  (`mcp__model-tier__set_tier`). The model calls it when the current tier is too
+  weak or wasteful; it applies from the next model request.
+- **Switching.** A `turn.step` hook rewrites the `model` of every main-loop request.
+  Subagent steps are untouched.
+- **Subagents.** `general-purpose` / `claude` spawns with no explicit model get a
+  model from the same classifier. Agent types that define their own model keep it.
+- **Sticky tiers.** Upgrades apply at once. Downgrades need `downgradeAfterTurns`
+  consecutive lower verdicts, because every switch re-bills the conversation
+  prefix outside the prompt cache. Before the session has sent anything there
+  is no cached prefix, so the first verdict applies at once.
+- **Classifier timeout.** If the classifier takes longer than
+  `classifierTimeoutMs`, the current tier stays and the prompt is not held.
+- **Context guards.** Above `maxTokensForHaiku` prompt tokens the session never
+  drops to haiku; above `maxTokensForDowngrade` it never steps down at all.
+  Loaded into a running session, the mod reads the live context size first.
+- **Fallback.** If the API refuses the chosen tier before anything streams, the
+  request is retried on the session's own model and a toast says so.
+
+The status line shows the effective tier, e.g. `tier: sonnet (auto)`. `/model` keeps
+showing the session's configured model: this mod rewrites requests, not the setting.
+
+## Commands
+
+- `/tier`: show the current tier
+- `/tier opus|sonnet|haiku`: pin a tier. The classifier and `set_tier` leave it alone.
+- `/tier auto`: return to automatic routing
+
+## Options (`userConfig`)
+
+| key | default | meaning |
+| --- | --- | --- |
+| `enabled` | `true` | turn routing on/off |
+| `downgradeAfterTurns` | `2` | consecutive lower verdicts before stepping down |
+| `maxTokensForHaiku` | `150000` | prompt-token ceiling for haiku |
+| `maxTokensForDowngrade` | `200000` | above this, the tier only goes up |
+| `classifierModel` | `haiku` | model used to label prompts |
+| `classifierTimeoutMs` | `3000` | keep the current tier when classifying takes longer |
+
+## Development
+
+```sh
+claude plugin validate model-tier
+claude plugin test model-tier
+claude --plugin-dir ./model-tier
+```
+
+## Behaviour to know
+
+- `/model` changes after the first request are overridden by the stored tier.
+  Use `/tier` instead.
+- `--continue` / `--resume` start the tier state fresh, so hysteresis resets.
+- After a refused-tier fallback, the status line still shows the intended tier,
+  not the model that answered.
+- The classifier adds one small model call per prompt (observed 0.7 s to 21 s;
+  bounded by `classifierTimeoutMs`).
+- Verified on Claude Code 2.1.310: a haiku request over a history that holds a
+  signed opus thinking block is accepted.
