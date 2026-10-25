@@ -26,6 +26,13 @@ const NATIVE_TOOL = 'ProposeGoal'
 const EVALUATOR_MODEL = 'claude-sonnet-5-5'
 const EVALUATOR_TIMEOUT_MS = 60_000
 const MAX_CONDITION_CHARS = 600
+// Auto-declaration: a prompt shorter than this, a question, or a slash command
+// is never classified; the classifier gives up after the timeout.
+const AUTO_GOAL_MIN_CHARS = 30
+// A request for an outcome, not a question. No model call: a classifier on
+// every prompt cost seconds (21 s measured under load) for a nudge the model
+// can decline itself.
+const OUTCOME_VERB = /(고쳐|고치|수정|구현|만들|추가|작성|통과|마이그레이션|리팩터|옮겨|적용|설치|배포|최적화|해결|완성|이전해|바꿔|변환|정리해|\bfix|\bimplement|\badd\b|\bbuild|\bmigrate|\brefactor|\bmake\b.*\bpass|\bport\b|\bdeploy|\bconvert|\bupgrade)/i
 const MAX_UNMET_PER_TURN = 5
 const MAX_CHECKS = 30
 const MAX_PARSE_FAILURES = 2
@@ -64,6 +71,8 @@ Set a goal on your own, without asking, when ALL of these hold:
 - The condition follows directly from the user's request. Never widen scope; never add goals the user did not ask for.
 - You are not in plan mode.
 Do not set goals for questions, explanations, one-off edits, or reviews. Set at most one goal; never re-set a goal the user cleared.
+
+When a "goal-mode:" note says a request or an approved plan qualifies, set the goal before you start the work, unless the request clearly has no verifiable end state.
 
 Write the condition as ONE measurable end state with its check, e.g. "\`pytest -q\` exits 0 with no failures". The evaluator cannot run commands or read files: it sees only the conversation. So before you stop, re-run the check and leave its real output in the transcript.
 
@@ -147,7 +156,9 @@ type LoopRecord = {
 
 type LogEvent = 'start' | 'unmet' | 'met' | 'retry' | 'blocked' | 'deferred' | 'denied' | 'queue-empty' | 'error'
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const autoGoal = options.autoGoal !== false
+
   on('session.start', async ($, e, next) => {
     await update($, metaAtom, meta => ({ ...meta, cwd: e.cwd }))
     await $.tool.register({
@@ -307,8 +318,33 @@ export const register: Register = on => {
       await update($, goalAtom, goal => (goal === null ? null : resetTurn(goal)))
       await showStatus($)
     }
+    const below = await next(e)
+    if (!autoGoal || e.agent_id !== undefined || e.permission_mode === 'plan') return below
+    const note = await autoGoalNote($, e.prompt)
+    if (note === undefined) return below
 
-    return next(e)
+    return { ...below, additionalContext: [...(below.additionalContext ?? []), note] }
+  })
+
+  // The mode is otherwise read only at prompts and stops, so a plan approved
+  // mid-turn left set_goal refusing "plan mode" for the rest of that turn.
+  // Leaving plan mode is also the surest sign of multi-turn work: say so.
+  on('tool.call', { tool: 'ExitPlanMode' }, async ($, e, next) => {
+    const ran = await next(e)
+    if (ran.deny !== undefined || ran.isError === true) return ran
+    await update($, metaAtom, meta => ({ ...meta, lastMode: 'default' }))
+    if (!autoGoal) return ran
+    const note = await goalNote($, 'The plan was just approved, so this is multi-turn work.')
+    if (note === undefined) return ran
+
+    return { ...ran, context: [...(ran.context ?? []), note] }
+  })
+
+  on('tool.call', { tool: 'EnterPlanMode' }, async ($, e, next) => {
+    const ran = await next(e)
+    if (ran.deny === undefined && ran.isError !== true) await update($, metaAtom, meta => ({ ...meta, lastMode: 'plan' }))
+
+    return ran
   })
 
   on('classic.Stop', async ($, e, next) => {
@@ -1026,6 +1062,33 @@ async function pause<R>($: EngineInterface, below: R, because: string): Promise<
   await showStatus($)
 
   return below
+}
+
+// Whether a typed prompt plausibly asks for multi-turn work toward an outcome.
+export function autoGoalCandidate(prompt: string): boolean {
+  const text = prompt.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, ' ').trim()
+  if (text.length < AUTO_GOAL_MIN_CHARS) return false
+  if (/<command-name>/.test(text) || text.startsWith('/')) return false
+  // A question, not a request for an outcome.
+  if (/[?？]\s*$/.test(text) || /(인가요|일까요|나요|습니까|어때|뭐야|왜)\s*[?？]?\s*$/.test(text)) return false
+
+  return OUTCOME_VERB.test(text)
+}
+
+async function autoGoalNote($: EngineInterface, prompt: string): Promise<string | undefined> {
+  if (!autoGoalCandidate(prompt)) return undefined
+
+  return goalNote($, 'This request looks like work toward an outcome.')
+}
+
+// The nudge itself; undefined when no goal can be set now.
+async function goalNote($: EngineInterface, why: string): Promise<string | undefined> {
+  const goal = await read($, goalAtom)
+  const meta = await read($, metaAtom)
+  if (goal !== null || meta.loop !== undefined) return undefined
+  const how = meta.nativeSeen ? `${NATIVE_TOOL} with ask_user false` : TOOL_ID
+
+  return `goal-mode: ${why} If it has a verifiable end state and will take more than a few tool calls, set the session goal now with ${how}, before starting: one measurable end state from the user's own words, with the check that proves it. Do not widen scope. Otherwise skip this note and say nothing about it.`
 }
 
 async function rememberMode($: EngineInterface, mode: string | undefined): Promise<void> {

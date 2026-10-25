@@ -3,7 +3,7 @@ import type { TestBody } from 'claude-code/testing'
 
 type On = Parameters<TestBody>[1]
 
-import { parseVerdict, transcriptTail } from './register'
+import { autoGoalCandidate, parseVerdict, transcriptTail } from './register'
 
 const TOOL_ID = 'mcp__goal-mode__set_goal'
 const USAGE = {
@@ -105,6 +105,52 @@ describe('set_goal', () => {
     await $.tool.describe({ tool: 'ProposeGoal', description: 'native', provider: { plugin: 'engine', tier: 'core' } })
 
     expect((await $.tool.call({ tool: TOOL_ID, condition: 'tests pass' })).deny).toContain('ProposeGoal')
+  })
+})
+
+describe('auto goal', () => {
+  const TASK = '이 저장소의 모든 테스트가 통과하도록 실패하는 테스트를 전부 고쳐줘'
+
+  test('a plan approved mid-turn no longer leaves set_goal refusing plan mode', async ($, on) => {
+    engine(on, [])
+    on('tool.call', () => ({ result: 'approved' }))
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    await $.classic.UserPromptSubmit({ prompt: 'plan it', permission_mode: 'plan' })
+
+    const exit = await $.tool.call({ tool: 'ExitPlanMode' })
+    expect(exit.context?.join('\n')).toContain('set the session goal now')
+    expect((await $.tool.call({ tool: TOOL_ID, condition: 'tests pass' })).deny).toBeUndefined()
+  })
+
+  test('an outcome request gets the nudge; chat and questions do not', async ($, on) => {
+    engine(on, [])
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+    const yes = await $.classic.UserPromptSubmit({ prompt: TASK, permission_mode: 'default' })
+    expect(yes.additionalContext?.join('\n')).toContain('mcp__goal-mode__set_goal')
+
+    const chat = await $.classic.UserPromptSubmit({ prompt: '오늘 회의에서 나온 이야기들을 그냥 들려줄게 잘 들어봐 정말 길어', permission_mode: 'default' })
+    expect(chat.additionalContext ?? []).toEqual([])
+
+    const question = await $.classic.UserPromptSubmit({ prompt: '이 함수가 왜 테스트에서 실패하는지 설명해 줄 수 있나요?', permission_mode: 'default' })
+    expect(question.additionalContext ?? []).toEqual([])
+  })
+
+  test('no nudge once a goal is set, in plan mode, or when turned off', async ($, on) => {
+    engine(on, [])
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+    expect((await $.classic.UserPromptSubmit({ prompt: TASK, permission_mode: 'plan' })).additionalContext ?? []).toEqual([])
+    await $.classic.UserPromptSubmit({ prompt: 'ok', permission_mode: 'default' })
+    expect((await $.tool.call({ tool: TOOL_ID, condition: 'tests pass' })).deny).toBeUndefined()
+    expect((await $.classic.UserPromptSubmit({ prompt: TASK, permission_mode: 'default' })).additionalContext ?? []).toEqual([])
+  })
+
+  test('cheap gates', async () => {
+    expect(autoGoalCandidate('고쳐줘')).toBe(false)
+    expect(autoGoalCandidate('<command-name>/context</command-name> 이건 명령 턴이라 건너뛴다')).toBe(false)
+    expect(autoGoalCandidate('왜 이렇게 동작하는지 원인을 자세히 설명해 줄 수 있을까요?')).toBe(false)
+    expect(autoGoalCandidate('harness mod의 Phase 0부터 3까지 전부 구현하고 테스트까지 통과시켜줘')).toBe(true)
   })
 })
 

@@ -4,7 +4,7 @@ Claude Code mods (plugins with a hooks module), served as a local folder marketp
 
 | mod | version | what it does |
 | --- | --- | --- |
-| [goal-mode](goal-mode/) | 0.2.2 | Lets Claude set its own session goal; an independent evaluator keeps it working at Stop until the goal is met |
+| [goal-mode](goal-mode/) | 0.3.0 | Claude sets its own session goal (nudged on outcome requests and approved plans); an independent evaluator keeps it working at Stop until the goal is met |
 | [harness](harness/) | 0.2.0 | The integrated harness: the user's Claude rules enforced at the tool call, session tooling and workflow automation (formerly house-rules) |
 | [model-tier](model-tier/) | 0.1.0 | Routes each main-loop turn to opus, sonnet or haiku by task complexity, with a `set_tier` tool the model can call to correct itself |
 

@@ -43,3 +43,13 @@ Other notes:
 - Branches are never merged automatically; review and merge them yourself.
 - `/goal-mode loop off|status|resume`: `resume` takes over a loop whose session went away. A resumed (`claude --continue`) owner session continues by itself.
 - Only one session may run a repository's loop at a time: another session active in the last 10 minutes keeps it.
+
+## Auto-declared goals (0.3.0)
+
+The model is nudged to set its own goal at two points, with no extra model call.
+
+- **When a plan is approved:** right after `ExitPlanMode` succeeds. This also fixes a bug where `set_goal` kept refusing with "plan mode" for the rest of the turn the plan was approved in.
+- **On a typed prompt:** when the prompt asks for an outcome. That means a request verb such as 고쳐/구현/추가/통과/fix/implement/migrate, at least 30 characters, not a question, and not a slash command.
+
+The nudge is a short context note. The model still decides, and skips it when the request has no verifiable end state. No nudge is sent when a goal is already set, in plan mode, or while a loop runs. Turn it off with the `autoGoal` option.
+
