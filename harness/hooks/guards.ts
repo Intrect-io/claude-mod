@@ -250,22 +250,23 @@ export async function guardsToolCall(
 export async function loadGuardEnv($: EngineInterface): Promise<void> {
   const home = await $.env.get('HOME')
   const tmpdir = await $.env.get('TMPDIR')
-  let platform = ''
-  try {
-    platform = (await $.process.run(['uname', '-s'], { timeoutMs: 5_000 })).stdout.trim()
-  } catch {
-    // Unknown platform: the venv stays undetermined.
-  }
-  const dir = platform === 'Darwin' ? `${home}/dev/mlx_env` : platform === 'Linux' ? `${home}/dev/venvs/vega` : undefined
+  // No `uname` process: the two platform venvs are probed directly, which also
+  // covers a shell that differs from the session's platform.
+  const candidates = [`${home}/dev/mlx_env`, `${home}/dev/venvs/vega`]
   let venv: string | undefined
-  if (dir !== undefined) {
+  let dir: string | undefined
+  for (const candidate of candidates) {
     try {
-      const probe = await $.process.run(['test', '-f', `${dir}/bin/activate`], { timeoutMs: 5_000 })
-      if (probe.exitCode === 0) venv = `${dir}/bin/activate`
+      if (await $.fs.exists(`${candidate}/bin/activate`)) {
+        venv = `${candidate}/bin/activate`
+        dir = candidate
+        break
+      }
     } catch {
-      venv = undefined
+      // Unreadable: try the next candidate.
     }
   }
+  if (venv === undefined) dir = (await $.env.get('OSTYPE'))?.startsWith('darwin') ? candidates[0] : candidates[1]
   await update($, envAtom, () => ({ home, tmpdir, venv, venvMissing: venv === undefined ? dir ?? 'the platform venv' : undefined }))
 }
 

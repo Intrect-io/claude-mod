@@ -41,6 +41,7 @@ function world(on: On, store: Record<string, unknown> = {}): World {
     const text = w.files.get(e.path)
     return text === undefined ? { deny: 'ENOENT' } : { value: text }
   })
+  on('fs.exists', (_, e) => ({ value: e.path === '/Users/u/dev/mlx_env/bin/activate' || w.files.has(e.path) }))
   on('fs.write', (_, e) => {
     w.files.set(e.path, e.text)
     return { value: undefined }
@@ -185,6 +186,14 @@ describe('report-lint', () => {
     expect((await $.classic.Stop(STOP)).block).toBeUndefined()
 
     await prompt($, '설명해줘')
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
+  })
+
+  test('a slash-command turn gets no report nudge', async ($, on) => {
+    world(on)
+    await start($)
+    await prompt($, '<command-name>/context</command-name>')
+    await $.tool.call({ tool: 'Edit', file_path: '/repo/a.py', old_string: '1', new_string: '2' })
     expect((await $.classic.Stop(STOP)).block).toBeUndefined()
   })
 

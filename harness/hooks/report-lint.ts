@@ -92,9 +92,13 @@ export function isEnglishLine(line: string): boolean {
   return (words?.length ?? 0) >= 4
 }
 
+// A slash command (`/context`, `/model`) starts no work the user asked for; a
+// nudge there is noise, and each block costs a whole extra turn.
+const SLASH_COMMAND = /<command-name>\s*\/[a-z-]+\s*<\/command-name>/
+
 export async function lintPrompt($: EngineInterface, e: Parameters<PromptHook>[1], next: Parameters<PromptHook>[2]) {
     if (e.agent_id === undefined) {
-      await update($, lintAtom, () => ({ codeEdited: false, askUsed: false, nudged: false, mode: e.permission_mode }))
+      await update($, lintAtom, () => ({ codeEdited: false, askUsed: false, nudged: SLASH_COMMAND.test(e.prompt), mode: e.permission_mode }))
     }
 
     return next(e)
