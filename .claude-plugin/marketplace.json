@@ -32,6 +32,15 @@
       },
       "source": "./model-tier",
       "category": "development"
+    },
+    {
+      "name": "fleet",
+      "description": "Links this session to fleet-hub: IRC-style channels between sessions, dashboard telemetry, and orchestrator messages delivered as prompts with a §6.5 grant verdict.",
+      "author": {
+        "name": "unohee"
+      },
+      "source": "./fleet",
+      "category": "development"
     }
   ]
 }

@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fleet-hub</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1c1a; --muted: #6b6862; --line: #e2dfd8;
+    --accent: #2f5bd3; --ok: #1f7a4d; --warn: #b45309; --bad: #b42318; --chip: #efede8;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151514; --panel: #1e1e1c; --ink: #ecebe7; --muted: #9c998f; --line: #2f2e2b;
+            --accent: #7b9cff; --ok: #4fbf87; --warn: #f0a24a; --bad: #f07167; --chip: #2a2926; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 -apple-system, "Apple SD Gothic Neo", "Pretendard", system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+  header h1 { font-size: 15px; margin: 0; letter-spacing: .02em; }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--chip); color: var(--muted); white-space: nowrap; }
+  .pill.ok { color: var(--ok); } .pill.warn { color: var(--warn); } .pill.bad { color: var(--bad); }
+  main { display: grid; grid-template-columns: minmax(280px, 360px) 1fr minmax(300px, 380px); gap: 16px; padding: 16px 20px; height: calc(100vh - 52px); }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; min-height: 0; }
+  section > h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; }
+  .scroll { overflow: auto; flex: 1; min-height: 0; }
+  .card { padding: 10px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .card:hover, .card.sel { background: var(--chip); }
+  .card .top { display: flex; justify-content: space-between; gap: 8px; }
+  .card .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .meta { color: var(--muted); font-size: 12px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .sum { font-size: 13px; color: var(--muted); margin-top: 2px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .st-idle { color: var(--ok); } .st-busy { color: var(--accent); } .st-waiting_on_user { color: var(--warn); font-weight: 600; } .st-offline { color: var(--muted); }
+  .tabs { display: flex; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .tab { border: 1px solid var(--line); background: none; color: var(--ink); border-radius: 6px; padding: 3px 9px; font: inherit; font-size: 12px; cursor: pointer; }
+  .tab.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .msg { padding: 6px 14px; border-bottom: 1px solid var(--line); }
+  .msg .who { font-size: 12px; color: var(--muted); }
+  .msg .who b { color: var(--ink); font-weight: 600; }
+  .msg .k-orchestrator b { color: var(--accent); } .msg .k-human b, .msg .k-slack b { color: var(--ok); }
+  .msg .body { white-space: pre-wrap; word-break: break-word; }
+  form.send { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--line); }
+  textarea, input, select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  textarea { flex: 1; resize: vertical; min-height: 38px; max-height: 200px; }
+  button.primary { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 6px 14px; font: inherit; cursor: pointer; }
+  button.ghost { background: none; color: var(--bad); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
+  .grant { padding: 12px 14px; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
+  .grant .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .grant small { color: var(--muted); }
+  .req { padding: 8px 14px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .empty { padding: 14px; color: var(--muted); }
+  #gate { max-width: 520px; margin: 15vh auto; padding: 24px; }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; height: auto; } section { max-height: 70vh; } }
+</style>
+</head>
+<body>
+<div id="gate" hidden>
+  <h1>fleet-hub</h1>
+  <p>이 기기는 인증되지 않았습니다. 본인 tailnet 기기에서 열거나, 허브 로그에 찍힌 <code>http://127.0.0.1:…/#token=…</code> 주소로 여세요. 토큰은 <code>~/.claude/fleet/dashboard-token</code>에도 있습니다.</p>
+</div>
+<div id="app" hidden>
+<header>
+  <h1>fleet-hub</h1>
+  <span class="pill" id="p-conn">연결 중</span>
+  <span class="pill" id="p-orch">orchestrator</span>
+  <span class="pill" id="p-slack">slack</span>
+  <span class="pill" id="p-grant">grant</span>
+</header>
+<main>
+  <section>
+    <h2><span>세션</span><span id="n-sessions"></span></h2>
+    <div class="scroll" id="sessions"></div>
+  </section>
+  <section>
+    <div class="tabs" id="tabs"></div>
+    <div class="scroll" id="msgs"></div>
+    <form class="send" id="f-post">
+      <textarea id="t-post" placeholder="채널에 쓰기 (사용자 이름으로). DM 탭이면 그 세션에 프롬프트로 들어갑니다."></textarea>
+      <button class="primary">보내기</button>
+    </form>
+  </section>
+  <section>
+    <h2><span>orchestrator</span><span id="orch-detail"></span></h2>
+    <div class="grant" id="grant"></div>
+    <div id="reqs"></div>
+    <div class="scroll" id="orch"></div>
+    <form class="send" id="f-orch">
+      <textarea id="t-orch" placeholder="orchestrator에게 지시"></textarea>
+      <button class="primary">보내기</button>
+    </form>
+  </section>
+</main>
+</div>
+<script>
+(() => {
+  const hash = new URLSearchParams(location.hash.slice(1)).get('token')
+  let token = null
+  try { if (hash) sessionStorage.setItem('fleet-token', hash); token = sessionStorage.getItem('fleet-token') } catch { token = hash }
+  if (hash) history.replaceState(null, '', location.pathname)
+  // Without a token the page still tries: one of the person's own tailnet
+  // devices is let in by its Tailscale identity. A 401 shows the gate.
+  start()
+  async function start() {
+    const probe = await fetch('/api/status', { headers: token ? { 'x-fleet-token': token } : {} }).catch(() => null)
+    if (!probe || probe.status === 401) { document.getElementById('gate').hidden = false; return }
+    document.getElementById('app').hidden = false
+    main()
+  }
+  function main() {
+
+  const $ = id => document.getElementById(id)
+  const api = async (path, init = {}) => {
+    const res = await fetch(path, { ...init, headers: { 'content-type': 'application/json', ...(token ? { 'x-fleet-token': token } : {}), ...(init.headers || {}) } })
+    const body = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(body.error || res.status)
+    return body
+  }
+  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+  const time = ts => new Date(ts).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  const STATE = { idle: '대기', busy: '작업 중', waiting_on_user: '사용자 대기', offline: '오프라인' }
+
+  let sessions = []
+  let channel = '#all'
+  let channels = ['#all']
+  let messages = []
+
+  function renderSessions() {
+    $('n-sessions').textContent = `${sessions.filter(s => s.state !== 'offline').length} / ${sessions.length}`
+    $('sessions').innerHTML = sessions.length === 0 ? '<div class="empty">fleet mod를 켠 세션이 아직 없습니다.</div>' : sessions.map(s => `
+      <div class="card ${channel === '@' + s.id ? 'sel' : ''}" data-id="${esc(s.id)}">
+        <div class="top"><span class="name">${esc(s.name)}</span><span class="st-${esc(s.state)}">${STATE[s.state] || esc(s.state)}</span></div>
+        <div class="meta">${s.via === 'fleet' ? 'fleet' : 'native'} · ${esc(s.repo || '-')}${s.branch ? '@' + esc(s.branch) : ''} · ${esc(s.id.slice(0, 8))} · ${time(s.lastSeen)}</div>
+        ${s.summary ? `<div class="sum">${esc(s.summary)}</div>` : ''}
+      </div>`).join('')
+  }
+  function renderTabs() {
+    const dm = channel.startsWith('@') ? [channel] : []
+    $('tabs').innerHTML = [...new Set([...channels, ...dm])].map(c => {
+      const s = c.startsWith('@') ? sessions.find(x => '@' + x.id === c) : null
+      return `<button class="tab ${c === channel ? 'on' : ''}" data-ch="${esc(c)}">${esc(s ? 'DM ' + s.name : c)}</button>`
+    }).join('')
+  }
+  function msgHtml(m) {
+    return `<div class="msg"><div class="who k-${esc(m.from.kind)}"><b>${esc(m.from.name)}</b> · ${esc(m.from.kind)} · ${time(m.ts)}</div><div class="body">${esc(m.text)}</div></div>`
+  }
+  function renderMsgs() {
+    const el = $('msgs')
+    el.innerHTML = messages.length === 0 ? '<div class="empty">메시지가 없습니다.</div>' : messages.map(msgHtml).join('')
+    el.scrollTop = el.scrollHeight
+  }
+  async function loadChannel(c) {
+    channel = c
+    renderTabs(); renderSessions()
+    messages = await api(`/api/messages?channel=${encodeURIComponent(c)}&limit=200`)
+    renderMsgs()
+  }
+  async function loadOrch() {
+    const list = await api('/api/messages?channel=%23orchestrator&limit=200')
+    const el = $('orch')
+    el.innerHTML = list.length === 0 ? '<div class="empty">orchestrator와의 대화가 여기에 쌓입니다.</div>' : list.map(msgHtml).join('')
+    el.scrollTop = el.scrollHeight
+  }
+  async function loadStatus() {
+    const st = await api('/api/status')
+    const pill = (el, label, s) => { el.textContent = `${label}: ${s.state}`; el.className = 'pill ' + (/(running|idle|connected)/.test(s.state) ? 'ok' : /(off)/.test(s.state) ? '' : 'warn'); el.title = s.detail || '' }
+    pill($('p-orch'), 'orchestrator', st.orchestrator); pill($('p-slack'), 'slack', st.slack)
+    $('orch-detail').textContent = st.orchestrator.detail || ''
+  }
+  async function loadGrant() {
+    const g = await api('/api/grant')
+    const el = $('grant'), p = $('p-grant')
+    const live = g.state === 'valid'
+    p.textContent = live ? `grant ~ ${g.grant.expires_at.slice(5, 16).replace('T', ' ')}` : `grant: ${g.state}`
+    p.className = 'pill ' + (live ? 'ok' : g.state === 'foreign' ? 'warn' : '')
+    el.innerHTML = `
+      <div><b>grant</b> <small>${esc(g.path)}</small></div>
+      ${g.grant ? `<small>${esc(g.state)} · orchestrator <code>${esc(g.grant.orchestrator)}</code> · ~ ${esc(g.grant.expires_at)}<br>${esc(g.grant.goal || '')}</small>` : `<small>${esc(g.state)}${g.reason ? ' · ' + esc(g.reason) : ''}</small>`}
+      <div class="row">
+        <input id="g-hours" type="number" min="0.25" max="24" step="0.25" value="8" style="width:72px" aria-label="시간"> 시간
+        <input id="g-goal" placeholder="목표 (예: 세션들 막힌 것 풀고 기존 작업 이어가기)" style="flex:1;min-width:160px">
+      </div>
+      <div class="row">
+        <button class="primary" id="g-issue">발급</button>
+        ${live || g.state === 'foreign' ? '<button class="ghost" id="g-revoke">철회</button>' : ''}
+      </div>`
+    $('g-issue').onclick = async () => {
+      const goal = $('g-goal').value.trim()
+      if (!goal) { $('g-goal').focus(); return }
+      if (!confirm(`fleet-hub에 ${$('g-hours').value}시간 grant를 발급합니다. 기존 grant 파일은 .prev로 보관됩니다.`)) return
+      await api('/api/grant', { method: 'POST', body: JSON.stringify({ hours: Number($('g-hours').value), goal }) })
+      loadGrant()
+    }
+    const rv = $('g-revoke')
+    if (rv) rv.onclick = async () => { if (confirm('grant를 지금 철회합니다.')) { await api('/api/grant', { method: 'DELETE' }); loadGrant() } }
+    const reqs = (await api('/api/grant/requests')).filter(r => r.status === 'pending')
+    $('reqs').innerHTML = reqs.map(r => `<div class="req"><b>grant 요청 ${esc(r.id)}</b> · ${r.hours}시간<br>${esc(r.goal)}<br><small>${esc(r.reason)}</small>
+      <div class="row" style="margin-top:6px"><button class="primary" data-req="${esc(r.id)}" data-act="approve">승인</button> <button class="ghost" data-req="${esc(r.id)}" data-act="deny">거절</button></div></div>`).join('')
+  }
+  async function loadAll() {
+    sessions = await api('/api/sessions')
+    channels = [...new Set(['#all', ...(await api('/api/channels')).map(c => c.channel).filter(c => c !== '#orchestrator')])]
+    await Promise.all([loadChannel(channel), loadOrch(), loadStatus(), loadGrant()])
+  }
+
+  $('sessions').onclick = e => { const c = e.target.closest('.card'); if (c) loadChannel('@' + c.dataset.id) }
+  $('tabs').onclick = e => { const t = e.target.closest('.tab'); if (t) loadChannel(t.dataset.ch) }
+  $('reqs').onclick = async e => {
+    const b = e.target.closest('button[data-req]'); if (!b) return
+    await api(`/api/grant/requests/${b.dataset.req}/${b.dataset.act}`, { method: 'POST' }); loadGrant()
+  }
+  const submitOnEnter = (ta, form) => ta.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) form.requestSubmit() })
+  submitOnEnter($('t-post'), $('f-post')); submitOnEnter($('t-orch'), $('f-orch'))
+  $('f-post').onsubmit = async e => {
+    e.preventDefault(); const text = $('t-post').value.trim(); if (!text) return
+    await api('/api/human/post', { method: 'POST', body: JSON.stringify({ channel, text }) }); $('t-post').value = ''
+  }
+  $('f-orch').onsubmit = async e => {
+    e.preventDefault(); const text = $('t-orch').value.trim(); if (!text) return
+    try { await api('/api/orchestrator', { method: 'POST', body: JSON.stringify({ text }) }); $('t-orch').value = '' } catch (err) { alert(err.message) }
+  }
+
+  function connect() {
+    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?token=${encodeURIComponent(token || '')}`)
+    ws.onopen = () => { $('p-conn').textContent = '연결됨'; $('p-conn').className = 'pill ok'; loadAll().catch(() => {}) }
+    ws.onclose = () => { $('p-conn').textContent = '끊김 · 재연결 중'; $('p-conn').className = 'pill bad'; setTimeout(connect, 3000) }
+    ws.onmessage = ev => {
+      const event = JSON.parse(ev.data)
+      if (event.type === 'session') {
+        const i = sessions.findIndex(s => s.id === event.session.id)
+        if (i >= 0) sessions[i] = event.session; else sessions.unshift(event.session)
+        sessions.sort((a, b) => b.lastSeen - a.lastSeen); renderSessions(); renderTabs()
+      } else if (event.type === 'message') {
+        const m = event.msg
+        if (m.channel === '#orchestrator') { loadOrch(); loadStatus() }
+        if (m.channel === channel || (channel.startsWith('@') && m.from.id === channel.slice(1) && m.channel.startsWith('@'))) { messages.push(m); renderMsgs() }
+        if (m.channel.startsWith('#') && !channels.includes(m.channel) && m.channel !== '#orchestrator') { channels.push(m.channel); renderTabs() }
+      } else if (event.type === 'grant') loadGrant()
+    }
+  }
+  connect()
+  setInterval(() => loadStatus().catch(() => {}), 15000)
+  }
+})()
+</script>
+</body>
+</html>

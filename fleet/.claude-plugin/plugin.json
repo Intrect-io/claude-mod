@@ -1,0 +1,18 @@
+{
+  "name": "fleet",
+  "version": "0.1.0",
+  "description": "Connects this session to fleet-hub: IRC-style channels between sessions (#all, #<repo>, DMs), state telemetry for the dashboard, and orchestrator messages delivered as prompts with a §6.5 grant verdict.",
+  "author": {
+    "name": "unohee"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "socketPath": {
+      "type": "string",
+      "title": "Hub socket",
+      "description": "fleet-hub's Unix socket; empty means ~/.claude/fleet/hub.sock",
+      "default": ""
+    }
+  }
+}
