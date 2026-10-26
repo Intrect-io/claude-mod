@@ -1,9 +1,9 @@
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
 type On = Parameters<TestBody>[1]
 
-import { autoGoalCandidate, parseVerdict, transcriptTail } from './register'
+import { autoGoalCandidate, parseSetArgs, parseVerdict, transcriptTail } from './register'
 
 const TOOL_ID = 'mcp__goal-mode__set_goal'
 const USAGE = {
@@ -26,12 +26,13 @@ const TRANSCRIPT = [
 
 // Stands in for the engine beneath the plugin; `verdicts` are the evaluator's
 // replies in order, `calls` counts evaluator requests.
-function engine(on: On, verdicts: Array<string | 'fail' | 'throw'>, transcript: string | 'too-big' = TRANSCRIPT) {
-  const calls = { complete: 0, fork: 0 }
+function engine(on: On, verdicts: Array<string | 'fail' | 'throw'>, transcript: string | 'too-big' = TRANSCRIPT, clock = true) {
+  const calls = { complete: 0, fork: 0, lastPrompt: '' }
   on('tool.register', (_, e) => ({ value: { tool: `mcp__goal-mode__${e.name}` } }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('clock.now', () => ({ value: 1_000 }))
+  // A test that drives timers brings mock.clock, which answers clock.now itself.
+  if (clock) on('clock.now', () => ({ value: 1_000 }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   on('prompt.compose', () => ({ sections: [] }))
@@ -47,8 +48,9 @@ function engine(on: On, verdicts: Array<string | 'fail' | 'throw'>, transcript: 
       ? { value: { isAnswered: false as const, reason: 'api-error' as const, status: 500, error: 'server_error' as const, usage: USAGE } }
       : { value: { isAnswered: true as const, text: next, usage: USAGE } }
   }
-  on('model.complete', () => {
+  on('model.complete', (_, e) => {
     calls.complete++
+    calls.lastPrompt = String(e.prompt)
     return reply()
   })
   on('model.fork', () => {
@@ -256,7 +258,71 @@ describe('Stop evaluator', () => {
   })
 })
 
+describe('/goal-mode set', () => {
+  const run = ($: Parameters<TestBody>[0], args: string) =>
+    $.command.run({ command: 'goal-mode', args, origin: { kind: 'composer' }, presentation: PRESENTATION })
+
+  test('the person sets the goal; the evaluator then judges it and work starts', async ($, on) => {
+    const calls = engine(on, ['{"met": false, "reason": "no test output yet"}'], TRANSCRIPT, false)
+    const clock = mock.clock(on, { now: 1_000 })
+    const prompts: string[] = []
+    on('prompt.submit', (_, e) => {
+      prompts.push(e.text)
+      return { text: e.text }
+    })
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+    const set = await run($, 'set `bun test` exits 0 --check bun test')
+    expect(set.text).toContain('Goal set: `bun test` exits 0')
+    expect(set.text).toContain('Check: bun test')
+    expect((await run($, '')).text).toContain('(set by you)')
+    // The kickoff is submitted once the command has returned.
+    await clock.advance(100)
+    expect(prompts[0]).toContain('The person set this session\'s goal')
+
+    expect((await $.classic.Stop(STOP)).block).toContain('no test output yet')
+    expect(calls.complete).toBe(1)
+  })
+
+  test('Claude refines a direction the person set, once; the evaluator sees their words', async ($, on) => {
+    const calls = engine(on, ['{"met": false, "reason": "not yet"}'])
+    on('prompt.submit', (_, e) => ({ text: e.text }))
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    await run($, 'set 새로 추진할 목표를 정해봐')
+
+    const refined = await $.tool.call({ tool: TOOL_ID, condition: 'PR #12 merged with CI green', check: 'gh pr view 12' })
+    expect(refined.deny).toBeUndefined()
+    expect(String(refined.result)).toContain('is now: PR #12 merged with CI green')
+    const status = (await run($, '')).text
+    expect(status).toContain('(yours, refined by Claude): PR #12 merged with CI green')
+    expect(status).toContain('Your words: 새로 추진할 목표를 정해봐')
+    expect((await $.tool.call({ tool: TOOL_ID, condition: 'something easier' })).deny).toContain('already refined once')
+
+    await $.classic.Stop(STOP)
+    expect(calls.lastPrompt).toContain('The person asked for: 새로 추진할 목표를 정해봐')
+  })
+
+  test('replaces a goal, refuses an empty one and plan mode', async ($, on) => {
+    engine(on, [])
+    on('prompt.submit', (_, e) => ({ text: e.text }))
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: TOOL_ID, condition: 'old goal' })
+
+    expect((await run($, 'set new goal')).text).toContain('Goal replaced: new goal\n(was: old goal)')
+    expect((await run($, 'set')).text).toContain('Usage: /goal-mode set')
+    await $.classic.UserPromptSubmit({ prompt: 'plan it', permission_mode: 'plan' })
+    expect((await run($, 'set another')).text).toContain('Plan mode is active')
+  })
+})
+
 describe('helpers', () => {
+  test('parseSetArgs splits the condition from --check', () => {
+    expect(parseSetArgs(' tests pass --check  pytest -q | tail -1 ')).toEqual({ condition: 'tests pass', check: 'pytest -q | tail -1' })
+    expect(parseSetArgs('grep a | wc -l prints 0')).toEqual({ condition: 'grep a | wc -l prints 0' })
+    expect(parseSetArgs('x --check')).toEqual({ condition: 'x', check: undefined })
+    expect(parseSetArgs('use --checkout flag')).toEqual({ condition: 'use --checkout flag' })
+  })
+
   test('parseVerdict reads the JSON line and rejects anything else', async () => {
     expect(parseVerdict('{"met": true, "reason": "ok"}')).toEqual({ kind: 'met', reason: 'ok' })
     expect(parseVerdict('sure! {"met": false, "reason": "no"}').kind).toBe('unmet')

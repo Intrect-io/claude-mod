@@ -175,7 +175,7 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: COMMAND,
-      description: 'Show or clear the goal; run the autonomous loop: /goal-mode [status|clear|loop on|off|resume|status]',
+      description: 'Set, show or clear the goal; run the autonomous loop: /goal-mode [set <condition> [--check <command>] | status | clear | loop on|off|resume|status]',
     })
     await showStatus($)
 
@@ -235,8 +235,12 @@ export const register: Register = (on, options) => {
         : undefined
     const meta = await read($, metaAtom)
     const current = await read($, goalAtom)
+    // The person's /goal-mode set may name a direction ("pick our next goal")
+    // rather than an end state: Claude turns it into one, once.
+    const refining = current !== null && current.source === 'user' && current.intent === undefined
 
-    if (meta.nativeSeen) {
+    // A goal the person set here is refined here, native tool or not.
+    if (meta.nativeSeen && !refining) {
       return {
         deny: `${NATIVE_TOOL} is available in this session: use it with ask_user false instead of ${TOOL_ID}.`,
       }
@@ -249,9 +253,12 @@ export const register: Register = (on, options) => {
         deny: 'Plan mode is active, so a goal cannot be set yet. Keep planning; set the goal after the plan is approved.',
       }
     }
-    if (current !== null) {
+    if (current !== null && !refining) {
       return {
-        deny: `A goal is already set: "${current.condition}". Only the user can clear it (/${COMMAND} clear).`,
+        deny:
+          current.source === 'user' && current.intent !== undefined
+            ? `The person's goal was already refined once into "${current.condition}". Only the user can change it now (/${COMMAND} set or clear).`
+            : `A goal is already set: "${current.condition}". Only the user can clear it (/${COMMAND} clear).`,
       }
     }
     if (condition === '') {
@@ -260,6 +267,17 @@ export const register: Register = (on, options) => {
     if (condition.length > MAX_CONDITION_CHARS) {
       return {
         deny: `condition is limited to ${MAX_CONDITION_CHARS} characters; state one end state and its check.`,
+      }
+    }
+
+    if (refining) {
+      const intent = current.condition
+      await update($, goalAtom, () => ({ ...newGoal(condition, check, 'user', Date.now()), intent }))
+      $.ui.toast(`Goal refined: ${clip(condition, 80)}`)
+      await showStatus($)
+
+      return {
+        result: `The person's goal "${clip(intent, 120)}" is now: ${condition}${check ? ` (check: ${check})` : ''}. This was the one refinement; the evaluator checks it against their words too. Tell the user the refined goal in one line.`,
       }
     }
 
@@ -407,6 +425,10 @@ export const register: Register = (on, options) => {
       return { text: await loopCommand($, args[1] ?? 'status') }
     }
 
+    if (args[0] === 'set') {
+      return { text: await setCommand($, e.args.trim().slice('set'.length)) }
+    }
+
     const goal = await read($, goalAtom)
     if (args[0] === 'clear') {
       await update($, goalAtom, () => null)
@@ -420,7 +442,8 @@ export const register: Register = (on, options) => {
 
     return {
       text: [
-        `Goal ${goal.status}: ${goal.condition}`,
+        `Goal ${goal.status}${goal.source === 'user' ? (goal.intent !== undefined ? ' (yours, refined by Claude)' : ' (set by you)') : ''}: ${goal.condition}`,
+        goal.intent !== undefined ? `Your words: ${goal.intent}` : undefined,
         goal.check ? `Check: ${goal.check}` : undefined,
         `Checks: ${goal.checks} (this turn ${goal.unmetThisTurn})`,
         goal.lastReason ? `Last check: ${goal.lastReason}` : 'Last check: not yet evaluated',
@@ -431,6 +454,46 @@ export const register: Register = (on, options) => {
         .join('\n'),
     }
   })
+}
+
+// `<condition> [--check <command>]`, the text after `/goal-mode set`.
+export function parseSetArgs(text: string): { condition: string; check?: string } {
+  const at = text.search(/(^|\s)--check(\s|$)/)
+  if (at < 0) return { condition: text.trim() }
+  const condition = text.slice(0, at).trim()
+  const check = text.slice(at).replace(/^\s*--check/, '').trim()
+  return { condition, check: check === '' ? undefined : check }
+}
+
+// The person sets the goal themself: the same evaluator, no model judgement
+// on whether to set it, and the work starts at once.
+async function setCommand($: EngineInterface, text: string): Promise<string> {
+  const { condition, check } = parseSetArgs(text)
+  const meta = await read($, metaAtom)
+  if (condition === '') return `Usage: /${COMMAND} set <one measurable end state> [--check <command that proves it>]`
+  if (condition.length > MAX_CONDITION_CHARS) return `The condition is limited to ${MAX_CONDITION_CHARS} characters; state one end state.`
+  if (meta.loop !== undefined) return `An autonomous loop is running and sets goals from its queue: /${COMMAND} loop off first.`
+  if (meta.lastMode === 'plan') return 'Plan mode is active: every stop would be blocked while nothing can be done. Set the goal after the plan is approved.'
+  const previous = await read($, goalAtom)
+  await update($, goalAtom, () => newGoal(condition, check, 'user', Date.now()))
+  await showStatus($)
+  // A prompt from a command.run hook would wait on this very command: a timer
+  // submits it once the hook has returned.
+  const kickoff =
+    `[goal-mode] The person set this session's goal with /${COMMAND} set: "${condition}"${check ? ` (check: ${check})` : ''}. ` +
+    'If it names a direction rather than one measurable end state (e.g. "pick our next goal"), first turn it into one, asking the person if the choice is theirs, and call mcp__goal-mode__set_goal once to refine it; ' +
+    'otherwise work toward it now. Every stop is checked by an independent evaluator until it is met, so before stopping re-run the check and leave its real output in the transcript.'
+  $.clock.after(50, () => {
+    $.prompt.submit({ text: kickoff }).catch(() => $.ui.toast('goal-mode: the goal is set, but the kickoff prompt was not submitted; send any message to start.'))
+  })
+
+  return [
+    previous === null ? `Goal set: ${condition}` : `Goal replaced: ${condition}\n(was: ${previous.condition})`,
+    check ? `Check: ${check}` : undefined,
+    `Claude starts on it now; /${COMMAND} clear to stop.`,
+  ]
+    .filter(line => line !== undefined)
+    .join('\n')
 }
 
 // ---------------------------------------------------------------- loop mode
@@ -461,8 +524,8 @@ async function loopCommand($: EngineInterface, action: string): Promise<string> 
     return 'Another session runs this loop and was active in the last 10 minutes; stop it there first.'
   }
   const goal = await read($, goalAtom)
-  if (goal !== null && goal.source === 'model') {
-    return `A goal Claude set is active ("${clip(goal.condition, 60)}"): /${COMMAND} clear it before starting the loop.`
+  if (goal !== null && goal.source !== 'queue') {
+    return `A session goal is active ("${clip(goal.condition, 60)}"): /${COMMAND} clear it before starting the loop.`
   }
 
   await ensureExcludes($, root)
@@ -901,6 +964,9 @@ async function notify($: EngineInterface, text: string): Promise<void> {
 async function evaluate($: EngineInterface, goal: Goal, e: StopFields, evidence?: string): Promise<Verdict> {
   const ask = [
     `Goal: ${goal.condition}`,
+    // A refined goal still answers to the person's words: a refinement that
+    // dodged them is not met.
+    goal.intent !== undefined ? `The person asked for: ${goal.intent} (the goal above is Claude's measurable form of it; judge the goal, and call it unmet if it plainly fails that request).` : undefined,
     goal.check ? `Check: ${goal.check}` : undefined,
     evidence ? `\nVerified by the harness (trustworthy):\n${evidence}` : undefined,
     '',

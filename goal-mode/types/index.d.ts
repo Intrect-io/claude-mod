@@ -3,9 +3,10 @@ export type GoalStatus = 'active' | 'paused'
 export type Goal = {
   condition: string
   check?: string
-  // 'model': set by the model with set_goal; 'queue': taken from the loop's
-  // goals.md, whose check the loop runs itself.
-  source: 'model' | 'queue'
+  // 'model': set by the model with set_goal; 'user': set by the person with
+  // /goal-mode set; 'queue': taken from the loop's goals.md, whose check the
+  // loop runs itself.
+  source: 'model' | 'user' | 'queue'
   setAt: number
   checks: number
   unmetThisTurn: number
@@ -15,6 +16,9 @@ export type Goal = {
   status: GoalStatus
   pausedBecause?: string
   deferPending?: string
+  // A goal the person set with /goal-mode set that Claude then turned into a
+  // measurable end state (once): the person's own words, kept beside it.
+  intent?: string
 }
 
 export type LoopView = {

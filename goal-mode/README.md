@@ -5,7 +5,15 @@ Lets Claude set its own session goal, then keeps it working until an independent
 - **Setter**: the model calls `mcp__goal-mode__set_goal` with one measurable end state (and optionally its check) when the user asked for a verifiable, multi-turn outcome. No approval prompt; the model reports the goal in one line. Refused in plan mode, when a goal is already set, or when Claude Code's native `ProposeGoal` tool is available (the model is told to use that instead).
 - **Evaluator**: at every main-thread Stop, `claude-sonnet-5-5` judges the goal from the final message plus the transcript tail (real tool output only counts). Unmet blocks the stop with the reason. A transcript over the 4 MiB read cap is judged by a fork of the session instead.
 - **Pauses** (stop is allowed, a typed message resumes): evaluator failure, two unreadable verdicts, 5 unmet checks in one turn, or 30 checks in total.
-- **User command**: `/goal-mode` shows the goal; `/goal-mode clear` removes it. The model cannot clear its own goal.
+- **User commands**:
+  - `/goal-mode set <condition> [--check <command>]` sets the goal yourself. No nudge or model judgement is involved, and an existing goal is replaced. Claude starts on it at once (a kickoff prompt) and the same evaluator judges every stop. It is refused in plan mode and while a loop runs.
+  - The text may name a direction instead of an end state, e.g. `/goal-mode set 새로 추진할 목표를 정해봐`. Claude then turns it into one measurable end state (asking you when the choice is yours) and refines the goal with `set_goal`, **once**.
+    - Your words stay beside the refined goal (`Your words:` in `/goal-mode`).
+    - The evaluator judges the refined goal against those words too, so a refinement that dodges them is not met.
+    - A second change is refused.
+  - `/goal-mode` shows the goal.
+  - `/goal-mode clear` removes it.
+  - The model cannot clear or replace a goal.
 
 Known limitation: if the native `/goal` is also set by hand, both evaluators run.
 
