@@ -55,7 +55,7 @@ export function markItem(text: string, condition: string, mark: 'x' | '!', note:
   const raw = lines[target.line] ?? ''
   const withoutNote = raw.replace(NOTE, '')
   const marked = withoutNote.replace(/\[[ xX!]\]/, `[${mark}]`)
-  lines[target.line] = `${marked} <!-- ${note.replace(/-->/g, '- ->').replace(/\n/g, ' ')} -->`
+  lines[target.line] = `${marked} <!-- ${note.replace(/--!?>/g, '- ->').replace(/\n/g, ' ')} -->`
 
   return lines.join('\n')
 }
