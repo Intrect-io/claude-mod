@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { AgentSpawnInput, HookStream, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import type { TierState } from '../types'
-import { decide, INITIAL, isTier } from './register'
+import { decide, INITIAL, isTier, tierModels } from './register'
 
 const OPTS = { downgradeAfterTurns: 2, maxTokensForHaiku: 150000, maxTokensForDowngrade: 200000 }
 const at = (over: Partial<TierState>): TierState => ({ ...INITIAL, ...over })
@@ -85,6 +85,12 @@ describe('decide', () => {
     expect(decide(at({ tier: 'haiku', source: 'pinned' }), 'opus', OPTS).tier).toBe('haiku')
   })
 
+  test('tiers map to full ids, overridable per tier', () => {
+    expect(tierModels(undefined).sonnet).toBe('claude-sonnet-5-5')
+    expect(tierModels('sonnet=claude-sonnet-5, bogus=x').sonnet).toBe('claude-sonnet-5')
+    expect(tierModels('sonnet=claude-sonnet-5').haiku).toBe('claude-haiku-5-5')
+  })
+
   test('isTier reads resolved ids', () => {
     expect(isTier('claude-opus-5-5[1m]', 'opus')).toBe(true)
     expect(isTier('claude-haiku-5-5', 'sonnet')).toBe(false)
@@ -115,7 +121,7 @@ describe('the plugin', () => {
     await $.prompt.submit({ text: 'Redesign the cache layer across these services', wait: false, origin: { kind: 'composer' } })
     await drain($.turn.step({ ...STEP, model: 'claude-sonnet-5-5' }))
 
-    expect(sent).toEqual(['opus'])
+    expect(sent).toEqual(['claude-opus-5-5'])
     expect(context?.some(c => c.includes('runs on opus'))).toBe(true)
   })
 
@@ -139,7 +145,7 @@ describe('the plugin', () => {
 
     expect(r.deny).toBeUndefined()
     expect(r.result).toBe('Switched to haiku from the next request.')
-    expect(sent).toEqual(['claude-opus-5-5', 'haiku'])
+    expect(sent).toEqual(['claude-opus-5-5', 'claude-haiku-5-5'])
   })
 
   test('loaded into a large running session, a trivial prompt keeps opus', async ($, on) => {
@@ -195,7 +201,7 @@ describe('the plugin', () => {
 
     await $.agent.spawn(SPAWN)
 
-    expect(model).toBe('haiku')
+    expect(model).toBe('claude-haiku-5-5')
   })
 
   test('a typed subagent keeps its own model', async ($, on) => {
@@ -230,13 +236,13 @@ describe('the plugin', () => {
     const sent: string[] = []
     on('turn.step', async function* (_, e) {
       sent.push(e.model)
-      if (e.model === 'haiku') throw new Error('model not allowed')
+      if (e.model === 'claude-haiku-5-5') throw new Error('model not allowed')
       return answered(e)
     })
 
     const r = await drain($.turn.step(STEP))
 
-    expect(sent).toEqual(['haiku', 'claude-opus-5-5'])
+    expect(sent).toEqual(['claude-haiku-5-5', 'claude-opus-5-5'])
     expect(r.usage?.model).toBe('claude-opus-5-5')
   })
 })

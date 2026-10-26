@@ -17,6 +17,27 @@ const LABEL_TIER: Record<(typeof LABELS)[number], Tier> = {
 const ROUTABLE_AGENTS = new Set(['general-purpose', 'claude'])
 const CLASSIFY_CHARS = 4000
 
+// Full model ids per tier. A request built here goes to the API as written:
+// unlike /model or --model, an alias ('sonnet') is not resolved, and a router
+// in ANTHROPIC_BASE_URL answers it 404, which the engine then papers over with
+// fallbackModel ("Switched to Opus 5 because sonnet is not available").
+export const DEFAULT_TIER_MODELS: Record<Tier, string> = {
+  opus: 'claude-opus-5-5',
+  sonnet: 'claude-sonnet-5-5',
+  haiku: 'claude-haiku-5-5',
+}
+
+/** `opus=claude-opus-5-5,haiku=…` over the defaults; bad entries are ignored. */
+export function tierModels(spec: unknown): Record<Tier, string> {
+  const models = { ...DEFAULT_TIER_MODELS }
+  if (typeof spec !== 'string') return models
+  for (const pair of spec.split(',')) {
+    const [tier, id] = pair.split('=').map(part => part?.trim() ?? '')
+    if ((tier === 'opus' || tier === 'sonnet' || tier === 'haiku') && id) models[tier] = id
+  }
+  return models
+}
+
 export const INITIAL: TierState = {
   tier: 'opus',
   source: 'auto',
@@ -108,6 +129,7 @@ export const register: Register = (on, options) => {
     maxTokensForDowngrade: Number(options.maxTokensForDowngrade ?? 200000),
   }
   const classifierModel = String(options.classifierModel ?? 'haiku')
+  const models = tierModels(options.tierModels)
   const classifierTimeoutMs = Number(options.classifierTimeoutMs ?? 3000)
 
   on('session.start', async ($, e, next) => {
@@ -201,7 +223,7 @@ export const register: Register = (on, options) => {
     if (!enabled || e.agentId !== undefined) return yield* next(e)
     const s = await read($, state)
     const switching = !isTier(e.model, s.tier)
-    const stream = next(switching ? { ...e, model: s.tier } : e)
+    const stream = next(switching ? { ...e, model: models[s.tier] } : e)
 
     let yielded = false
     let result
@@ -218,7 +240,7 @@ export const register: Register = (on, options) => {
     } catch (err) {
       // Refused before anything streamed: retry on the session's own model.
       if (!switching || yielded) throw err
-      $.ui.toast(`model-tier: ${s.tier} was refused, staying on ${e.model}`)
+      $.ui.toast(`model-tier: ${models[s.tier]} was refused, staying on ${e.model}`)
       result = yield* next(e)
     }
 
@@ -233,6 +255,6 @@ export const register: Register = (on, options) => {
   on('agent.spawn', async ($, e, next) => {
     if (!enabled || e.fork || e.model !== undefined || !ROUTABLE_AGENTS.has(e.subagentType)) return next(e)
     const tier = await classify($, e.prompt, classifierModel, classifierTimeoutMs).catch(() => undefined)
-    return next(tier ? { ...e, model: tier } : e)
+    return next(tier ? { ...e, model: models[tier] } : e)
   }).catch(($, e, next) => next(e))
 }

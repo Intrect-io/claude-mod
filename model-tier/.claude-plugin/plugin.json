@@ -1,6 +1,6 @@
 {
   "name": "model-tier",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Routes each main-loop turn to opus, sonnet or haiku by task complexity, with a set_tier tool the model can call to correct itself",
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -39,6 +39,12 @@
       "title": "Classifier timeout (ms)",
       "description": "Keep the current tier when the classifier takes longer than this",
       "default": 3000
+    },
+    "tierModels": {
+      "type": "string",
+      "title": "Model id per tier",
+      "description": "Full model ids to send, e.g. opus=claude-opus-5-5,sonnet=claude-sonnet-5-5,haiku=claude-haiku-5-5 (aliases are not resolved on this path)",
+      "default": "opus=claude-opus-5-5,sonnet=claude-sonnet-5-5,haiku=claude-haiku-5-5"
     }
   }
 }
