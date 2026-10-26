@@ -23,9 +23,10 @@ type Entry = {
   waitingFor?: unknown
   kind?: unknown
   entrypoint?: unknown
+  procStart?: unknown
 }
 
-export type NativeSession = Pick<SessionInfo, 'id' | 'name' | 'cwd' | 'repo' | 'state' | 'summary'> & { pid: number }
+export type NativeSession = Pick<SessionInfo, 'id' | 'name' | 'cwd' | 'repo' | 'state' | 'summary'> & { pid: number; procStart?: string }
 
 export function nativeState(status: unknown): SessionState {
   if (status === 'busy') return 'busy'
@@ -47,6 +48,7 @@ export function parseEntry(text: string): NativeSession | undefined {
   const name = typeof e.name === 'string' && e.name !== '' ? e.name : e.sessionId.slice(0, 8)
   return {
     pid: e.pid,
+    procStart: typeof e.procStart === 'string' ? e.procStart : undefined,
     id: e.sessionId,
     name,
     cwd: e.cwd,
@@ -56,17 +58,23 @@ export function parseEntry(text: string): NativeSession | undefined {
   }
 }
 
-export function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    // EPERM: alive, owned by someone else (not ours to orchestrate, but alive).
-    return (error as { code?: string }).code === 'EPERM'
-  }
+// `ps -o lstart=` of a pid in the registry's own spelling (C locale, UTC), or
+// undefined when no such process runs.
+export function processStart(pid: number): string | undefined {
+  const ran = Bun.spawnSync(['ps', '-o', 'lstart=', '-p', String(pid)], { env: { LC_ALL: 'C', TZ: 'UTC', PATH: '/bin:/usr/bin' } })
+  const text = ran.stdout.toString().trim().replace(/\s+/g, ' ')
+  return ran.exitCode === 0 && text !== '' ? text : undefined
 }
 
-export async function readRegistry(dir = join(homedir(), '.claude', 'sessions'), alive = isAlive): Promise<NativeSession[]> {
+// Alive means this very process: a pid the OS handed to another program since
+// (measured: a dead session's 481 became distnoted) does not count.
+export function isAlive(pid: number, procStart?: string, start: (pid: number) => string | undefined = processStart): boolean {
+  const now = start(pid)
+  if (now === undefined) return false
+  return procStart === undefined || now === procStart.trim().replace(/\s+/g, ' ')
+}
+
+export async function readRegistry(dir = join(homedir(), '.claude', 'sessions'), alive: (pid: number, procStart?: string) => boolean = isAlive): Promise<NativeSession[]> {
   let files: string[]
   try {
     files = (await readdir(dir)).filter(f => f.endsWith('.json'))
@@ -76,7 +84,7 @@ export async function readRegistry(dir = join(homedir(), '.claude', 'sessions'),
   const out: NativeSession[] = []
   for (const file of files.slice(0, 256)) {
     const entry = parseEntry(await Bun.file(join(dir, file)).text().catch(() => ''))
-    if (entry !== undefined && alive(entry.pid)) out.push(entry)
+    if (entry !== undefined && alive(entry.pid, entry.procStart)) out.push(entry)
   }
   return out
 }

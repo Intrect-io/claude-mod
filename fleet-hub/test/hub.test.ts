@@ -8,7 +8,7 @@ import { buildGrant, grantStatus, GrantRequests, readGrantFile, revoked, writeGr
 import { createApp } from '../src/http'
 import { allowedHosts, isOwnerPeer, routerEnv, tailnetAuth } from '../src/net'
 import { Budget, digestLine, findSession, mandate } from '../src/orchestrator'
-import { parseEntry, readRegistry, syncRegistry } from '../src/registry'
+import { isAlive, parseEntry, readRegistry, syncRegistry } from '../src/registry'
 import { isChannel, parseHello, parsePost, repoChannel } from '../src/schema'
 import { isAllowed, parseAllowed, stripMention } from '../src/slack'
 
@@ -271,7 +271,7 @@ describe('tailnet identity', () => {
 describe('registry', () => {
   const entry = (o: Record<string, unknown>) => JSON.stringify({ pid: 1, sessionId: 'abc', cwd: '/Users/u/dev/STONKS', name: 'replay-engine', status: 'busy', ...o })
   test('entries become native sessions; the orchestrator and SDK children are skipped', () => {
-    expect(parseEntry(entry({}))).toEqual({ pid: 1, id: 'abc', name: 'replay-engine', cwd: '/Users/u/dev/STONKS', repo: 'STONKS', state: 'busy', summary: undefined })
+    expect(parseEntry(entry({}))).toEqual({ pid: 1, procStart: undefined, id: 'abc', name: 'replay-engine', cwd: '/Users/u/dev/STONKS', repo: 'STONKS', state: 'busy', summary: undefined })
     expect(parseEntry(entry({ status: 'waiting', waitingFor: 'input needed' }))?.state).toBe('waiting_on_user')
     expect(parseEntry(entry({ status: 'waiting', waitingFor: 'input needed' }))?.summary).toBe('input needed')
     expect(parseEntry(entry({ name: 'fleet-hub' }))).toBeUndefined()
@@ -298,6 +298,13 @@ describe('registry', () => {
     await Bun.write(join(dir, '2.json'), entry({ pid: 2, sessionId: 'dead' }))
     const live = await readRegistry(dir, pid => pid === 1)
     expect(live.map(s => s.id)).toEqual(['abc'])
+  })
+  test('a reused pid is not the session: the start time must match', () => {
+    const start = (pid: number) => (pid === 481 ? 'Thu Oct 22 06:02:25 2026' : undefined)
+    expect(isAlive(481, 'Mon Oct 19 10:10:24 2026', start)).toBe(false)
+    expect(isAlive(481, 'Thu  Oct 22 06:02:25 2026', start)).toBe(true)
+    expect(isAlive(482, undefined, start)).toBe(false)
+    expect(isAlive(process.pid)).toBe(true)
   })
 })
 
