@@ -12,7 +12,7 @@ Claude Code mods (plugins with a hooks module), served as a local folder marketp
 ## Install
 
 ```sh
-claude plugin marketplace add intrect-io/claude-mod
+claude plugin marketplace add Intrect-io/claude-mod
 claude plugin install goal-mode@claude-mod
 claude plugin install harness@claude-mod
 claude plugin install model-tier@claude-mod
