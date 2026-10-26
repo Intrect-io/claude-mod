@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Effort, Tier, TierState } from '../types'
+import { segment } from './segment'
 
 const PLUGIN = 'model-tier'
 const SET_TIER = `mcp__${PLUGIN}__set_tier`
@@ -137,8 +138,12 @@ const isTierName = (v: unknown): v is Tier => typeof v === 'string' && (TIERS as
 
 const label = (s: TierState) => `${s.tier}${s.effort ? `·${s.effort}` : ''} (${s.source === s.effortSource || s.effort === undefined ? s.source : `${s.source}/${s.effortSource}`})`
 
+// The tier rides the person's status line; nothing about it needs a notice row.
 function show($: EngineInterface, s: TierState, enabled: boolean) {
-  $.ui.status(enabled ? `tier: ${label(s)}` : undefined)
+  const pinned = s.source === 'pinned' || s.effortSource === 'pinned'
+  // A row an earlier version pinned outlives a reload: take it down.
+  $.ui.status(undefined)
+  void segment($, enabled ? `${s.tier}${s.effort ? `·${s.effort}` : ''}${pinned ? ' (pin)' : ''}` : '')
 }
 
 /** Labels `text`, or gives up after `timeoutMs` so a slow classifier never holds the prompt. */

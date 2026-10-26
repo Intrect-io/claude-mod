@@ -1,4 +1,5 @@
 import { atom, read, update } from 'claude-code'
+import { segment } from './segment'
 import type { EngineInterface, ModelForkResult, Register } from 'claude-code'
 
 import type { Goal, GoalMeta, LoopView } from '../types'
@@ -175,7 +176,7 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: COMMAND,
-      description: 'Set, show or clear the goal; run the autonomous loop: /goal-mode [set <condition> [--check <command>] | status | clear | loop on|off|resume|status]',
+      description: 'Goal: /goal-mode auto [hint] (Claude picks one for now) | set <condition> [--check <cmd>] | status | clear | loop on|off|resume|status',
     })
     await showStatus($)
 
@@ -425,6 +426,10 @@ export const register: Register = (on, options) => {
       return { text: await loopCommand($, args[1] ?? 'status') }
     }
 
+    // `auto`, or `set` with nothing after it: Claude picks the goal itself.
+    if (args[0] === 'auto' || (args[0] === 'set' && args.length === 1)) {
+      return { text: await autoCommand($, args[0] === 'auto' ? e.args.trim().slice('auto'.length).trim() : '') }
+    }
     if (args[0] === 'set') {
       return { text: await setCommand($, e.args.trim().slice('set'.length)) }
     }
@@ -467,6 +472,36 @@ export function parseSetArgs(text: string): { condition: string; check?: string 
 
 // The person sets the goal themself: the same evaluator, no model judgement
 // on whether to set it, and the work starts at once.
+// The person hands the choice of goal to Claude: no goal is stored here; the
+// kickoff asks Claude to read the situation, pick one measurable end state and
+// set it with set_goal (an empty slot, so the tool takes it), then start.
+async function autoCommand($: EngineInterface, hint: string): Promise<string> {
+  const meta = await read($, metaAtom)
+  if (meta.loop !== undefined) return `An autonomous loop is running and sets goals from its queue: /${COMMAND} loop off first.`
+  if (meta.lastMode === 'plan') return 'Plan mode is active: approve the plan first; the approval itself prompts Claude to set a goal.'
+  const previous = await read($, goalAtom)
+  if (previous !== null) await update($, goalAtom, () => null)
+  await showStatus($)
+  const how = meta.nativeSeen ? `${NATIVE_TOOL} with ask_user false` : TOOL_ID
+  const kickoff = [
+    `[goal-mode] The person ran /${COMMAND} auto: choose this session's goal yourself, to fit the situation as it stands now.`,
+    hint !== '' ? `Their hint: ${hint}` : undefined,
+    previous !== null ? `The goal before it (now cleared): ${previous.condition}${previous.lastReason ? ` — last check: ${previous.lastReason}` : ''}` : undefined,
+    'Read the situation first: this conversation, any approved plan, the repository state (git status, branch, open PR), and work left unfinished or blocked.',
+    'Pick the one next outcome that matters most and can be finished in this session, stated as one measurable end state with the check that proves it. Stay within the work this session is already about; do not widen scope.',
+    `Decide it yourself, without asking the person to choose; ask only if every candidate needs their call (credentials, payment, an irreversible step). Then call ${how}, tell the person the goal in one line, and start on it.`,
+  ]
+    .filter(line => line !== undefined)
+    .join('\n')
+  $.clock.after(50, () => {
+    $.prompt.submit({ text: kickoff }).catch(() => $.ui.toast('goal-mode: the kickoff prompt was not submitted; send any message to start.'))
+  })
+
+  return previous === null
+    ? 'Claude picks a goal for the current situation now and sets it.'
+    : `Cleared "${clip(previous.condition, 60)}"; Claude picks a new goal for the current situation now.`
+}
+
 async function setCommand($: EngineInterface, text: string): Promise<string> {
   const { condition, check } = parseSetArgs(text)
   const meta = await read($, metaAtom)
@@ -1168,12 +1203,11 @@ async function rememberMode($: EngineInterface, mode: string | undefined): Promi
 async function showStatus($: EngineInterface): Promise<void> {
   const goal = await read($, goalAtom)
   const meta = await read($, metaAtom)
-  const prefix = meta.loop !== undefined ? 'loop · ' : ''
-  $.ui.status(
-    goal === null
-      ? meta.loop !== undefined ? 'loop · idle' : undefined
-      : `${prefix}goal${goal.status === 'paused' ? ' (paused)' : ''}: ${clip(goal.condition, 40)} · checks ${goal.checks}`,
-  )
+  const loop = meta.loop !== undefined ? 'loop·' : ''
+  // A running goal is a piece of the status line; a paused one waits on the
+  // person, so it also takes a notice row.
+  await segment($, goal === null ? (meta.loop !== undefined ? 'loop·idle' : '') : `${loop}goal${goal.status === 'paused' ? '⏸' : ''}·${goal.checks}`)
+  $.ui.status(goal !== null && goal.status === 'paused' ? `goal paused: ${clip(goal.condition, 40)}${goal.pausedBecause ? ` (${clip(goal.pausedBecause, 40)})` : ''}` : undefined)
 }
 
 function isoNow(): string {

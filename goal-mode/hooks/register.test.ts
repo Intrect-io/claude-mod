@@ -302,6 +302,31 @@ describe('/goal-mode set', () => {
     expect(calls.lastPrompt).toContain('The person asked for: 새로 추진할 목표를 정해봐')
   })
 
+  test('auto hands the choice to Claude: the slot is cleared and set_goal takes it', async ($, on) => {
+    engine(on, [], TRANSCRIPT, false)
+    const clock = mock.clock(on, { now: 1_000 })
+    const prompts: string[] = []
+    on('prompt.submit', (_, e) => {
+      prompts.push(e.text)
+      return { text: e.text }
+    })
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: TOOL_ID, condition: 'old goal' })
+
+    const auto = await run($, 'auto 배포 마무리 위주로')
+    expect(auto.text).toContain('Cleared "old goal"')
+    await clock.advance(100)
+    expect(prompts[0]).toContain('choose this session\'s goal yourself')
+    expect(prompts[0]).toContain('Their hint: 배포 마무리 위주로')
+    expect(prompts[0]).toContain('The goal before it (now cleared): old goal')
+    expect(prompts[0]).toContain('without asking the person to choose')
+
+    const set = await $.tool.call({ tool: TOOL_ID, condition: 'deploy verified', check: 'curl /health' })
+    expect(set.deny).toBeUndefined()
+    // A bare `set` is the same as `auto`.
+    expect((await run($, 'set')).text).toContain('Claude picks a new goal')
+  })
+
   test('replaces a goal, refuses an empty one and plan mode', async ($, on) => {
     engine(on, [])
     on('prompt.submit', (_, e) => ({ text: e.text }))
@@ -309,7 +334,7 @@ describe('/goal-mode set', () => {
     await $.tool.call({ tool: TOOL_ID, condition: 'old goal' })
 
     expect((await run($, 'set new goal')).text).toContain('Goal replaced: new goal\n(was: old goal)')
-    expect((await run($, 'set')).text).toContain('Usage: /goal-mode set')
+    expect((await run($, 'set   ')).text).toContain('Claude picks a new goal')
     await $.classic.UserPromptSubmit({ prompt: 'plan it', permission_mode: 'plan' })
     expect((await run($, 'set another')).text).toContain('Plan mode is active')
   })

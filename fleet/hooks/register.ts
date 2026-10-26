@@ -3,6 +3,7 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { FleetToggles, Link } from '../types'
 import type { Msg, SessionInfo, SessionState } from './wire'
+import { segment } from './segment'
 import { backoffMs, formatMessages, formatSessions, HEARTBEAT_MS, isChannel, POLL_MS, promptFor, registryName, repoChannel, summaryOf } from './wire'
 
 // fleet: this session's link to fleet-hub (fleet-hub/ in this repository).
@@ -86,10 +87,17 @@ async function hub<T>($: EngineInterface, path: string, body?: unknown, force = 
   }
 }
 
+// Whether this module saw the hub answer: a hub that never ran here (another
+// machine) is a quiet ○, a lost one is worth a notice row.
+let wasOnline = false
+
 async function showStatus($: EngineInterface) {
   const [link, toggles] = await Promise.all([read($, linkAtom), read($, togglesAtom)])
+  if (link.isOnline) wasOnline = true
+  const lost = toggles.enabled && !link.isOnline && wasOnline
+  await segment($, !toggles.enabled ? '' : link.isOnline ? 'fleet●' : lost ? '!fleet○' : 'fleet○')
   // The engine prefixes the plugin's name.
-  $.ui.status(!toggles.enabled ? 'off' : link.isOnline ? `online as ${link.name ?? '?'}` : 'hub offline')
+  $.ui.status(lost ? 'hub offline (was online)' : undefined)
 }
 
 async function hello($: EngineInterface, force = false): Promise<boolean> {

@@ -1,4 +1,5 @@
 import { atom, read, update } from 'claude-code'
+import { segment } from './segment'
 import type { EngineInterface, Hook } from 'claude-code'
 
 import type { HeartbeatState } from '../types'
@@ -43,6 +44,14 @@ export function holdReason(s: HeartbeatState, now: number, goalLoopActive: boole
 
 export function fireTag(text: string): string | undefined {
   return text.match(/\[(fire [^\]\n]{1,120}|TOO LONG FOR HEARTBEAT|CONFIDENCE HALT)\]/)?.[0]
+}
+
+// The status line piece: short, and gone while the heartbeat is off.
+export function heartbeatPiece(s: HeartbeatState, now: number): string {
+  if (!s.on) return ''
+  const due = Math.max(s.lastUserAt, s.lastFireAt) + s.intervalMs - now
+
+  return `hb ${Math.round(s.intervalMs / 60_000)}m·${due <= 0 ? 'due' : `${Math.ceil(due / 60_000)}m`}`
 }
 
 export function heartbeatStatus(s: HeartbeatState, now: number): string {
@@ -92,7 +101,7 @@ export async function tick($: EngineInterface): Promise<void> {
   const now = await $.clock.now()
   if (!s.on) return
   const hold = holdReason(s, now, await goalLoopActive($, now))
-  $.ui.status(heartbeatStatus(s, now))
+  await segment($, heartbeatPiece(s, now))
   if (hold !== undefined) return
   // A prompt may not start with '/', so the fire asks for the skill by name.
   const text = `${FIRE_PROMPT}\n\n${await facts($, s)}`
@@ -141,11 +150,13 @@ export async function heartbeatCommand($: EngineInterface, args: readonly string
     if (ms === undefined) return `Interval "${interval}" is not readable or under a minute; e.g. 5m, 90s.`
     if (await goalLoopActive($, now)) return "goal-mode's loop is active in this repo; the heartbeat would fight it for prompts. Stop that loop first."
     const s = await update($, heartbeatAtom, v => ({ ...v, on: true, intervalMs: ms, lastUserAt: now, lastFireAt: 0, busy: false, firing: false }))
+    await segment($, heartbeatPiece(s, now))
 
     return `Heartbeat on: a heartbeat-loop fire comes after ${Math.round(ms / 60_000)}m with no user prompt and no running turn. ${heartbeatStatus(s, now)}`
   }
   if (action === 'stop') {
     await update($, heartbeatAtom, v => ({ ...v, on: false }))
+    await segment($, '')
 
     return 'Heartbeat off.'
   }

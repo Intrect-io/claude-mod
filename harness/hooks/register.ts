@@ -13,6 +13,7 @@ import { seedFromTranscript } from './linear-guard'
 import { gcSignature, gcSummary, parseGcReport } from './memory-gc'
 import { lintPrompt, lintStop, lintToolCall } from './report-lint'
 import { issueIds, registerShipGate, shipPrompt, shipStop } from './ship-gate'
+import { segment } from './segment'
 import { DEFAULT_TOGGLES, INITIAL_SHIP } from './state'
 
 const envAtom = atom({ plugin: 'harness', key: 'env' } as const, {}, { shape: 'env-1' })
@@ -42,8 +43,9 @@ const FEATURES: Record<string, keyof Toggles> = {
 
 function showStatus($: EngineInterface, toggles: Toggles) {
   const off = (Object.keys(FEATURES) as Array<keyof typeof FEATURES>).filter(name => !toggles[FEATURES[name] as keyof Toggles])
+  // All rules on is the normal state: no row. A rule switched off is worth one.
   // The engine prefixes the plugin's name.
-  $.ui.status(off.length === 0 ? 'all rules on' : `${off.join(', ')} off`)
+  $.ui.status(off.length === 0 ? undefined : `${off.join(', ')} off`)
 }
 
 export const register: Register = (on, options) => {
