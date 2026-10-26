@@ -191,6 +191,9 @@ export const register: Register = (on, options) => {
       $.clock.every(POLL_MS, () => void poll($).catch(error => $.ui.log(`fleet: poll failed: ${String(error).slice(0, 200)}`, { to: 'debug' }))),
       $.clock.every(HEARTBEAT_MS, () => void read($, togglesAtom).then(t => (t.enabled ? hello($) : undefined)).catch(() => {})),
     ]
+    // Drawn once now whatever the link did before: a row an earlier version
+    // left (failures already counted, so no request redraws it) comes down.
+    await showStatus($)
     // Not awaited: a hub that is down never delays the session's start.
     void read($, togglesAtom)
       .then(async t => void (t.enabled ? await hello($, true) : await showStatus($)))
