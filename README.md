@@ -6,19 +6,20 @@ Claude Code mods (plugins with a hooks module), served as a local folder marketp
 | --- | --- | --- |
 | [goal-mode](goal-mode/) | 0.3.0 | Claude sets its own session goal (nudged on outcome requests and approved plans); an independent evaluator keeps it working at Stop until the goal is met |
 | [harness](harness/) | 0.2.0 | The integrated harness: the user's Claude rules enforced at the tool call, session tooling and workflow automation (formerly house-rules) |
-| [model-tier](model-tier/) | 0.1.0 | Routes each main-loop turn to opus, sonnet or haiku by task complexity, with a `set_tier` tool the model can call to correct itself |
+| [fleet](fleet/) | 0.1.0 | Links the session to [fleet-hub](fleet-hub/) (a local Bun daemon with a web dashboard, an Agent SDK orchestrator and Slack): IRC-style channels between sessions, state telemetry, orchestrator messages with a §6.5 grant verdict |
+| [model-tier](model-tier/) | 0.2.0 | Routes each main-loop turn to opus, sonnet or haiku and a reasoning effort by task complexity, with a `set_tier` tool the model calls to correct either |
 
 ## Install
 
 ```sh
-claude plugin marketplace add /Users/unohee/dev/claude-mod
+claude plugin marketplace add intrect-io/claude-mod
 claude plugin install goal-mode@claude-mod
 claude plugin install harness@claude-mod
 claude plugin install model-tier@claude-mod
+claude plugin install fleet@claude-mod   # then run the hub: cd fleet-hub && bun install && bun src/main.ts
 ```
 
-Installed plugins are read from this folder directly: after an edit, run
-`/reload-plugins` in a session. No reinstall or version bump is needed.
+For development, add a local clone instead (`claude plugin marketplace add /path/to/claude-mod`): installed plugins are then read from that folder directly, and after an edit `/reload-plugins` in a session picks it up. No reinstall or version bump is needed.
 
 ## Develop
 

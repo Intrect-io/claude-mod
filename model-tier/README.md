@@ -8,9 +8,20 @@ by task complexity, and lets the model correct the choice itself.
 - **Classifier (on prompt submit).** `$.model.classify` labels the prompt
   `trivial` / `standard` / `complex` on a cheap model (haiku by default), mapped
   to haiku / sonnet / opus.
+- **Effort (on prompt submit, in parallel).** A second classification labels how
+  hard the problem is to think through: `recall-or-lookup` / `routine-reasoning` /
+  `tricky-problem` / `hard-open-problem`, mapped to effort low / medium / high / xhigh.
+  The classifier never proposes `max`.
+  - The `turn.step` hook sends each main-loop request with that effort.
+  - A model that takes no effort is sent none.
+  - Effort follows the same sticky rule as tiers: up at once, down after `downgradeAfterTurns` lower verdicts.
+  - The labels are named for depth rather than answer length. A "three-line answer" design question first came out `low` under a label called `quick-answer`.
 - **Self-correction.** The mod registers a `set_tier` tool
-  (`mcp__model-tier__set_tier`). The model calls it when the current tier is too
-  weak or wasteful; it applies from the next model request.
+  (`mcp__model-tier__set_tier`) that takes `tier`, `effort` or both. Each turn's
+  note tells the model the pick (`runs on opus (auto) with high effort (auto)`) and
+  asks it to review that pick against the work ahead. The model calls the tool when
+  either the tier or the effort is clearly too weak or wasteful. The change applies
+  from the next model request.
 - **Switching.** A `turn.step` hook rewrites the `model` of every main-loop request.
   Subagent steps are untouched.
 - **Subagents.** `general-purpose` / `claude` spawns with no explicit model get a
@@ -27,7 +38,7 @@ by task complexity, and lets the model correct the choice itself.
 - **Fallback.** If the API refuses the chosen tier before anything streams, the
   request is retried on the session's own model and a toast says so.
 
-The status line shows the effective tier, e.g. `tier: sonnet (auto)`. `/model` keeps
+The status line shows the effective tier and effort, e.g. `tier: opus·high (auto)`. `/model` keeps
 showing the session's configured model: this mod rewrites requests, not the setting.
 
 ## Commands
@@ -35,6 +46,7 @@ showing the session's configured model: this mod rewrites requests, not the sett
 - `/tier`: show the current tier
 - `/tier opus|sonnet|haiku`: pin a tier. The classifier and `set_tier` leave it alone.
 - `/tier auto`: return to automatic routing
+- `/tier effort low|medium|high|xhigh|max`: pin the effort. `/tier effort auto` releases it.
 
 ## Options (`userConfig`)
 
@@ -45,7 +57,8 @@ showing the session's configured model: this mod rewrites requests, not the sett
 | `maxTokensForHaiku` | `150000` | prompt-token ceiling for haiku |
 | `maxTokensForDowngrade` | `200000` | above this, the tier only goes up |
 | `classifierModel` | `haiku` | model used to label prompts |
-| `classifierTimeoutMs` | `3000` | keep the current tier when classifying takes longer |
+| `classifierTimeoutMs` | `3000` | keep the current tier and effort when classifying takes longer |
+| `routeEffort` | `true` | also classify and send a reasoning effort per turn |
 
 ## Development
 

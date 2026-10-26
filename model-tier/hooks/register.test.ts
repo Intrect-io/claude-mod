@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { AgentSpawnInput, HookStream, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import type { TierState } from '../types'
-import { decide, INITIAL, isTier, tierModels } from './register'
+import { decide, decideEffort, INITIAL, isTier, tierModels } from './register'
 
 const OPTS = { downgradeAfterTurns: 2, maxTokensForHaiku: 150000, maxTokensForDowngrade: 200000 }
 const at = (over: Partial<TierState>): TierState => ({ ...INITIAL, ...over })
@@ -94,6 +94,22 @@ describe('decide', () => {
   test('isTier reads resolved ids', () => {
     expect(isTier('claude-opus-5-5[1m]', 'opus')).toBe(true)
     expect(isTier('claude-haiku-5-5', 'sonnet')).toBe(false)
+  })
+})
+
+describe('decideEffort', () => {
+  test('more effort at once; less only after consecutive lower verdicts', () => {
+    const sent = at({ lastInputTokens: 5000, effort: 'high' })
+    expect(decideEffort(sent, 'xhigh', OPTS).effort).toBe('xhigh')
+    const once = decideEffort(sent, 'low', OPTS)
+    expect(once.effort).toBe('high')
+    expect(decideEffort(once, 'low', OPTS).effort).toBe('low')
+  })
+  test('nothing sent yet: the first verdict applies, down included', () => {
+    expect(decideEffort(at({ effort: 'high' }), 'low', OPTS).effort).toBe('low')
+  })
+  test('a pinned effort ignores the classifier', () => {
+    expect(decideEffort(at({ effort: 'max', effortSource: 'pinned' }), 'low', OPTS).effort).toBe('max')
   })
 })
 
@@ -218,7 +234,7 @@ describe('the plugin', () => {
   })
 
   test('a subagent step is left alone', async ($, on) => {
-    on('state.get', () => ({ value: { value: { shape: 'tier-1', value: { ...INITIAL, tier: 'haiku' } }, version: 1 } }))
+    on('state.get', () => ({ value: { value: { shape: 'tier-2', value: { ...INITIAL, tier: 'haiku' } }, version: 1 } }))
     const sent: string[] = []
     on('turn.step', async function* (_, e) {
       sent.push(e.model)
@@ -231,7 +247,7 @@ describe('the plugin', () => {
   })
 
   test('a refused tier falls back to the session model', async ($, on) => {
-    on('state.get', () => ({ value: { value: { shape: 'tier-1', value: { ...INITIAL, tier: 'haiku' } }, version: 1 } }))
+    on('state.get', () => ({ value: { value: { shape: 'tier-2', value: { ...INITIAL, tier: 'haiku' } }, version: 1 } }))
     on('ui.toast', () => ({ value: undefined }))
     const sent: string[] = []
     on('turn.step', async function* (_, e) {
@@ -244,5 +260,53 @@ describe('the plugin', () => {
 
     expect(sent).toEqual(['claude-haiku-5-5', 'claude-opus-5-5'])
     expect(r.usage?.model).toBe('claude-opus-5-5')
+  })
+
+  test('the classified effort rides the request; the model can correct it', async ($, on) => {
+    on('ui.status', () => ({ value: undefined }))
+    on('session.model', () => ({ value: 'claude-opus-5-5' }))
+    on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1000000 }, rateLimits: [] } }))
+    on('tool.register', () => ({ value: { tool: 'mcp__model-tier__set_tier' } }))
+    on('command.register', () => ({ value: { command: 'tier' } }))
+    on('session.start', (_, e) => ({ cwd: e.cwd }))
+    // Each label set gets its own answer.
+    on('model.classify', (_, e) => ({ value: (e.labels as readonly string[]).includes('complex') ? 'complex' : 'recall-or-lookup' }))
+    let context: readonly string[] | undefined
+    on('prompt.submit', (_, e) => {
+      context = e.context
+      return { text: e.text }
+    })
+    const sent: Array<string | number | undefined> = []
+    on('turn.step', async function* (_, e) {
+      sent.push(e.effort)
+      return answered(e)
+    })
+
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    await $.prompt.submit({ text: 'what does this flag do', wait: false, origin: { kind: 'composer' } })
+    await drain($.turn.step({ ...STEP, effort: 'high' }))
+    const r = await $.tool.call({ tool: 'mcp__model-tier__set_tier', effort: 'xhigh', reason: 'it is a race condition' })
+    await drain($.turn.step({ ...STEP, index: 1, effort: 'high' }))
+    // A model that takes no effort is sent none.
+    await drain($.turn.step({ ...STEP, index: 2 }))
+
+    expect(context?.some(c => c.includes('with low effort (auto)') && c.includes('Review that pick'))).toBe(true)
+    expect(r.result).toBe('Effort xhigh from the next request.')
+    expect(sent).toEqual(['low', 'xhigh', undefined])
+  })
+
+  test('set_tier needs tier or effort, each from its own set', async ($, on) => {
+    on('tool.register', () => ({ value: { tool: 'mcp__model-tier__set_tier' } }))
+    on('command.register', () => ({ value: { command: 'tier' } }))
+    on('ui.status', () => ({ value: undefined }))
+    on('session.model', () => ({ value: 'claude-opus-5-5' }))
+    on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1000000 }, rateLimits: [] } }))
+    on('session.start', (_, e) => ({ cwd: e.cwd }))
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+    expect((await $.tool.call({ tool: 'mcp__model-tier__set_tier', reason: 'x' })).deny).toBe('give tier, effort or both')
+    expect((await $.tool.call({ tool: 'mcp__model-tier__set_tier', effort: 'ultra' })).deny).toContain('effort must be one of')
+    const both = await $.tool.call({ tool: 'mcp__model-tier__set_tier', tier: 'sonnet', effort: 'medium' })
+    expect(both.result).toBe('Switched to sonnet from the next request. Effort medium from the next request.')
   })
 })

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Tier, TierState } from '../types'
+import type { Effort, Tier, TierState } from '../types'
 
 const PLUGIN = 'model-tier'
 const SET_TIER = `mcp__${PLUGIN}__set_tier`
@@ -12,6 +12,20 @@ const LABEL_TIER: Record<(typeof LABELS)[number], Tier> = {
   trivial: 'haiku',
   standard: 'sonnet',
   complex: 'opus',
+}
+// How much thinking the prompt needs, as the classifier names it. `max` is never
+// proposed: only the model (set_tier) or the person (/tier effort) asks for it.
+const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
+const EFFORT_RANK: Record<Effort, number> = { low: 0, medium: 1, high: 2, xhigh: 3, max: 4 }
+// Named for how hard the problem is to think through, not how long the answer
+// is: measured live, 'quick-answer' caught a hard design question that asked
+// for a three-line reply.
+const EFFORT_LABELS = ['recall-or-lookup', 'routine-reasoning', 'tricky-problem', 'hard-open-problem'] as const
+const LABEL_EFFORT: Record<(typeof EFFORT_LABELS)[number], Effort> = {
+  'recall-or-lookup': 'low',
+  'routine-reasoning': 'medium',
+  'tricky-problem': 'high',
+  'hard-open-problem': 'xhigh',
 }
 // Subagent types that carry no model of their own; others keep their definition's.
 const ROUTABLE_AGENTS = new Set(['general-purpose', 'claude'])
@@ -43,11 +57,13 @@ export const INITIAL: TierState = {
   source: 'auto',
   pendingCount: 0,
   lastInputTokens: 0,
+  effortSource: 'auto',
+  pendingEffortCount: 0,
 }
 
 // Change the tag when TierState's fields change: it declines an older value.
 const state = atom({ plugin: 'model-tier', key: 'tier' } as const, INITIAL, {
-  shape: 'tier-1',
+  shape: 'tier-2',
 })
 
 export type DecideOptions = {
@@ -88,6 +104,26 @@ export function decide(s: TierState, proposed: Tier, o: DecideOptions): TierStat
   return { ...s, pendingDown: target, pendingCount: count }
 }
 
+/**
+ * Folds one effort verdict into the state, the way `decide` folds a tier:
+ * more effort at once, less only after `downgradeAfterTurns` lower verdicts in
+ * a row (a request's thinking setting is part of what the prompt cache keys on).
+ */
+export function decideEffort(s: TierState, proposed: Effort, o: DecideOptions): TierState {
+  if (s.effortSource === 'pinned') return s
+  if (s.effort === undefined || EFFORT_RANK[proposed] >= EFFORT_RANK[s.effort]) {
+    const changed = proposed !== s.effort
+    return { ...s, effort: proposed, effortSource: changed ? 'auto' : s.effortSource, pendingEffortDown: undefined, pendingEffortCount: 0 }
+  }
+  const count = s.pendingEffortDown === proposed ? s.pendingEffortCount + 1 : 1
+  if (s.lastInputTokens === 0 || count >= o.downgradeAfterTurns) {
+    return { ...s, effort: proposed, effortSource: 'auto', pendingEffortDown: undefined, pendingEffortCount: 0 }
+  }
+  return { ...s, pendingEffortDown: proposed, pendingEffortCount: count }
+}
+
+const isEffort = (v: unknown): v is Effort => typeof v === 'string' && (EFFORTS as readonly string[]).includes(v)
+
 /** Whether a resolved model id (`claude-opus-5-5[1m]`) is the given tier. */
 export function isTier(model: string, tier: Tier): boolean {
   return model === tier || model.toLowerCase().includes(tier)
@@ -99,8 +135,10 @@ export function tierOf(model: string): Tier | undefined {
 
 const isTierName = (v: unknown): v is Tier => typeof v === 'string' && (TIERS as readonly string[]).includes(v)
 
+const label = (s: TierState) => `${s.tier}${s.effort ? `·${s.effort}` : ''} (${s.source === s.effortSource || s.effort === undefined ? s.source : `${s.source}/${s.effortSource}`})`
+
 function show($: EngineInterface, s: TierState, enabled: boolean) {
-  $.ui.status(enabled ? `tier: ${s.tier} (${s.source})` : undefined)
+  $.ui.status(enabled ? `tier: ${label(s)}` : undefined)
 }
 
 /** Labels `text`, or gives up after `timeoutMs` so a slow classifier never holds the prompt. */
@@ -121,6 +159,23 @@ async function classify($: EngineInterface, text: string, model: string, timeout
   }
 }
 
+/** The effort a prompt needs, or undefined on a timeout or a label outside the set. */
+async function classifyEffort($: EngineInterface, text: string, model: string, timeoutMs: number): Promise<Effort | undefined> {
+  const stop = new AbortController()
+  const timeout = $.clock.sleep(timeoutMs, { signal: stop.signal }).then(
+    () => undefined,
+    () => new Promise<undefined>(() => {}),
+  )
+  const labelled = $.model.classify(text.slice(0, CLASSIFY_CHARS), EFFORT_LABELS, { model }).then(found =>
+    found !== undefined && found in LABEL_EFFORT ? LABEL_EFFORT[found as (typeof EFFORT_LABELS)[number]] : undefined,
+  )
+  try {
+    return await Promise.race([labelled, timeout])
+  } finally {
+    stop.abort()
+  }
+}
+
 export const register: Register = (on, options) => {
   const enabled = options.enabled !== false
   const decideOptions: DecideOptions = {
@@ -131,6 +186,7 @@ export const register: Register = (on, options) => {
   const classifierModel = String(options.classifierModel ?? 'haiku')
   const models = tierModels(options.tierModels)
   const classifierTimeoutMs = Number(options.classifierTimeoutMs ?? 3000)
+  const routeEffort = options.routeEffort !== false
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -138,18 +194,19 @@ export const register: Register = (on, options) => {
     await $.tool.register({
       name: 'set_tier',
       description:
-        'Switch the model that runs the rest of this task: opus for design, ' +
-        'debugging and multi-file reasoning; sonnet for routine implementation; ' +
-        'haiku for lookups, formatting and mechanical edits. Call it when the ' +
-        'current tier is clearly too weak or wasteful for the work ahead. ' +
-        'Takes effect from the next model request.',
+        'Switch the model and/or the reasoning effort that run the rest of this task: ' +
+        'opus for design, debugging and multi-file reasoning; sonnet for routine implementation; ' +
+        'haiku for lookups, formatting and mechanical edits. Effort: low for quick answers, ' +
+        'medium for ordinary work, high for careful reasoning, xhigh for hard investigations, ' +
+        'max only when nothing less will do. Call it when the classifier\'s pick is clearly too ' +
+        'weak or wasteful for the work ahead. Takes effect from the next model request.',
       inputSchema: {
         type: 'object',
         properties: {
           tier: { type: 'string', enum: TIERS },
+          effort: { type: 'string', enum: EFFORTS },
           reason: { type: 'string', description: 'One line on why' },
         },
-        required: ['tier'],
       },
       isDeferred: false,
     })
@@ -176,14 +233,26 @@ export const register: Register = (on, options) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === '') {
       const s = await read($, state)
-      return { text: `tier: ${s.tier} (${s.source})` }
+      return { text: `tier: ${label(s)}` }
+    }
+    if (arg.startsWith('effort')) {
+      const level = arg.slice('effort'.length).trim()
+      if (level === 'auto') {
+        const s = await update($, state, (v): TierState => ({ ...v, effortSource: 'auto', pendingEffortDown: undefined, pendingEffortCount: 0 }))
+        show($, s, enabled)
+        return { text: 'Effort follows the classifier again from the next prompt.' }
+      }
+      if (!isEffort(level)) return { text: 'Usage: /tier effort [auto|low|medium|high|xhigh|max]' }
+      const s = await update($, state, (v): TierState => ({ ...v, effort: level, effortSource: 'pinned', pendingEffortDown: undefined, pendingEffortCount: 0 }))
+      show($, s, enabled)
+      return { text: `Effort pinned to ${level}. /tier effort auto to release.` }
     }
     if (arg === 'auto') {
       const s = await update($, state, (v): TierState => ({ ...v, source: 'auto', pendingDown: undefined, pendingCount: 0 }))
       show($, s, enabled)
       return { text: `Auto routing on; tier stays ${s.tier} until the next prompt.` }
     }
-    if (!isTierName(arg)) return { text: 'Usage: /tier [auto|opus|sonnet|haiku]' }
+    if (!isTierName(arg)) return { text: 'Usage: /tier [auto|opus|sonnet|haiku] | /tier effort [auto|low|medium|high|xhigh|max]' }
     const s = await update($, state, (v): TierState => ({ ...v, tier: arg, source: 'pinned', pendingDown: undefined, pendingCount: 0 }))
     show($, s, enabled)
     return { text: `Pinned to ${arg}. /tier auto to release.` }
@@ -193,37 +262,49 @@ export const register: Register = (on, options) => {
     if (!enabled || e.isMeta || e.command !== undefined || e.text.trim() === '') return next(e)
     const current = await read($, state)
     let s = current
-    if (current.source !== 'pinned') {
-      const proposed = await classify($, e.text, classifierModel, classifierTimeoutMs).catch(() => undefined)
-      if (proposed) s = await update($, state, v => decide(v, proposed, decideOptions))
-    }
+    const wantTier = current.source !== 'pinned'
+    const wantEffort = routeEffort && current.effortSource !== 'pinned'
+    const [proposed, effort] = await Promise.all([
+      wantTier ? classify($, e.text, classifierModel, classifierTimeoutMs).catch(() => undefined) : undefined,
+      wantEffort ? classifyEffort($, e.text, classifierModel, classifierTimeoutMs).catch(() => undefined) : undefined,
+    ])
+    if (proposed) s = await update($, state, v => decide(v, proposed, decideOptions))
+    if (effort) s = await update($, state, v => decideEffort(v, effort, decideOptions))
     show($, s, enabled)
+    const effortPart = s.effort ? ` with ${s.effort} effort (${s.effortSource})` : ''
     const note =
-      `[model-tier] This turn runs on ${s.tier} (${s.source}). If the work ahead ` +
-      `clearly needs a stronger or allows a cheaper model, call ${SET_TIER}.`
+      `[model-tier] This turn runs on ${s.tier} (${s.source})${effortPart}. Review that pick against the work ahead: ` +
+      `if it clearly needs a stronger model or more effort, or allows a cheaper model or less, call ${SET_TIER} with tier and/or effort.`
     return next({ ...e, context: [...(e.context ?? []), note] })
   }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: 'mcp__model-tier__set_tier' }, async ($, e) => {
-    const input = e as unknown as { tier?: unknown; reason?: unknown }
-    if (!isTierName(input.tier)) return { deny: 'tier must be one of opus, sonnet, haiku' }
-    const tier = input.tier
-    const s = await update($, state, (v): TierState =>
-      v.source === 'pinned' ? v : { ...v, tier, source: 'model', pendingDown: undefined, pendingCount: 0 },
-    )
+    const input = e as unknown as { tier?: unknown; effort?: unknown; reason?: unknown }
+    if (input.tier !== undefined && !isTierName(input.tier)) return { deny: 'tier must be one of opus, sonnet, haiku' }
+    if (input.effort !== undefined && !isEffort(input.effort)) return { deny: 'effort must be one of low, medium, high, xhigh, max' }
+    if (input.tier === undefined && input.effort === undefined) return { deny: 'give tier, effort or both' }
+    const tier = input.tier as Tier | undefined
+    const effort = input.effort as Effort | undefined
+    const s = await update($, state, (v): TierState => {
+      let next = v
+      if (tier !== undefined && v.source !== 'pinned') next = { ...next, tier, source: 'model', pendingDown: undefined, pendingCount: 0 }
+      if (effort !== undefined && v.effortSource !== 'pinned') next = { ...next, effort, effortSource: 'model', pendingEffortDown: undefined, pendingEffortCount: 0 }
+      return next
+    })
     show($, s, enabled)
-    const text =
-      s.source === 'pinned'
-        ? `The person pinned ${s.tier} with /tier; it stays.`
-        : `Switched to ${tier} from the next request.`
-    return { result: text }
+    const parts: string[] = []
+    if (tier !== undefined) parts.push(s.source === 'pinned' ? `The person pinned ${s.tier} with /tier; it stays.` : `Switched to ${tier} from the next request.`)
+    if (effort !== undefined) parts.push(s.effortSource === 'pinned' ? `The person pinned ${s.effort} effort with /tier effort; it stays.` : `Effort ${effort} from the next request.`)
+    return { result: parts.join(' ') }
   }).catch(() => ({ deny: 'model-tier: set_tier failed; the tier is unchanged.' }))
 
   on('turn.step', async function* ($, e, next) {
     if (!enabled || e.agentId !== undefined) return yield* next(e)
     const s = await read($, state)
     const switching = !isTier(e.model, s.tier)
-    const stream = next(switching ? { ...e, model: models[s.tier] } : e)
+    // A model that takes no effort reads `effort` absent: nothing to rewrite there.
+    const reEffort = s.effort !== undefined && e.effort !== undefined && e.effort !== s.effort
+    const stream = next({ ...e, ...(switching ? { model: models[s.tier] } : {}), ...(reEffort ? { effort: s.effort } : {}) })
 
     let yielded = false
     let result
