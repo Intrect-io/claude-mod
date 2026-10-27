@@ -6,13 +6,17 @@ import { segment } from './segment'
 
 const PLUGIN = 'model-tier'
 const SET_TIER = `mcp__${PLUGIN}__set_tier`
-const TIERS: readonly Tier[] = ['haiku', 'sonnet', 'opus']
-const RANK: Record<Tier, number> = { haiku: 0, sonnet: 1, opus: 2 }
-const LABELS = ['trivial', 'standard', 'complex'] as const
+const TIERS: readonly Tier[] = ['haiku', 'sonnet', 'opus', 'fable']
+const RANK: Record<Tier, number> = { haiku: 0, sonnet: 1, opus: 2, fable: 3 }
+const isTierName = (v: unknown): v is Tier => typeof v === 'string' && (TIERS as readonly string[]).includes(v)
+// The top label names a rare case outright: label names steer the classifier
+// (see EFFORT_LABELS), and fable is the scarcest, most rate-limited tier.
+const LABELS = ['trivial', 'standard', 'complex', 'exceptionally-hard'] as const
 const LABEL_TIER: Record<(typeof LABELS)[number], Tier> = {
   trivial: 'haiku',
   standard: 'sonnet',
   complex: 'opus',
+  'exceptionally-hard': 'fable',
 }
 // How much thinking the prompt needs, as the classifier names it. `max` is never
 // proposed: only the model (set_tier) or the person (/tier effort) asks for it.
@@ -37,6 +41,7 @@ const CLASSIFY_CHARS = 4000
 // in ANTHROPIC_BASE_URL answers it 404, which the engine then papers over with
 // fallbackModel ("Switched to Opus 5 because sonnet is not available").
 export const DEFAULT_TIER_MODELS: Record<Tier, string> = {
+  fable: 'claude-fable-5-1',
   opus: 'claude-opus-5-5',
   sonnet: 'claude-sonnet-5-5',
   haiku: 'claude-haiku-5-5',
@@ -48,7 +53,7 @@ export function tierModels(spec: unknown): Record<Tier, string> {
   if (typeof spec !== 'string') return models
   for (const pair of spec.split(',')) {
     const [tier, id] = pair.split('=').map(part => part?.trim() ?? '')
-    if ((tier === 'opus' || tier === 'sonnet' || tier === 'haiku') && id) models[tier] = id
+    if (isTierName(tier) && id) models[tier] = id
   }
   return models
 }
@@ -134,7 +139,6 @@ export function tierOf(model: string): Tier | undefined {
   return TIERS.find(t => isTier(model, t))
 }
 
-const isTierName = (v: unknown): v is Tier => typeof v === 'string' && (TIERS as readonly string[]).includes(v)
 
 const label = (s: TierState) => `${s.tier}${s.effort ? `·${s.effort}` : ''} (${s.source === s.effortSource || s.effort === undefined ? s.source : `${s.source}/${s.effortSource}`})`
 
@@ -200,6 +204,7 @@ export const register: Register = (on, options) => {
       name: 'set_tier',
       description:
         'Switch the model and/or the reasoning effort that run the rest of this task: ' +
+        'fable for exceptionally hard problems (novel research, deep design across many systems, or where opus already failed); ' +
         'opus for design, debugging and multi-file reasoning; sonnet for routine implementation; ' +
         'haiku for lookups, formatting and mechanical edits. Effort: low for quick answers, ' +
         'medium for ordinary work, high for careful reasoning, xhigh for hard investigations, ' +
@@ -217,7 +222,7 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: 'tier',
-      description: 'Pin the model tier (opus|sonnet|haiku) or return to auto routing',
+      description: 'Pin the model tier (fable|opus|sonnet|haiku) or effort, or return to auto routing',
     })
 
     // A fresh session starts on whatever /model is set to.
@@ -257,7 +262,7 @@ export const register: Register = (on, options) => {
       show($, s, enabled)
       return { text: `Auto routing on; tier stays ${s.tier} until the next prompt.` }
     }
-    if (!isTierName(arg)) return { text: 'Usage: /tier [auto|opus|sonnet|haiku] | /tier effort [auto|low|medium|high|xhigh|max]' }
+    if (!isTierName(arg)) return { text: 'Usage: /tier [auto|fable|opus|sonnet|haiku] | /tier effort [auto|low|medium|high|xhigh|max]' }
     const s = await update($, state, (v): TierState => ({ ...v, tier: arg, source: 'pinned', pendingDown: undefined, pendingCount: 0 }))
     show($, s, enabled)
     return { text: `Pinned to ${arg}. /tier auto to release.` }
@@ -285,7 +290,7 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: 'mcp__model-tier__set_tier' }, async ($, e) => {
     const input = e as unknown as { tier?: unknown; effort?: unknown; reason?: unknown }
-    if (input.tier !== undefined && !isTierName(input.tier)) return { deny: 'tier must be one of opus, sonnet, haiku' }
+    if (input.tier !== undefined && !isTierName(input.tier)) return { deny: 'tier must be one of fable, opus, sonnet, haiku' }
     if (input.effort !== undefined && !isEffort(input.effort)) return { deny: 'effort must be one of low, medium, high, xhigh, max' }
     if (input.tier === undefined && input.effort === undefined) return { deny: 'give tier, effort or both' }
     const tier = input.tier as Tier | undefined

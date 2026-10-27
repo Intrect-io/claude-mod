@@ -1,4 +1,4 @@
-export type Tier = 'opus' | 'sonnet' | 'haiku'
+export type Tier = 'fable' | 'opus' | 'sonnet' | 'haiku'
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 

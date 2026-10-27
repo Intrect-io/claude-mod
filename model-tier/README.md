@@ -6,8 +6,11 @@ by task complexity, and lets the model correct the choice itself.
 ## How it works
 
 - **Classifier (on prompt submit).** `$.model.classify` labels the prompt
-  `trivial` / `standard` / `complex` on a cheap model (haiku by default), mapped
-  to haiku / sonnet / opus.
+  `trivial` / `standard` / `complex` / `exceptionally-hard` on a cheap model
+  (haiku by default), mapped to haiku / sonnet / opus / fable (`claude-fable-5-1`).
+  - Fable is the top tier, for novel research, deep design across many systems, or work where opus already failed.
+  - Its label is named as a rare case on purpose, because fable is the scarcest and most rate-limited model.
+  - A refused fable request falls back to the session's model, as any tier does.
 - **Effort (on prompt submit, in parallel).** A second classification labels how
   hard the problem is to think through: `recall-or-lookup` / `routine-reasoning` /
   `tricky-problem` / `hard-open-problem`, mapped to effort low / medium / high / xhigh.
@@ -44,7 +47,7 @@ showing the session's configured model: this mod rewrites requests, not the sett
 ## Commands
 
 - `/tier`: show the current tier
-- `/tier opus|sonnet|haiku`: pin a tier. The classifier and `set_tier` leave it alone.
+- `/tier fable|opus|sonnet|haiku`: pin a tier. The classifier and `set_tier` leave it alone.
 - `/tier auto`: return to automatic routing
 - `/tier effort low|medium|high|xhigh|max`: pin the effort. `/tier effort auto` releases it.
 

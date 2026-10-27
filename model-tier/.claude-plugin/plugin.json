@@ -1,7 +1,7 @@
 {
   "name": "model-tier",
-  "version": "0.2.0",
-  "description": "Routes each main-loop turn to opus, sonnet or haiku and a reasoning effort by task complexity, with a set_tier tool the model calls to correct either",
+  "version": "0.3.0",
+  "description": "Routes each main-loop turn to fable, opus, sonnet or haiku and a reasoning effort by task complexity, with a set_tier tool the model calls to correct either",
   "types": "./types/index.d.ts",
   "userConfig": {
     "enabled": {
@@ -43,8 +43,8 @@
     "tierModels": {
       "type": "string",
       "title": "Model id per tier",
-      "description": "Full model ids to send, e.g. opus=claude-opus-5-5,sonnet=claude-sonnet-5-5,haiku=claude-haiku-5-5 (aliases are not resolved on this path)",
-      "default": "opus=claude-opus-5-5,sonnet=claude-sonnet-5-5,haiku=claude-haiku-5-5"
+      "description": "Full model ids to send, e.g. fable=claude-fable-5-1,opus=claude-opus-5-5,sonnet=claude-sonnet-5-5,haiku=claude-haiku-5-5 (aliases are not resolved on this path)",
+      "default": "fable=claude-fable-5-1,opus=claude-opus-5-5,sonnet=claude-sonnet-5-5,haiku=claude-haiku-5-5"
     },
     "routeEffort": {
       "type": "boolean",

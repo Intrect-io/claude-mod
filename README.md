@@ -7,7 +7,7 @@ Claude Code mods (plugins with a hooks module), served as a local folder marketp
 | [goal-mode](goal-mode/) | 0.4.0 | Session goals checked by an independent evaluator at every Stop: set by you (`/goal-mode set <condition> [--check <cmd>]`) or by Claude itself (nudged on outcome requests and approved plans) |
 | [harness](harness/) | 0.2.0 | The integrated harness: the user's Claude rules enforced at the tool call, session tooling and workflow automation (formerly house-rules) |
 | [fleet](fleet/) | 0.1.0 | Links the session to [fleet-hub](fleet-hub/) (a local Bun daemon with a web dashboard, an Agent SDK orchestrator and Slack): IRC-style channels between sessions, state telemetry, orchestrator messages with a §6.5 grant verdict |
-| [model-tier](model-tier/) | 0.2.0 | Routes each main-loop turn to opus, sonnet or haiku and a reasoning effort by task complexity, with a `set_tier` tool the model calls to correct either |
+| [model-tier](model-tier/) | 0.3.0 | Routes each main-loop turn to fable, opus, sonnet or haiku and a reasoning effort by task complexity, with a `set_tier` tool the model calls to correct either |
 
 ## Install
 

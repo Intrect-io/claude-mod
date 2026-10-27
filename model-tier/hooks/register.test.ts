@@ -85,7 +85,9 @@ describe('decide', () => {
     expect(decide(at({ tier: 'haiku', source: 'pinned' }), 'opus', OPTS).tier).toBe('haiku')
   })
 
-  test('tiers map to full ids, overridable per tier', () => {
+  test('tiers map to full ids, fable included, overridable per tier', () => {
+    expect(tierModels(undefined).fable).toBe('claude-fable-5-1')
+    expect(tierModels('fable=claude-fable-5').fable).toBe('claude-fable-5')
     expect(tierModels(undefined).sonnet).toBe('claude-sonnet-5-5')
     expect(tierModels('sonnet=claude-sonnet-5, bogus=x').sonnet).toBe('claude-sonnet-5')
     expect(tierModels('sonnet=claude-sonnet-5').haiku).toBe('claude-haiku-5-5')
@@ -308,5 +310,33 @@ describe('the plugin', () => {
     expect((await $.tool.call({ tool: 'mcp__model-tier__set_tier', effort: 'ultra' })).deny).toContain('effort must be one of')
     const both = await $.tool.call({ tool: 'mcp__model-tier__set_tier', tier: 'sonnet', effort: 'medium' })
     expect(both.result).toBe('Switched to sonnet from the next request. Effort medium from the next request.')
+  })
+
+  test('an exceptionally hard prompt goes to fable, and set_tier and /tier take fable', async ($, on) => {
+    on('ui.status', () => ({ value: undefined }))
+    on('session.model', () => ({ value: 'claude-opus-5-5' }))
+    on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1000000 }, rateLimits: [] } }))
+    on('tool.register', () => ({ value: { tool: 'mcp__model-tier__set_tier' } }))
+    on('command.register', () => ({ value: { command: 'tier' } }))
+    on('session.start', (_, e) => ({ cwd: e.cwd }))
+    on('model.classify', (_, e) => ({ value: (e.labels as readonly string[]).includes('complex') ? 'exceptionally-hard' : 'hard-open-problem' }))
+    on('prompt.submit', (_, e) => ({ text: e.text }))
+    const sent: string[] = []
+    on('turn.step', async function* (_, e) {
+      sent.push(e.model)
+      return answered(e)
+    })
+
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    await $.prompt.submit({ text: 'Prove the scheduler is starvation-free under every interleaving', wait: false, origin: { kind: 'composer' } })
+    await drain($.turn.step(STEP))
+    const r = await $.tool.call({ tool: 'mcp__model-tier__set_tier', tier: 'opus', reason: 'proof done, now edits' })
+    await drain($.turn.step({ ...STEP, index: 1 }))
+    const pinned = await $.command.run({ command: 'tier', args: 'fable', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
+    await drain($.turn.step({ ...STEP, index: 2 }))
+
+    expect(r.result).toBe('Switched to opus from the next request.')
+    expect(pinned.text).toBe('Pinned to fable. /tier auto to release.')
+    expect(sent).toEqual(['claude-fable-5-1', 'claude-opus-5-5', 'claude-fable-5-1'])
   })
 })
