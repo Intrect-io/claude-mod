@@ -19,7 +19,7 @@ import { grantAllowsLinear, grantVerdict, senderName } from './grant'
 import { gcSignature, gcSummary } from './memory-gc'
 import { checkListIssues, checkSaveComment, checkSaveIssue, isLinearRequest, withoutReminders } from './linear-guard'
 import { isEnglishLine, lintReport } from './report-lint'
-import { isCodeqlAnalyze, isDoneState, isPrList, isReleaseCommand, issueIds, mergedPr } from './ship-gate'
+import { isCodeqlAnalyze, isDoneState, isPrList, isReleaseCommand, issueIds, linearIds, mergedPr } from './ship-gate'
 
 const ENV = { home: '/Users/u', tmpdir: '/var/folders/xx/T/', venv: '/Users/u/dev/mlx_env/bin/activate' }
 const ROOT = '/Users/u/dev/repo'
@@ -331,5 +331,22 @@ describe('workflow', () => {
     expect(holdReason({ ...s, on: false }, 120_000, false)).toBe('off')
     expect(fireTag('[fire focus: STO-3 step 2/4]\n작업')).toBe('[fire focus: STO-3 step 2/4]')
     expect(fireTag('그냥 답변')).toBeUndefined()
+  })
+})
+
+describe('linearIds', () => {
+  const patterns = ['AX-\\d+', 'KT-\\d+']
+  test('keeps workspace issue IDs and drops other TEAM-123 shapes', () => {
+    expect(linearIds(['AX-12', 'HSG-01', 'HSG-05', 'KT-3', 'CVE-2026'], patterns)).toEqual(['AX-12', 'KT-3'])
+  })
+  test('no patterns configured: nothing is filtered', () => {
+    expect(linearIds(['HSG-01'], undefined)).toEqual(['HSG-01'])
+    expect(linearIds(['HSG-01'], [])).toEqual(['HSG-01'])
+  })
+  test('a broken pattern is ignored, not thrown', () => {
+    expect(linearIds(['AX-1'], ['(', 'AX-\\d+'])).toEqual(['AX-1'])
+  })
+  test('anchored: AX-1 does not match inside MAX-1', () => {
+    expect(linearIds(['MAX-1'], patterns)).toEqual([])
   })
 })

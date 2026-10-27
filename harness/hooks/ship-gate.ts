@@ -34,6 +34,34 @@ export function issueIds(text: string): string[] {
   return [...new Set(text.match(ISSUE_ID) ?? [])]
 }
 
+// Only IDs the Linear workspace can have: `issue_patterns` in ~/.claude/linear.json (e.g. "AX-\\d+"). Other
+// TEAM-123 shapes in a PR body (security gate IDs like HSG-01, CVE numbers) are not issues and must not block a
+// stop (2026-10-27: HSG-01/HSG-05 from PR 45 blocked every stop). With no patterns configured, nothing is filtered.
+export function linearIds(ids: readonly string[], patterns: readonly string[] | undefined): string[] {
+  if (patterns === undefined || patterns.length === 0) return [...ids]
+  const tests = patterns.flatMap(pattern => {
+    try {
+      return [new RegExp(`^(?:${pattern})$`)]
+    } catch {
+      return []
+    }
+  })
+
+  return ids.filter(id => tests.some(test => test.test(id)))
+}
+
+async function issuePatterns($: EngineInterface): Promise<string[] | undefined> {
+  const home = (await read($, envAtom) as { home?: string }).home
+  if (home === undefined) return undefined
+  try {
+    const patterns = (JSON.parse(await $.fs.read(`${home}/.claude/linear.json`)) as { issue_patterns?: unknown }).issue_patterns
+
+    return Array.isArray(patterns) ? patterns.filter((p): p is string => typeof p === 'string') : undefined
+  } catch {
+    return undefined
+  }
+}
+
 // `gh pr merge [n]` in a command: the PR's number or branch, or '' for the
 // current branch's PR; undefined when the command merges nothing.
 export function mergedPr(command: string): string | undefined {
@@ -201,7 +229,9 @@ export async function shipStop($: EngineInterface, e: Parameters<StopHook>[1], n
       return below
     }
     const ship = await read($, shipAtom)
-    const open = unresolved(ship.pending)
+    // Entries tracked before the pattern filter existed (or under another linear.json) are re-checked here.
+    const linear = new Set(linearIds(ship.pending.map(issue => issue.id), await issuePatterns($)))
+    const open = unresolved(ship.pending.filter(issue => linear.has(issue.id)))
     if (open.length === 0) {
       if (ship.pending.length > 0) await update($, shipAtom, s => ({ ...s, pending: [] }))
 
@@ -236,7 +266,7 @@ async function trackMerge($: EngineInterface, pr: string, command: string): Prom
   } catch {
     // gh unavailable: nothing to track.
   }
-  const ids = issueIds(text)
+  const ids = linearIds(issueIds(text), await issuePatterns($))
   if (ids.length === 0) return
   const ship = await read($, shipAtom)
   const handed = ids.filter(id => ship.mentioned.includes(id))
