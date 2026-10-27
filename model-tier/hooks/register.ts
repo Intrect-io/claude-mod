@@ -32,6 +32,31 @@ const LABEL_EFFORT: Record<(typeof EFFORT_LABELS)[number], Effort> = {
   'tricky-problem': 'high',
   'hard-open-problem': 'xhigh',
 }
+// The model class a prompt's tier means on the provider that has to answer.
+// Claude names carry each other ('claude-opus-5-5' is 'opus'); another
+// provider's model (cc-router's codex or its ollama fallback, when Claude
+// quota runs out) keeps the same tier there, by that provider's map in
+// `providerTierModels`. A provider with no map is left at its own model:
+// we know no id to send.
+export function providerOf(model: string): string {
+  const m = model.toLowerCase()
+  if (m.startsWith('claude') || m.includes('anthropic')) return 'anthropic'
+  if (/^(codex|o\d|gpt-|gpt\)|.*\b(gpt)-)/.test(m)) return 'openai'
+  const slash = model.indexOf('/')
+  if (slash > 0 && !m.includes('anthropic/')) return m.slice(0, slash)
+  return 'unknown'
+}
+
+// The model that answers when cc-router moves a session to OpenAI.
+export const OPENAI_MODEL: Record<Tier, string> = { fable: 'codex', opus: 'codex', sonnet: 'default', haiku: 'default' }
+export const OLLAMA_MODEL = 'ollama'
+
+export const DEFAULT_PROVIDER_TIER_MODELS: Record<string, Partial<Record<Tier, string>>> = {
+  anthropic: {},
+  openai: OPENAI_MODEL,
+  ollama: {},
+}
+
 // Subagent types that carry no model of their own; others keep their definition's.
 const ROUTABLE_AGENTS = new Set(['general-purpose', 'claude'])
 const CLASSIFY_CHARS = 4000
@@ -135,6 +160,38 @@ export function isTier(model: string, tier: Tier): boolean {
   return model === tier || model.toLowerCase().includes(tier)
 }
 
+/** The tier's model on the provider now answering.
+ * `claude` is routed within anthropic by name; on another provider the map
+ * answers it (`openai` → codex/default aliases), or the provider's own model
+ * stands when the tier names no model there. */
+export function modelFor(model: string, tier: Tier, claude: string, providers: Record<string, Partial<Record<Tier, string>>>): string {
+  const provider = providerOf(model)
+  if (provider === 'anthropic' || provider === 'unknown') return claude
+  const mapped = providers[provider]?.[tier]
+
+  return mapped !== undefined && mapped !== '' ? mapped : model
+}
+
+/** `openai=fable:x,opus:y;ollama=…` over the defaults; bad entries are ignored. */
+export function providerTierModels(spec: unknown): Record<string, Partial<Record<Tier, string>>> {
+  const maps = Object.fromEntries(Object.entries(DEFAULT_PROVIDER_TIER_MODELS).map(([k, v]) => [k, { ...v }]))
+  if (typeof spec !== 'string') return maps
+  for (const entry of spec.split(';')) {
+    const eq = entry.indexOf('=')
+    if (eq < 0) continue
+    const provider = entry.slice(0, eq).trim()
+    const pairs = entry.slice(eq + 1).trim()
+    if (provider === '' || pairs === '') continue
+    const map = (maps[provider] ??= ({} as Partial<Record<Tier, string>>))
+    for (const pair of pairs.split(',')) {
+      if (!pair.includes(':')) continue
+      const [tier, id] = pair.split(':').map(part => part?.trim() ?? '')
+      if (isTierName(tier) && id) map[tier] = id
+    }
+  }
+  return maps
+}
+
 export function tierOf(model: string): Tier | undefined {
   return TIERS.find(t => isTier(model, t))
 }
@@ -195,6 +252,7 @@ export const register: Register = (on, options) => {
   const classifierModel = String(options.classifierModel ?? 'haiku')
   const models = tierModels(options.tierModels)
   const classifierTimeoutMs = Number(options.classifierTimeoutMs ?? 3000)
+  const providers = providerTierModels(options.providerTierModels)
   const routeEffort = options.routeEffort !== false
 
   on('session.start', async ($, e, next) => {
@@ -311,10 +369,18 @@ export const register: Register = (on, options) => {
   on('turn.step', async function* ($, e, next) {
     if (!enabled || e.agentId !== undefined) return yield* next(e)
     const s = await read($, state)
-    const switching = !isTier(e.model, s.tier)
+    // switched when the tier's model differs from the engine's.
+    // The provider that answered most recently leads: cc-router's codex or
+    // ollama fallback leaves `e.model` naming the engine's Claude, so e.model
+    // itself cannot be read for it. On anthropic the tier's claude id goes;
+    // on another provider the id in `providerTierModels` (openai → codex /
+    // default), or the engine's own model where the map names none.
+    const provider = s.lastProvider ?? providerOf(e.model)
+    const sendModel = provider === 'anthropic' ? models[s.tier] : (providers[provider]?.[s.tier] ?? e.model)
+    const switching = sendModel !== e.model
     // A model that takes no effort reads `effort` absent: nothing to rewrite there.
     const reEffort = s.effort !== undefined && e.effort !== undefined && e.effort !== s.effort
-    const stream = next({ ...e, ...(switching ? { model: models[s.tier] } : {}), ...(reEffort ? { effort: s.effort } : {}) })
+    const stream = next({ ...e, ...(switching ? { model: sendModel } : {}), ...(reEffort ? { effort: s.effort } : {}) })
 
     let yielded = false
     let result
@@ -330,15 +396,24 @@ export const register: Register = (on, options) => {
       }
     } catch (err) {
       // Refused before anything streamed: retry on the session's own model.
-      if (!switching || yielded) throw err
-      $.ui.toast(`model-tier: ${models[s.tier]} was refused, staying on ${e.model}`)
+      if (sendModel === e.model || yielded) throw err
+      $.ui.toast(`model-tier: ${sendModel} was refused, staying on ${e.model}`)
       result = yield* next(e)
     }
 
     const u = result.usage
     if (u) {
       const tokens = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
-      await update($, state, v => ({ ...v, lastInputTokens: tokens }))
+      const provider = providerOf(u.model)
+      const move = s.lastProvider !== undefined && s.lastProvider !== provider
+      if (move) {
+        const target = providers[provider]?.[s.tier]
+        // The router moved the session between providers: anthropic quota out
+        // or back. codex keeps the tier's map; a provider with no map keeps
+        // whatever model answered.
+        $.ui.toast(`model-tier: answered on ${u.model} (${provider})${target !== undefined ? `; ${s.tier} goes as ${target} there now` : '; the tier stays whatever this provider answers'}`)
+      }
+      await update($, state, v => ({ ...v, lastInputTokens: tokens, lastProvider: provider }))
     }
     return result
   })

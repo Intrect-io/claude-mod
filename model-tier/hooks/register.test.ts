@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { AgentSpawnInput, HookStream, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import type { TierState } from '../types'
-import { decide, decideEffort, INITIAL, isTier, tierModels } from './register'
+import { decide, decideEffort, INITIAL, isTier, modelFor, providerOf, providerTierModels, tierModels } from './register'
 
 const OPTS = { downgradeAfterTurns: 2, maxTokensForHaiku: 150000, maxTokensForDowngrade: 200000 }
 const at = (over: Partial<TierState>): TierState => ({ ...INITIAL, ...over })
@@ -18,14 +18,14 @@ const SPAWN: AgentSpawnInput = {
   background: false,
   fork: false,
 }
-const answered = (e: TurnStepInput, tokens = 1000): TurnStepResult => ({
+const answered = (e: TurnStepInput, tokens = 1000, answeredModel?: string): TurnStepResult => ({
   turnId: e.turnId,
   index: e.index,
   answer: 'ok',
   toolUses: [],
   stopReason: 'end_turn',
   usage: {
-    model: e.model,
+    model: answeredModel ?? e.model,
     input_tokens: tokens,
     output_tokens: 10,
     cache_read_input_tokens: 0,
@@ -112,6 +112,57 @@ describe('decideEffort', () => {
   })
   test('a pinned effort ignores the classifier', () => {
     expect(decideEffort(at({ effort: 'max', effortSource: 'pinned' }), 'low', OPTS).effort).toBe('max')
+  })
+})
+
+describe('providers (the router answering on codex or ollama)', () => {
+  test('providerOf reads the answering model', () => {
+    expect(providerOf('claude-opus-5-5')).toBe('anthropic')
+    expect(providerOf('gpt-6.1-sol')).toBe('openai')
+    expect(providerOf('codex')).toBe('openai')
+    expect(providerOf('qwen3:8b')).toBe('unknown')
+    expect(providerOf('anthropic/claude-haiku-5-5')).toBe('anthropic')
+  })
+  test('modelFor maps the tier per provider and leaves what no map names', () => {
+    const providers = providerTierModels(undefined)
+    expect(modelFor('claude-opus-5-5', 'fable', 'claude-fable-5-1', providers)).toBe('claude-fable-5-1')
+    expect(modelFor('x', 'opus', 'claude-opus-5-5', providers)).toBe('claude-opus-5-5')
+    expect(modelFor('openai/x', 'opus', 'claude-opus-5-5', providers)).toBe('codex')
+    expect(modelFor('openai/x', 'sonnet', 'claude-sonnet-5-5', providers)).toBe('default')
+    expect(modelFor('ollama/x', 'opus', 'claude-opus-5-5', providers)).toBe('ollama/x')
+    expect(providerTierModels('openai=fable:gpt-6.1-sol').openai?.fable).toBe('gpt-6.1-sol')
+  })
+  test('an answer on codex turns the tier into the codex mapping; back on Claude, back to claude ids', async ($, on) => {
+    on('tool.register', () => ({ value: { tool: 'mcp__model-tier__set_tier' } }))
+    on('command.register', () => ({ value: { command: 'tier' } }))
+    on('ui.status', () => ({ value: undefined }))
+    on('ui.toast', () => ({ value: undefined }))
+    on('session.model', () => ({ value: 'claude-opus-5-5' }))
+    on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1000000 }, rateLimits: [] } }))
+    on('session.start', (_, e) => ({ cwd: e.cwd }))
+    const sent: string[] = []
+    // opus tier, auto, with requests sent (so start does not re-read /model).
+    let seeded = false
+    on('state.get', (_, e, next) => {
+      const key = ((e as { key?: string }).key ?? (e as { ref?: { key?: string } }).ref?.key)
+      if (key === 'tier' && !seeded) {
+        seeded = true
+        return { value: { value: { shape: 'tier-2', value: { ...INITIAL, tier: 'opus' as const, lastInputTokens: 1000 } }, version: 1 } } as never
+      }
+      return next(e)
+    })
+    on('turn.step', async function* (_, e) {
+      sent.push(e.model)
+      return answered(e, 1000, e.index === 1 ? 'gpt-6.1-sol' : e.model)
+    })
+
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    await drain($.turn.step(STEP)) // anthropic
+    await drain($.turn.step({ ...STEP, index: 1 })) // router answers on codex
+    await drain($.turn.step({ ...STEP, index: 2 })) // now sent as the openai alias for haiku
+    await drain($.turn.step({ ...STEP, index: 3, model: 'claude-opus-5-5' })) // engine still on Claude: the map sends sonnet? haiku→default? sent below
+
+    expect(sent).toEqual(['claude-opus-5-5', 'claude-opus-5-5', 'codex', 'codex'])
   })
 })
 

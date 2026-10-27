@@ -19,6 +19,8 @@ export type TierState = {
   /** The lower effort the classifier keeps proposing, and how many turns in a row. */
   pendingEffortDown?: Effort
   pendingEffortCount: number
+  /** The provider that answered most recently (from the step's usage), e.g. anthropic, openai, ollama. */
+  lastProvider?: string
 }
 
 declare module 'claude-code' {
