@@ -237,7 +237,7 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: COMMAND,
-      description: 'Goal: /goal-mode auto [hint] (Claude picks one for now) | set <condition> [--check <cmd>] | status | clear | loop on|off|resume|status',
+      description: 'Goal: /goal-mode auto [hint] (Claude plans the long-term goal) | set <condition> [--check <cmd>] | status | clear | loop on|off|resume|status',
     })
     await showStatus($)
 
@@ -601,8 +601,11 @@ async function autoCommand($: EngineInterface, hint: string): Promise<string> {
     hint !== '' ? `Their hint: ${hint}` : undefined,
     previous !== null ? `The goal before it (now cleared): ${previous.condition}${previous.lastReason ? ` — last check: ${previous.lastReason}` : ''}` : undefined,
     'Read the situation first: this conversation, any approved plan, the repository state (git status, branch, open PR), and work left unfinished or blocked.',
-    'Pick the one next outcome that matters most and can be finished in this session, stated as one measurable end state with the check that proves it. Stay within the work this session is already about; do not widen scope.',
-    `Decide it yourself, without asking the person to choose; ask only if every candidate needs their call (credentials, payment, an irreversible step). The person asked for a goal, so set exactly one even when the work looks small: never answer without setting it. Call ${how} before doing the work, tell the person the goal in one line, then start on it.`,
+    'Aim as far as the work goes: the goal is the long-term outcome the hint and this project point to, the end state of the whole plan (days of work is fine; /goal keeps the session working across turns), never a first step, a quick task, a survey or a report (unless a report is what they asked for).',
+    'Work out the plan behind it first: the end state, then the milestones that lead there. Write them to .claude/goal-plan.md in the repository (goal, milestones in order, each with its own check) so the work can be followed and resumed.',
+    'Stay inside what the hint and the repository are about: long, not wide. Do not pull in unrelated projects.',
+    'State the goal as one measurable end state with a quality bar: what must be true at the end, the evidence for it (tests, live runs, numbers), and the check that proves it; name .claude/goal-plan.md in it so every milestone must be done.',
+    `Decide it yourself, without asking the person anything (no sizes, budgets or choices); ask only if every path needs their call (credentials, payment, an irreversible step). Set exactly one: call ${how}, tell the person the goal and its milestones in a few lines, then start on the first milestone.`,
   ]
     .filter(line => line !== undefined)
     .join('\n')
@@ -611,8 +614,8 @@ async function autoCommand($: EngineInterface, hint: string): Promise<string> {
   })
 
   return previous === null
-    ? 'Claude picks a goal for the current situation now and sets it.'
-    : `Cleared "${clip(previous.condition, 60)}"; Claude picks a new goal for the current situation now.`
+    ? 'Claude plans the long-term goal for the current situation and sets it.'
+    : `Cleared "${clip(previous.condition, 60)}"; Claude plans a new long-term goal.`
 }
 
 async function setCommand($: EngineInterface, text: string): Promise<string> {
