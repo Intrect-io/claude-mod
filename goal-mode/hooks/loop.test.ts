@@ -16,6 +16,8 @@ type World = {
   files: Map<string, string>
   prompts: string[]
   worktrees: string[]
+  // Every git worktree add argv, for the base ref.
+  adds: string[][]
   checkExit: number
   dirty: string
   verdicts: string[]
@@ -35,6 +37,7 @@ function world(on: On, queue = QUEUE, store: Record<string, unknown> = {}): Worl
     ]),
     prompts: [],
     worktrees: [],
+    adds: [],
     checkExit: 1,
     dirty: '',
     verdicts: [],
@@ -76,6 +79,7 @@ function world(on: On, queue = QUEUE, store: Record<string, unknown> = {}): Worl
     if (argv.includes('rev-parse')) return ok(`${ROOT}/.git\n`)
     if (argv.includes('worktree')) {
       w.worktrees.push(String(argv[5]))
+      w.adds.push([...argv])
       return ok()
     }
     if (argv[0] === 'bash') return ok(w.checkExit === 0 ? '2 passed' : '1 failed', w.checkExit)
@@ -108,6 +112,42 @@ async function loopOn($: Engine, w: World) {
 }
 
 describe('loop', () => {
+  test('a gate holds the loop before the next goal; raising it and loop on goes on', async ($, on) => {
+    const w = world(on)
+    w.checkExit = 0
+    w.verdicts.push('{"met": true, "reason": "ok"}')
+    w.files.set(`${ROOT}/.claude/goal-loop.gate`, '1\n')
+    await start($)
+    await loopOn($, w)
+    expect(w.worktrees).toHaveLength(1)
+
+    await $.classic.Stop(STOP)
+    await w.clock.advance(1_000)
+    expect(w.worktrees).toHaveLength(1)
+    expect(w.files.get(`${ROOT}/.claude/goal-loop.log`)).toContain('"event":"gated"')
+
+    w.files.set(`${ROOT}/.claude/goal-loop.gate`, '2')
+    const reply = await loopOn($, w)
+    expect(reply.text).toContain('started "fix mul"')
+    expect(w.worktrees).toHaveLength(2)
+  })
+
+  test('worktrees start from goal-loop.base, or the line\'s own :: base:', async ($, on) => {
+    const w = world(on, `- [ ] fix add :: check: pytest -q :: base: goal/07-pr-branch
+- [ ] fix mul :: check: pytest -q
+`)
+    w.checkExit = 0
+    w.verdicts.push('{"met": true, "reason": "ok"}')
+    w.files.set(`${ROOT}/.claude/goal-loop.base`, 'origin/main\n')
+    await start($)
+    await loopOn($, w)
+    expect(w.adds[0]?.at(-1)).toBe('goal/07-pr-branch')
+    expect(w.prompts[0]).toContain('Goal #1: fix add')
+    await $.classic.Stop(STOP)
+    await w.clock.advance(1_000)
+    expect(w.adds[1]?.at(-1)).toBe('origin/main')
+  })
+
   test('loop on takes the first goal into its own worktree and queues the kickoff', async ($, on) => {
     const w = world(on)
     await start($)

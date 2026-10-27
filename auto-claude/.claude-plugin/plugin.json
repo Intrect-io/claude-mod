@@ -1,0 +1,23 @@
+{
+  "name": "auto-claude",
+  "version": "0.1.0",
+  "description": "Finishes a repository's work unattended: Claude plans the long-term end state and its milestones, goal-mode's loop builds each one in a worktree, and auto-claude ships it (push, PR, CI, merge when green), then replans until the final check passes.",
+  "author": {
+    "name": "unohee"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "dependencies": ["goal-mode"],
+  "userConfig": {
+    "ciMode": {
+      "type": "string",
+      "title": "CI mode",
+      "description": "github: push, open a PR, wait for its checks, squash-merge when green. local: run the milestone's check, rebase onto the default branch and push it there. auto: github when gh can see the origin repository",
+      "default": "auto"
+    },
+    "maxRounds": { "type": "number", "title": "Max planning rounds", "description": "Replans after the queue empties while the final check still fails", "default": 3 },
+    "maxMerges": { "type": "number", "title": "Max merges per run", "description": "Stops and reports after this many merges", "default": 20 },
+    "maxHours": { "type": "number", "title": "Max hours per run", "description": "Stops and reports after this many hours", "default": 24 },
+    "ciPollSec": { "type": "number", "title": "CI poll interval (s)", "description": "How often the driver looks at the loop's log and the open PR", "default": 30 }
+  }
+}

@@ -47,7 +47,7 @@ const LOOP_OWNER_FRESH_MS = 10 * 60_000
 const LOOP_CHECK_TIMEOUT_MS = 600_000
 const LOOP_MIN_CHECKS_TO_DEFER = 2
 const LOOP_LOG_MAX_LINES = 2_000
-const LOOP_EXCLUDES = ['worktrees/', '.claude/goals.md', '.claude/goal-loop.log', '.claude/goal-loop.deny']
+const LOOP_EXCLUDES = ['worktrees/', '.claude/goals.md', '.claude/goal-loop.log', '.claude/goal-loop.deny', '.claude/goal-loop.base', '.claude/goal-loop.gate']
 
 // Change a tag when that value's fields change: it declines what an earlier
 // version stored, which outlives a reload.
@@ -155,7 +155,7 @@ type LoopRecord = {
   current?: LoopCurrent
 }
 
-type LogEvent = 'start' | 'unmet' | 'met' | 'retry' | 'blocked' | 'deferred' | 'denied' | 'queue-empty' | 'error'
+type LogEvent = 'start' | 'unmet' | 'met' | 'retry' | 'blocked' | 'deferred' | 'denied' | 'queue-empty' | 'gated' | 'error'
 
 // Claude Code's own /goal, when this build has it: goals go there, so they
 // show and are judged exactly as the person's own /goal (its ◎ indicator, its
@@ -768,13 +768,28 @@ async function startNext($: EngineInterface, rec: LoopRecord): Promise<LoopCurre
       return undefined
     }
 
+    // A driver's gate holds the loop, on, until it allows the next start.
+    const limit = gateLimit(await readTrimmed($, gatePath(root)))
+    if (limit !== undefined && rec.seq >= limit) {
+      await writeLoop($, { ...rec, current: undefined, retries: 0 })
+      await setLoopView($, undefined)
+      await update($, goalAtom, () => null)
+      await appendLog($, root, { event: 'gated', goal: item.condition, reason: `started ${rec.seq}, gate ${limit}` })
+      await showStatus($)
+
+      return undefined
+    }
+
     const seq = rec.seq + 1
     const name = `${String(seq).padStart(2, '0')}-${slugify(item.condition)}`
     const worktree = `${root}/worktrees/goal-${name}`
     const branch = `goal/${name}`
     rec = { ...rec, seq }
 
-    const made = await run($, ['git', '-C', root, 'worktree', 'add', worktree, '-b', branch], root, 60_000)
+    const base = item.base ?? (await readTrimmed($, basePath(root)))
+    // A remote base is fetched first, so the worktree starts from what was merged.
+    if (base !== undefined && base.includes('/')) await run($, ['git', '-C', root, 'fetch', '-q', base.split('/')[0]!], root, 60_000)
+    const made = await run($, ['git', '-C', root, 'worktree', 'add', worktree, '-b', branch, ...(base !== undefined ? [base] : [])], root, 60_000)
     if (made.exitCode !== 0) {
       const why = clip(made.stderr.trim() || made.stdout.trim() || 'git worktree add failed', 300)
       await markQueue($, root, item.condition, '!', `blocked ${isoNow()}: could not create worktree: ${why}`)
@@ -1045,6 +1060,28 @@ const loopKey = (root: string) => `loop:${root}`
 const queuePath = (root: string) => `${root}/.claude/goals.md`
 const logPath = (root: string) => `${root}/.claude/goal-loop.log`
 const denyPath = (root: string) => `${root}/.claude/goal-loop.deny`
+// Written by a driver (auto-claude) to steer the loop:
+// goal-loop.base: the ref new worktrees start from (e.g. origin/main);
+// goal-loop.gate: how many goals may have started in all. The loop holds,
+// on, before starting past it; `loop on` again picks up when it is raised.
+const basePath = (root: string) => `${root}/.claude/goal-loop.base`
+const gatePath = (root: string) => `${root}/.claude/goal-loop.gate`
+
+async function readTrimmed($: EngineInterface, path: string): Promise<string | undefined> {
+  try {
+    const text = (await $.fs.read(path)).trim()
+    return text === '' ? undefined : text
+  } catch {
+    return undefined
+  }
+}
+
+// Undefined: no gate. Otherwise the number of goals allowed to have started.
+export function gateLimit(text: string | undefined): number | undefined {
+  if (text === undefined) return undefined
+  const n = Number.parseInt(text, 10)
+  return Number.isFinite(n) && n >= 0 ? n : undefined
+}
 
 async function readLoop($: EngineInterface, root: string): Promise<LoopRecord | undefined> {
   const value = await $.store.get(loopKey(root))

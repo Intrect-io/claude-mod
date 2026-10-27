@@ -41,6 +41,15 @@
       },
       "source": "./fleet",
       "category": "development"
+    },
+    {
+      "name": "auto-claude",
+      "description": "Unattended run of a repository: Claude plans the long-term end state and milestones, goal-mode's loop builds each, auto-claude pushes, opens PRs and merges when CI is green, then replans until the final check passes.",
+      "author": {
+        "name": "unohee"
+      },
+      "source": "./auto-claude",
+      "category": "development"
     }
   ]
 }

@@ -13,7 +13,6 @@ import { seedFromTranscript } from './linear-guard'
 import { gcSignature, gcSummary, parseGcReport } from './memory-gc'
 import { lintPrompt, lintStop, lintToolCall } from './report-lint'
 import { issueIds, registerShipGate, shipPrompt, shipStop } from './ship-gate'
-import { segment } from './segment'
 import { DEFAULT_TOGGLES, INITIAL_SHIP } from './state'
 
 const envAtom = atom({ plugin: 'harness', key: 'env' } as const, {}, { shape: 'env-1' })

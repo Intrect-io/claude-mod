@@ -4,6 +4,7 @@
 //
 //   - [ ] fix add() :: check: pytest -q tests/test_counter.py
 //   - [x] fix add() :: check: pytest -q <!-- done 2026-10-24T13:10Z goal/01-fix-add, 4 checks -->
+//   - [ ] make CI green on PR #4 :: check: gh pr checks 4 :: base: goal/03-x   (worktree starts from that ref)
 
 export type QueueMark = ' ' | 'x' | '!'
 
@@ -12,12 +13,15 @@ export type QueueItem = {
   mark: QueueMark
   condition: string
   check?: string
+  // The ref the goal's worktree starts from, over .claude/goal-loop.base.
+  base?: string
   note?: string
 }
 
 const ITEM = /^\s*[-*] \[([ xX!])\] (.*)$/
 const NOTE = /\s*<!--([\s\S]*?)-->\s*$/
 const CHECK = ' :: check:'
+const BASE = /\s+:: base:\s*(\S+)\s*$/
 
 export function parseQueue(text: string): QueueItem[] {
   const items: QueueItem[] = []
@@ -32,11 +36,17 @@ export function parseQueue(text: string): QueueItem[] {
       note = (noteMatch[1] ?? '').trim()
       body = body.slice(0, noteMatch.index)
     }
+    let base: string | undefined
+    const baseMatch = body.match(BASE)
+    if (baseMatch !== null) {
+      base = baseMatch[1]
+      body = body.slice(0, baseMatch.index)
+    }
     const at = body.indexOf(CHECK)
     const condition = (at < 0 ? body : body.slice(0, at)).trim()
     const check = at < 0 ? undefined : body.slice(at + CHECK.length).trim() || undefined
     if (condition === '') return
-    items.push({ line, mark, condition, check, note })
+    items.push({ line, mark, condition, check, ...(base !== undefined ? { base } : {}), note })
   })
 
   return items
