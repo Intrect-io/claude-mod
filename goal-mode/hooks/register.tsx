@@ -157,11 +157,49 @@ type LoopRecord = {
 
 type LogEvent = 'start' | 'unmet' | 'met' | 'retry' | 'blocked' | 'deferred' | 'denied' | 'queue-empty' | 'error'
 
+// Claude Code's own /goal, when this build has it: goals go there, so they
+// show and are judged exactly as the person's own /goal (its ◎ indicator, its
+// evaluator, its "Goal achieved" card). This plugin then only chooses goals
+// (/goal-mode auto, the nudges) and runs the loop. Detected per load.
+const NATIVE_COMMAND = 'goal'
+const NATIVE_MAX_CHARS = 500
+let useNative = false
+// The goal this turn handed to /goal: one per turn, so a second set_goal never
+// queues a second /goal over it.
+let handedThisTurn: string | undefined
+
+// The one line /goal takes: the condition, its check folded in.
+export function nativeGoalArgs(condition: string, check: string | undefined): string {
+  return check ? `${condition} (check: ${check})` : condition
+}
+
+// A command run from inside a hook the turn waits on is refused, and one run
+// from a timer is queued until the session is idle: /goal lands as this turn ends.
+function runNativeLater($: EngineInterface, args: string): void {
+  $.clock.after(50, () => {
+    $.command.run({ command: NATIVE_COMMAND, args }).catch(error => $.ui.toast(`goal-mode: /goal ${clip(args, 40)} did not run: ${clip(String(error), 80)}`))
+  })
+}
+
 export const register: Register = (on, options) => {
   const autoGoal = options.autoGoal !== false
+  const nativeGoal = options.nativeGoal !== false
 
   on('session.start', async ($, e, next) => {
     await update($, metaAtom, meta => ({ ...meta, cwd: e.cwd }))
+    useNative = nativeGoal && (await $.command.list().catch(() => [])).some(c => c.name === NATIVE_COMMAND)
+    // A goal this plugin held before /goal took over (set by an earlier
+    // version, still running) moves to /goal, so every goal shows the same
+    // way. A loop's queue goal stays: the loop judges it itself.
+    const held = await read($, goalAtom)
+    if (useNative && held !== null && held.source !== 'queue') {
+      const args = nativeGoalArgs(held.condition, held.check)
+      if (args.length <= NATIVE_MAX_CHARS) {
+        await update($, goalAtom, () => null)
+        runNativeLater($, args)
+        $.ui.toast(`goal-mode: the running goal moved to /goal: ${clip(held.condition, 60)}`)
+      }
+    }
     await $.tool.register({
       name: TOOL,
       description: SET_GOAL_DESCRIPTION,
@@ -271,6 +309,26 @@ export const register: Register = (on, options) => {
       }
     }
 
+    // Handed to Claude Code's /goal: shown and judged as the person's own.
+    if (useNative && current === null) {
+      if (handedThisTurn !== undefined) {
+        return {
+          deny: `This turn already handed /goal its goal: "${clip(handedThisTurn, 120)}". It is set as the turn ends; only the person changes it (/${COMMAND} set or /goal clear).`,
+        }
+      }
+      const args = nativeGoalArgs(condition, check)
+      if (args.length > NATIVE_MAX_CHARS) {
+        return { deny: `/goal takes at most ${NATIVE_MAX_CHARS} characters with the check folded in; state one end state and a short check.` }
+      }
+      handedThisTurn = args
+      runNativeLater($, args)
+      $.ui.toast(`Goal → /goal: ${clip(condition, 70)}`)
+
+      return {
+        result: `Goal handed to Claude Code's /goal: "${args}". It is set as this turn ends; from then its own evaluator checks every stop (shown as ◎ /goal active). Tell the user the goal in one line and keep working on it.`,
+      }
+    }
+
     if (refining) {
       const intent = current.condition
       await update($, goalAtom, () => ({ ...newGoal(condition, check, 'user', Date.now()), intent }))
@@ -331,6 +389,11 @@ export const register: Register = (on, options) => {
 
   // Only a prompt a person typed resets the per-turn cap; a stop the evaluator
   // blocked continues the same turn and raises no UserPromptSubmit.
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) handedThisTurn = undefined
+    return next(e)
+  })
+
   on('classic.UserPromptSubmit', async ($, e, next) => {
     await rememberMode($, e.permission_mode)
     if (e.agent_id === undefined) {
@@ -438,11 +501,19 @@ export const register: Register = (on, options) => {
     if (args[0] === 'clear') {
       await update($, goalAtom, () => null)
       await showStatus($)
+      if (useNative) {
+        runNativeLater($, 'clear')
+        if (goal === null) return { text: 'Clearing /goal.' }
+      }
 
       return { text: goal === null ? 'No goal set.' : `Goal cleared: ${goal.condition}` }
     }
     if (goal === null) {
-      return { text: 'No goal set. Claude sets one itself when a task has a verifiable end state.' }
+      return {
+        text: useNative
+          ? 'Goals live in Claude Code\'s /goal in this session: /goal shows the current one. /goal-mode auto has Claude pick one.'
+          : 'No goal set. Claude sets one itself when a task has a verifiable end state.',
+      }
     }
 
     return {
@@ -482,6 +553,8 @@ async function autoCommand($: EngineInterface, hint: string): Promise<string> {
   const previous = await read($, goalAtom)
   if (previous !== null) await update($, goalAtom, () => null)
   await showStatus($)
+  // A /goal already running is cleared first; the one Claude picks replaces it.
+  if (useNative) runNativeLater($, 'clear')
   const how = meta.nativeSeen ? `${NATIVE_TOOL} with ask_user false` : TOOL_ID
   const kickoff = [
     `[goal-mode] The person ran /${COMMAND} auto: choose this session's goal yourself, to fit the situation as it stands now.`,
@@ -489,7 +562,7 @@ async function autoCommand($: EngineInterface, hint: string): Promise<string> {
     previous !== null ? `The goal before it (now cleared): ${previous.condition}${previous.lastReason ? ` — last check: ${previous.lastReason}` : ''}` : undefined,
     'Read the situation first: this conversation, any approved plan, the repository state (git status, branch, open PR), and work left unfinished or blocked.',
     'Pick the one next outcome that matters most and can be finished in this session, stated as one measurable end state with the check that proves it. Stay within the work this session is already about; do not widen scope.',
-    `Decide it yourself, without asking the person to choose; ask only if every candidate needs their call (credentials, payment, an irreversible step). Then call ${how}, tell the person the goal in one line, and start on it.`,
+    `Decide it yourself, without asking the person to choose; ask only if every candidate needs their call (credentials, payment, an irreversible step). The person asked for a goal, so set exactly one even when the work looks small: never answer without setting it. Call ${how} before doing the work, tell the person the goal in one line, then start on it.`,
   ]
     .filter(line => line !== undefined)
     .join('\n')
@@ -509,6 +582,16 @@ async function setCommand($: EngineInterface, text: string): Promise<string> {
   if (condition.length > MAX_CONDITION_CHARS) return `The condition is limited to ${MAX_CONDITION_CHARS} characters; state one end state.`
   if (meta.loop !== undefined) return `An autonomous loop is running and sets goals from its queue: /${COMMAND} loop off first.`
   if (meta.lastMode === 'plan') return 'Plan mode is active: every stop would be blocked while nothing can be done. Set the goal after the plan is approved.'
+  if (useNative) {
+    const args = nativeGoalArgs(condition, check)
+    if (args.length > NATIVE_MAX_CHARS) return `/goal takes at most ${NATIVE_MAX_CHARS} characters with the check folded in; state one end state and a short check.`
+    await update($, goalAtom, () => null)
+    await showStatus($)
+    // /goal sets it and starts the work itself.
+    runNativeLater($, args)
+
+    return `Goal → /goal: ${args}`
+  }
   const previous = await read($, goalAtom)
   await update($, goalAtom, () => newGoal(condition, check, 'user', Date.now()))
   await showStatus($)

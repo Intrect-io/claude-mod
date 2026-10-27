@@ -3,7 +3,7 @@ import type { TestBody } from 'claude-code/testing'
 
 type On = Parameters<TestBody>[1]
 
-import { autoGoalCandidate, parseSetArgs, parseVerdict, transcriptTail } from './register'
+import { autoGoalCandidate, nativeGoalArgs, parseSetArgs, parseVerdict, transcriptTail } from './register'
 
 const TOOL_ID = 'mcp__goal-mode__set_goal'
 const USAGE = {
@@ -320,6 +320,7 @@ describe('/goal-mode set', () => {
     expect(prompts[0]).toContain('Their hint: 배포 마무리 위주로')
     expect(prompts[0]).toContain('The goal before it (now cleared): old goal')
     expect(prompts[0]).toContain('without asking the person to choose')
+    expect(prompts[0]).toContain('set exactly one even when the work looks small')
 
     const set = await $.tool.call({ tool: TOOL_ID, condition: 'deploy verified', check: 'curl /health' })
     expect(set.deny).toBeUndefined()
@@ -340,7 +341,87 @@ describe('/goal-mode set', () => {
   })
 })
 
+describe("Claude Code's own /goal", () => {
+  const run = ($: Parameters<TestBody>[0], args: string) =>
+    $.command.run({ command: 'goal-mode', args, origin: { kind: 'composer' }, presentation: PRESENTATION })
+
+  function withNative(on: On) {
+    const calls = engine(on, [], TRANSCRIPT, false)
+    const clock = mock.clock(on, { now: 1_000 })
+    const goals: string[] = []
+    on('command.list', () => ({ value: [{ name: 'goal', description: 'Set a goal', source: 'builtin' }] }) as never)
+    on('command.run', ($, e, next) => {
+      if (e.command === 'goal') {
+        goals.push(e.args ?? '')
+        return { text: 'Goal set' }
+      }
+      return next(e)
+    })
+    on('prompt.submit', (_, e) => ({ text: e.text }))
+    // Nothing beneath the plugin answers turn.start: a hook stands for the engine.
+    on('turn.start', (_, e) => e as never)
+    return { calls, clock, goals }
+  }
+
+  test('set_goal hands the goal to /goal as the turn ends; no evaluator of its own runs', async ($, on) => {
+    const { calls, clock, goals } = withNative(on)
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+    const r = await $.tool.call({ tool: TOOL_ID, condition: 'bun test exits 0', check: 'bun test' })
+    expect(String(r.result)).toContain("handed to Claude Code's /goal")
+    expect(goals).toEqual([])
+    await clock.advance(100)
+    expect(goals).toEqual(['bun test exits 0 (check: bun test)'])
+    // One per turn: a second call in the same turn is refused, a new turn may set one.
+    expect((await $.tool.call({ tool: TOOL_ID, condition: 'bun test exits 0, faster' })).deny).toContain('already handed')
+    await $.turn.start({ text: 'next', turnId: 't2' } as never)
+    expect((await $.tool.call({ tool: TOOL_ID, condition: 'lint clean' })).deny).toBeUndefined()
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
+    expect(calls.complete).toBe(0)
+  })
+
+  test('/goal-mode set and clear go to /goal; an over-long goal is refused', async ($, on) => {
+    const { clock, goals } = withNative(on)
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+    expect((await run($, 'set PR merged --check gh pr view')).text).toBe('Goal → /goal: PR merged (check: gh pr view)')
+    expect((await run($, 'clear')).text).toBe('Clearing /goal.')
+    await clock.advance(100)
+    expect(goals).toEqual(['PR merged (check: gh pr view)', 'clear'])
+    expect((await $.tool.call({ tool: TOOL_ID, condition: 'x'.repeat(490), check: 'y'.repeat(20) })).deny).toContain('at most 500')
+  })
+
+  test('a goal an earlier version held moves to /goal on load; a loop goal stays', async ($, on) => {
+    const { clock, goals } = withNative(on)
+    // What the earlier version stored for this session's goal.
+    let seeded = false
+    on('state.get', (_, e, next) => {
+      const key = (e as { key?: string; ref?: { key?: string } }).key ?? (e as { ref?: { key?: string } }).ref?.key
+      if (key !== 'goal' || seeded) return next(e)
+      seeded = true
+      return key === 'goal'
+        ? ({ value: { value: { shape: 'goal-2', value: { condition: 'tests pass', check: 'pytest -q', source: 'model', setAt: 0, checks: 4, unmetThisTurn: 0, parseFailures: 0, recentReasons: [], status: 'active' } }, version: 1 } } as never)
+        : next(e)
+    })
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    await clock.advance(100)
+    expect(goals).toEqual(['tests pass (check: pytest -q)'])
+  })
+
+  test('auto clears the running /goal before Claude picks the next', async ($, on) => {
+    const { clock, goals } = withNative(on)
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    await run($, 'auto')
+    await clock.advance(100)
+    expect(goals).toEqual(['clear'])
+  })
+})
+
 describe('helpers', () => {
+  test('nativeGoalArgs folds the check into one line', () => {
+    expect(nativeGoalArgs('a', undefined)).toBe('a')
+    expect(nativeGoalArgs('a', 'b')).toBe('a (check: b)')
+  })
   test('parseSetArgs splits the condition from --check', () => {
     expect(parseSetArgs(' tests pass --check  pytest -q | tail -1 ')).toEqual({ condition: 'tests pass', check: 'pytest -q | tail -1' })
     expect(parseSetArgs('grep a | wc -l prints 0')).toEqual({ condition: 'grep a | wc -l prints 0' })

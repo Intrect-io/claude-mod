@@ -2,6 +2,15 @@
 
 Lets Claude set its own session goal, then keeps it working until an independent evaluator confirms the goal is met.
 
+**On builds with Claude Code's own `/goal` (0.5.0), goals go there.** `set_goal`, `/goal-mode set` and `/goal-mode auto` all end in `/goal <condition> (check: …)`. That means:
+
+- The goal shows exactly as your own `/goal` would: `◎ /goal active`, the built-in evaluator, the `✔ Goal achieved` card, `/goal clear`.
+- This plugin then chooses goals (`auto`, the nudges) and runs the loop, but does no judging of its own.
+- A `set_goal` call made mid-turn lands as that turn ends, because the engine refuses a command from inside a turn. The plugin hands off one goal per turn.
+- The condition, with its check folded in, is limited to 500 characters.
+- `/goal-mode clear` also runs `/goal clear`.
+- Turn this off with `nativeGoal: false`. The plugin's own evaluator, described below, is used wherever `/goal` is absent.
+
 - **Setter**: the model calls `mcp__goal-mode__set_goal` with one measurable end state (and optionally its check) when the user asked for a verifiable, multi-turn outcome. No approval prompt; the model reports the goal in one line. Refused in plan mode, when a goal is already set, or when Claude Code's native `ProposeGoal` tool is available (the model is told to use that instead).
 - **Evaluator**: at every main-thread Stop, `claude-sonnet-5-5` judges the goal from the final message plus the transcript tail (real tool output only counts). Unmet blocks the stop with the reason. A transcript over the 4 MiB read cap is judged by a fork of the session instead.
 - **Pauses** (stop is allowed, a typed message resumes): evaluator failure, two unreadable verdicts, 5 unmet checks in one turn, or 30 checks in total.
