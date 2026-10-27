@@ -368,16 +368,41 @@ describe("Claude Code's own /goal", () => {
     await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
     const r = await $.tool.call({ tool: TOOL_ID, condition: 'bun test exits 0', check: 'bun test' })
-    expect(String(r.result)).toContain("handed to Claude Code's /goal")
+    // No ProposeGoal beneath: queued for /goal, landing as the turn ends.
+    expect(String(r.result)).toContain("queued for Claude Code's /goal")
     expect(goals).toEqual([])
+    // Nothing runs mid-turn; the stop hands it to /goal.
+    await clock.advance(100)
+    expect(goals).toEqual([])
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
     await clock.advance(100)
     expect(goals).toEqual(['bun test exits 0 (check: bun test)'])
     // One per turn: a second call in the same turn is refused, a new turn may set one.
     expect((await $.tool.call({ tool: TOOL_ID, condition: 'bun test exits 0, faster' })).deny).toContain('already handed')
     await $.turn.start({ text: 'next', turnId: 't2' } as never)
     expect((await $.tool.call({ tool: TOOL_ID, condition: 'lint clean' })).deny).toBeUndefined()
+    // Interrupted (no stop): the next turn's start runs it.
+    await $.turn.start({ text: 'again', turnId: 't3' } as never)
+    await clock.advance(100)
+    expect(goals).toEqual(['bun test exits 0 (check: bun test)', 'lint clean'])
     expect((await $.classic.Stop(STOP)).block).toBeUndefined()
     expect(calls.complete).toBe(0)
+  })
+
+  test('where ProposeGoal answers, the goal is set at once and nothing is queued', async ($, on) => {
+    const { clock, goals } = withNative(on)
+    const proposed: unknown[] = []
+    on('tool.call', { tool: 'ProposeGoal' }, (_, e) => {
+      proposed.push(e)
+      return { result: 'Goal set' }
+    })
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+    const r = await $.tool.call({ tool: TOOL_ID, condition: 'lint clean', check: 'bun lint' })
+    expect(String(r.result)).toContain("Goal set in Claude Code's /goal")
+    expect(proposed).toEqual([expect.objectContaining({ tool: 'ProposeGoal', condition: 'lint clean (check: bun lint)', ask_user: false })])
+    await clock.advance(100)
+    expect(goals).toEqual([])
   })
 
   test('/goal-mode set and clear go to /goal; an over-long goal is refused', async ($, on) => {

@@ -167,10 +167,33 @@ let useNative = false
 // The goal this turn handed to /goal: one per turn, so a second set_goal never
 // queues a second /goal over it.
 let handedThisTurn: string | undefined
+// A hand-off not yet run as /goal: run when the turn stops, or, when an
+// interrupt skipped the stop, when the next turn starts.
+let pendingNative: string | undefined
+
+function flushNative($: EngineInterface): void {
+  if (pendingNative === undefined) return
+  const args = pendingNative
+  pendingNative = undefined
+  runNativeLater($, args)
+}
 
 // The one line /goal takes: the condition, its check folded in.
 export function nativeGoalArgs(condition: string, check: string | undefined): string {
   return check ? `${condition} (check: ${check})` : condition
+}
+
+// ProposeGoal with ask_user false sets the built-in goal at once, mid-turn.
+// False where the engine has no such tool or refuses the call.
+async function proposeNow($: EngineInterface, condition: string): Promise<boolean> {
+  try {
+    const ran = (await $.tool.call({ tool: NATIVE_TOOL, condition, ask_user: false } as never)) as { deny?: unknown; isError?: unknown; error?: unknown; result?: unknown; text?: unknown }
+    if (ran.deny !== undefined || ran.isError === true || ran.error !== undefined) return false
+    const said = String(ran.text ?? ran.result ?? '')
+    return !/error|not available|unknown tool|no such tool/i.test(said)
+  } catch {
+    return false
+  }
 }
 
 // A command run from inside a hook the turn waits on is refused, and one run
@@ -321,11 +344,21 @@ export const register: Register = (on, options) => {
         return { deny: `/goal takes at most ${NATIVE_MAX_CHARS} characters with the check folded in; state one end state and a short check.` }
       }
       handedThisTurn = args
-      runNativeLater($, args)
+      // Set now through the engine's own ProposeGoal (no dialog): the goal
+      // shows at once. Where the engine refuses it, /goal is queued instead,
+      // and lands as the turn ends (an interrupted turn drops a queued command).
+      if (await proposeNow($, args)) {
+        $.ui.toast(`Goal set: ${clip(condition, 70)}`)
+
+        return {
+          result: `Goal set in Claude Code's /goal: "${args}". It shows as ◎ /goal active, and its own evaluator checks every stop. Tell the user the goal in one line and keep working on it.`,
+        }
+      }
+      pendingNative = args
       $.ui.toast(`Goal → /goal: ${clip(condition, 70)}`)
 
       return {
-        result: `Goal handed to Claude Code's /goal: "${args}". It is set as this turn ends; from then its own evaluator checks every stop (shown as ◎ /goal active). Tell the user the goal in one line and keep working on it.`,
+        result: `Goal queued for Claude Code's /goal: "${args}". It is set when this turn ends, so end the turn soon: tell the user the goal in one line and stop; /goal then continues the work and its own evaluator checks every stop.`,
       }
     }
 
@@ -390,7 +423,11 @@ export const register: Register = (on, options) => {
   // Only a prompt a person typed resets the per-turn cap; a stop the evaluator
   // blocked continues the same turn and raises no UserPromptSubmit.
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined) handedThisTurn = undefined
+    if (e.agentId === undefined) {
+      handedThisTurn = undefined
+      // Interrupted before its stop: the hand-off runs now instead.
+      flushNative($)
+    }
     return next(e)
   })
 
@@ -432,6 +469,9 @@ export const register: Register = (on, options) => {
   on('classic.Stop', async ($, e, next) => {
     await rememberMode($, e.permission_mode)
     const below = await next(e)
+    // The turn is ending: /goal runs right after it (a timer, since a command
+    // from inside this hook is refused).
+    if (e.agent_id === undefined && below.block === undefined) flushNative($)
     const goal = await read($, goalAtom)
 
     if (
