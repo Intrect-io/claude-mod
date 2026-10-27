@@ -29,3 +29,9 @@ For development, add a local clone instead (`claude plugin marketplace add /path
 claude plugin validate <mod>
 claude plugin test <mod>
 ```
+
+`scripts/ci.sh` runs the whole gate that `.github/workflows/ci.yml` runs on every pull request and on main. It validates the marketplace and every mod, runs every mod's tests, and typechecks and tests fleet-hub. `claude plugin test` exits 0 even when a test fails, so the script reads the pass and fail counts instead.
+
+```sh
+bash scripts/ci.sh
+```
