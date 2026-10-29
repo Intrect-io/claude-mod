@@ -668,8 +668,11 @@ async function setCommand($: EngineInterface, text: string): Promise<string> {
 // `byDriver`: run by another mod (auto-claude) rather than typed by the person.
 async function loopCommand($: EngineInterface, action: string, byDriver = false): Promise<string> {
   const meta = await read($, metaAtom)
-  const root = await repoRootOf($, meta.cwd)
-  if (root === undefined) return 'Not inside a git repository: the loop needs one.'
+  const found = await sessionRepo($, meta.cwd)
+  const root = found.root
+  if (root === undefined) {
+    return `Not inside a git repository: the loop needs one (looked from ${found.tried.length > 0 ? found.tried.join(' and ') : 'no known directory'}).`
+  }
   const rec = await readLoop($, root)
 
   if (action === 'status') return loopStatus($, root, rec)
@@ -888,7 +891,7 @@ async function loopStop<R extends { block?: string }>(
 ): Promise<R> {
   const meta = await read($, metaAtom)
   const loop = meta.loop
-  const root = loop?.repoRoot ?? (await repoRootOf($, meta.cwd))
+  const root = loop?.repoRoot ?? (await sessionRepo($, meta.cwd)).root
   if (root === undefined) return below
   const rec = await readLoop($, root)
   if (rec === undefined || rec.current === undefined || loop === undefined) {
@@ -1072,6 +1075,28 @@ async function repoRootOf($: EngineInterface, cwd: string | undefined): Promise<
   } catch {
     return undefined
   }
+}
+
+// The repository to run the loop in, looked for from the session's directory
+// now and then from the one recorded at session.start, each from its nearest
+// ancestor that still exists. The recorded one alone could go stale (measured
+// in cgf-portal: `loop on` kept answering "Not inside a git repository" in a
+// session whose directory was the repository root, while a fresh session there
+// found it), and a milestone's worktree that the session had cd'ed into is
+// removed once it lands.
+async function sessionRepo($: EngineInterface, recorded: string | undefined): Promise<{ root?: string; tried: string[] }> {
+  const live = await $.session.cwd().catch(() => undefined)
+  const tried: string[] = []
+  for (const start of [live, recorded]) {
+    if (start === undefined || tried.includes(start)) continue
+    tried.push(start)
+    let dir = start
+    while (dir !== '/' && !(await $.fs.exists(dir).catch(() => true))) dir = dir.slice(0, dir.lastIndexOf('/')) || '/'
+    const root = await repoRootOf($, dir)
+    if (root !== undefined) return { root, tried }
+  }
+
+  return { tried }
 }
 
 const loopKey = (root: string) => `loop:${root}`
