@@ -526,7 +526,7 @@ export const register: Register = (on, options) => {
     const args = e.args.trim().split(/\s+/).filter(word => word !== '')
 
     if (args[0] === 'loop') {
-      return { text: await loopCommand($, args[1] ?? 'status') }
+      return { text: await loopCommand($, args[1] ?? 'status', e.origin?.kind === 'plugin') }
     }
 
     // `auto`, or `set` with nothing after it: Claude picks the goal itself.
@@ -659,7 +659,8 @@ async function setCommand($: EngineInterface, text: string): Promise<string> {
 
 // ---------------------------------------------------------------- loop mode
 
-async function loopCommand($: EngineInterface, action: string): Promise<string> {
+// `byDriver`: run by another mod (auto-claude) rather than typed by the person.
+async function loopCommand($: EngineInterface, action: string, byDriver = false): Promise<string> {
   const meta = await read($, metaAtom)
   const root = await repoRootOf($, meta.cwd)
   if (root === undefined) return 'Not inside a git repository: the loop needs one.'
@@ -685,7 +686,12 @@ async function loopCommand($: EngineInterface, action: string): Promise<string> 
     return 'Another session runs this loop and was active in the last 10 minutes; stop it there first.'
   }
   const goal = await read($, goalAtom)
-  if (goal !== null && goal.source !== 'queue') {
+  // A goal the model set itself (nudged mid-run) would otherwise wedge a
+  // driver's loop for good; the driver's queue wins over it. A person's goal
+  // still refuses.
+  if (goal !== null && goal.source === 'model' && byDriver) {
+    await update($, goalAtom, () => null)
+  } else if (goal !== null && goal.source !== 'queue') {
     return `A session goal is active ("${clip(goal.condition, 60)}"): /${COMMAND} clear it before starting the loop.`
   }
 
@@ -715,6 +721,9 @@ async function loopCommand($: EngineInterface, action: string): Promise<string> 
   }
   const pending = summarize(parseQueue(queueText)).pending
   const started = await startNext($, owned)
+  if (started === undefined && pending > 0 && (gateLimit(await readTrimmed($, gatePath(root))) ?? 1) <= 0) {
+    return `Loop on, held by the driver's gate (.claude/goal-loop.gate allows no more starts); ${pending} pending.`
+  }
 
   return started === undefined
     ? `Loop on, but the queue has no pending goals (${pending}).`
@@ -768,13 +777,13 @@ async function startNext($: EngineInterface, rec: LoopRecord): Promise<LoopCurre
       return undefined
     }
 
-    // A driver's gate holds the loop, on, until it allows the next start.
+    // A driver's gate holds the loop, on, until it grants the next start.
     const limit = gateLimit(await readTrimmed($, gatePath(root)))
-    if (limit !== undefined && rec.seq >= limit) {
+    if (limit !== undefined && limit <= 0) {
       await writeLoop($, { ...rec, current: undefined, retries: 0 })
       await setLoopView($, undefined)
       await update($, goalAtom, () => null)
-      await appendLog($, root, { event: 'gated', goal: item.condition, reason: `started ${rec.seq}, gate ${limit}` })
+      await appendLog($, root, { event: 'gated', goal: item.condition, reason: `started ${rec.seq}, gate ${limit}: no start granted` })
       await showStatus($)
 
       return undefined
@@ -810,6 +819,9 @@ async function startNext($: EngineInterface, rec: LoopRecord): Promise<LoopCurre
     await setLoopView($, { repoRoot: root, worktree, branch, extraDeny: await readDenyFile($, root) })
     await update($, goalAtom, () => newGoal(item.condition, item.check, 'queue', Date.now()))
     await appendLog($, root, { event: 'start', goal: item.condition, worktree, branch })
+    // The start is logged before the credit is spent: a driver reads the gate
+    // first and the log after, so it never sees a spent gate without the start.
+    if (limit !== undefined) await $.fs.write(gatePath(root), `${limit - 1}\n`)
     await showStatus($)
     submitLater($, root, kickoffText(current, seq), LOOP_KICKOFF_DELAY_MS)
 
@@ -1062,8 +1074,9 @@ const logPath = (root: string) => `${root}/.claude/goal-loop.log`
 const denyPath = (root: string) => `${root}/.claude/goal-loop.deny`
 // Written by a driver (auto-claude) to steer the loop:
 // goal-loop.base: the ref new worktrees start from (e.g. origin/main);
-// goal-loop.gate: how many goals may have started in all. The loop holds,
-// on, before starting past it; `loop on` again picks up when it is raised.
+// goal-loop.gate: how many more goals may start (a credit, independent of the
+// loop's own seq, which carries over between runs). Each start spends one;
+// at 0 the loop holds, on, and `loop on` again picks up once it is raised.
 const basePath = (root: string) => `${root}/.claude/goal-loop.base`
 const gatePath = (root: string) => `${root}/.claude/goal-loop.gate`
 
@@ -1076,7 +1089,7 @@ async function readTrimmed($: EngineInterface, path: string): Promise<string | u
   }
 }
 
-// Undefined: no gate. Otherwise the number of goals allowed to have started.
+// Undefined: no gate. Otherwise the number of starts still allowed.
 export function gateLimit(text: string | undefined): number | undefined {
   if (text === undefined) return undefined
   const n = Number.parseInt(text, 10)
@@ -1333,6 +1346,8 @@ export function autoGoalCandidate(prompt: string): boolean {
   const text = prompt.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, ' ').trim()
   if (text.length < AUTO_GOAL_MIN_CHARS) return false
   if (/<command-name>/.test(text) || text.startsWith('/')) return false
+  // A driver's or the loop's own prompt: the loop sets those goals itself.
+  if (/^\[(auto-claude|goal-mode)[\] ]/.test(text)) return false
   // A question, not a request for an outcome.
   if (/[?？]\s*$/.test(text) || /(인가요|일까요|나요|습니까|어때|뭐야|왜)\s*[?？]?\s*$/.test(text)) return false
 

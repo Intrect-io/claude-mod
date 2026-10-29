@@ -80,7 +80,7 @@ describe('ship', () => {
 
 // The machine beneath the plugin, local CI mode: files in memory, git and
 // checks answered by argv, goal-mode's loop played by the test.
-function world(on: On) {
+function world(on: On, store: Record<string, unknown> = {}) {
   const w = {
     files: new Map<string, string>([['/repo/.git/info/exclude', '']]),
     prompts: [] as string[],
@@ -89,9 +89,17 @@ function world(on: On) {
     notifies: [] as string[],
     pushes: [] as string[],
     checkExit: 0,
+    // Worktree directories removed from under the run, and whether their branches went too.
+    gone: new Set<string>(),
+    branchGone: false,
+    // GitHub CI mode, and a branch push whose git cannot be spawned.
+    github: false,
+    gitGone: false,
+    // What goal-mode answers to `loop on`.
+    loopReply: 'Loop on: started',
     clock: mock.clock(on, { now: 1_000 }),
   }
-  mock.store(on, {})
+  mock.store(on, store)
   on('tool.register', (_, e) => ({ value: { tool: `mcp__auto-claude__${e.name}` } }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -119,7 +127,7 @@ function world(on: On) {
   })
   on('command.run', (_, e) => {
     w.commands.push(`${e.command} ${e.args ?? ''}`.trim())
-    return { text: 'ok' }
+    return { text: w.loopReply }
   })
   on('tool.call', () => ({ result: 'no fleet' }))
   on('process.run', (_, e) => {
@@ -129,8 +137,12 @@ function world(on: On) {
     if (a.includes('--git-common-dir')) return ok('/repo/.git\n')
     if (a.endsWith(' remote')) return ok('origin\n')
     if (a.includes('symbolic-ref')) return ok('origin/main\n')
-    if (a.startsWith('gh repo view')) return ok('', 1)
+    if (a.startsWith('gh repo view')) return ok('', w.github ? 0 : 1)
+    if (e.argv[0] === 'test' && e.argv[1] === '-d') return ok('', w.gone.has(String(e.argv[2])) ? 1 : 0)
+    if (a.includes('rev-parse --verify')) return ok('', w.branchGone ? 1 : 0)
+    if (a.includes('worktree add') && !a.includes('--detach')) w.gone.delete(String(e.argv[5]))
     if (e.argv[0] === 'bash') return ok('', w.checkExit)
+    if (w.gitGone && a.includes(' push -u ')) return { value: { exitCode: -1, stdout: '', stderr: "posix_spawn 'git' ENOENT", isStdoutTruncated: false, isStderrTruncated: false } }
     if (a.includes(' push ')) {
       w.pushes.push(a)
       return ok()
@@ -141,9 +153,25 @@ function world(on: On) {
 }
 
 const cmd = ($: Engine, args: string) => $.command.run({ command: 'auto-claude', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
-const log = (w: ReturnType<typeof world>, lines: object[]) => {
-  const prev = w.files.get('/repo/.claude/goal-loop.log') ?? ''
-  w.files.set('/repo/.claude/goal-loop.log', prev + lines.map(l => JSON.stringify(l)).join('\n') + '\n')
+// goal-mode's side: each start is logged, then spends one of the gate's credit.
+const log = (w: ReturnType<typeof world>, lines: Array<{ event: string } & Record<string, unknown>>) => {
+  for (const line of lines) {
+    const prev = w.files.get('/repo/.claude/goal-loop.log') ?? ''
+    w.files.set('/repo/.claude/goal-loop.log', `${prev}${JSON.stringify(line)}\n`)
+    if (line.event !== 'start') continue
+    const credit = Number.parseInt(w.files.get('/repo/.claude/goal-loop.gate') ?? '', 10)
+    if (Number.isFinite(credit)) w.files.set('/repo/.claude/goal-loop.gate', `${Math.max(credit - 1, 0)}\n`)
+  }
+}
+const GATE = '/repo/.claude/goal-loop.gate'
+const MIN = 60_000
+
+async function planned($: Engine, w: ReturnType<typeof world>) {
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  await cmd($, 'start')
+  w.files.set('/repo/.claude/auto-plan.md', PLAN)
+  w.files.set('/repo/.claude/goals.md', QUEUE)
+  await $.tool.call({ tool: 'mcp__auto-claude__auto_plan_ready' } as never)
 }
 
 describe('a run, local CI', () => {
@@ -180,7 +208,8 @@ describe('a run, local CI', () => {
     await w.clock.advance(30_000) // check, rebase, push to main → merged, gate raised
     expect(w.pushes.some(p => p.includes('HEAD:main') && p.includes('goal-01-add'))).toBe(true)
     expect(w.runs.some(r => r.includes('worktree remove /repo/worktrees/goal-01-add'))).toBe(true)
-    expect(w.files.get('/repo/.claude/goal-loop.gate')).toBe('2\n')
+    // One more start granted, whatever goal-mode's own seq is.
+    expect(w.files.get('/repo/.claude/goal-loop.gate')).toBe('1\n')
     await w.clock.advance(30_000)
     expect(w.commands).toEqual(['goal-mode loop on', 'goal-mode loop on'])
 
@@ -207,7 +236,8 @@ describe('a run, local CI', () => {
     await $.tool.call({ tool: 'mcp__auto-claude__auto_plan_ready' } as never)
     log(w, [{ event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' }])
     for (let i = 0; i < 3; i++) await w.clock.advance(30_000)
-    expect(w.files.get('/repo/.claude/goal-loop.gate')).toBe('1\n')
+    // Spent by that start and not granted again.
+    expect(w.files.get('/repo/.claude/goal-loop.gate')).toBe('0\n')
   })
 
   test('a failing check adds a fix goal on the milestone branch; three failures hold it', async ($, on) => {
@@ -240,4 +270,109 @@ describe('a run, local CI', () => {
     expect(w.commands).toContain('goal-mode loop off')
     expect((await cmd($, 'status')).text).toContain('phase stopped')
   })
+
+  test('a loop on that starts nothing is asked again, backing off, and the person told with its reply', async ($, on) => {
+    const w = world(on)
+    w.loopReply = 'A session goal is active ("x"): /goal-mode clear it before starting the loop.'
+    await planned($, w)
+    await w.clock.advance(30_000)
+    expect(w.commands).toEqual(['goal-mode loop on'])
+    // Nothing is logged: the grant stands, and the loop is asked again.
+    for (let i = 0; i < 40; i++) await w.clock.advance(30_000)
+    expect(w.commands.filter(c => c === 'goal-mode loop on').length).toBeGreaterThanOrEqual(4)
+    expect(w.commands.filter(c => c === 'goal-mode loop on').length).toBeLessThan(10)
+    expect(w.notifies.some(n => n.includes('does not take the next milestone') && n.includes('A session goal is active'))).toBe(true)
+    expect((await cmd($, 'status')).text).toContain('/goal-mode loop on starts nothing')
+    expect(w.files.get(GATE)).toBe('1\n')
+
+    // Once the loop starts it, the tries reset.
+    log(w, [{ event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' }])
+    await w.clock.advance(30_000)
+    expect((await cmd($, 'status')).text).not.toContain('starts nothing')
+  })
+
+  test('a run from before the credit gate has its absolute gate rewritten, then one start granted', async ($, on) => {
+    const old = { on: true, phase: 'run', root: '/repo', sessionId: 'me', hint: '', round: 1, startedAt: Date.now(), remote: 'origin', defaultBranch: 'main', ciMode: 'local', logOffset: 0, started: 1, finished: 1, gate: 2, kicked: 2, worktrees: {}, ships: [], fixes: {}, merges: 1, held: 0, queueEmpty: false }
+    const w = world(on, { 'auto:/repo': old })
+    w.files.set(GATE, '2\n')
+    w.files.set('/repo/.claude/goals.md', QUEUE.replace('- [ ] add', '- [x] add'))
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await w.clock.advance(30_000)
+    expect(w.files.get(GATE)).toBe('1\n')
+    await w.clock.advance(30_000)
+    expect(w.commands).toEqual(['goal-mode loop on'])
+  })
+
+  test('a run whose owning session went quiet is reported elsewhere, unattended rules kept out, and resumed on request', async ($, on) => {
+    const other = { on: true, phase: 'run', root: '/repo', sessionId: 'gone', hint: '', round: 1, startedAt: Date.now(), beatAt: -20 * MIN, remote: 'origin', defaultBranch: 'main', ciMode: 'local', logOffset: 0, started: 1, finished: 1, credit: true, worktrees: {}, ships: [], fixes: {}, merges: 1, held: 0, queueEmpty: false }
+    const w = world(on, { 'auto:/repo': other })
+    w.files.set('/repo/.claude/goals.md', QUEUE.replace('- [ ] add', '- [x] add'))
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    const composed = await $.prompt.compose({ sections: [], text: '', model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: [], tools: [], outputStyle: null, traits: [] } as never)
+    expect(JSON.stringify(composed)).not.toContain('auto-claude:policy')
+    await w.clock.advance(30_000)
+    await w.clock.advance(30_000)
+    expect(w.notifies.filter(n => n.includes('went quiet'))).toHaveLength(1)
+    expect(w.commands).toEqual([])
+
+    expect((await cmd($, 'resume')).text).toContain('Resumed: phase run')
+    await w.clock.advance(30_000)
+    await w.clock.advance(30_000)
+    expect(w.commands).toEqual(['goal-mode loop on'])
+    expect(JSON.stringify(await $.prompt.compose({ sections: [], text: '', model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: [], tools: [], outputStyle: null, traits: [] } as never))).toContain('auto-claude:policy')
+  })
+
+  test('a run still planning is reminded with what the files lack, then stopped', async ($, on) => {
+    const w = world(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start')
+    await w.clock.advance(200)
+    expect(w.prompts).toHaveLength(1)
+    await w.clock.advance(16 * MIN)
+    expect(w.prompts[1]).toContain('Reminder 1/3')
+    expect(w.prompts[1]).toContain('auto-plan.md is missing')
+    for (let i = 0; i < 3; i++) await w.clock.advance(16 * MIN)
+    expect(w.prompts.filter(p => p.includes('Reminder'))).toHaveLength(3)
+    expect((await cmd($, 'status')).text).toContain('no plan was accepted after 3 reminders')
+    expect(w.files.get(GATE)).toBe('')
+  })
+
+  test('the same shipping error tick after tick is told once', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    w.gitGone = true
+    await planned($, w)
+    log(w, [
+      { event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ])
+    for (let i = 0; i < 14; i++) await w.clock.advance(30_000)
+    // Not a CI failure, so no fix goal: it repeats, and is told exactly once.
+    expect(w.notifies.filter(n => n.includes('stuck at push') && n.includes('ENOENT'))).toHaveLength(1)
+  })
+
+  test('a milestone whose worktree was removed is made again from its branch, or held when the branch is gone too', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    log(w, [
+      { event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ])
+    w.gone.add('/repo/worktrees/goal-01-add')
+    await w.clock.advance(30_000)
+    expect(w.runs).toContain('git -C /repo worktree add /repo/worktrees/goal-01-add goal/01-add')
+    await w.clock.advance(30_000)
+    expect(w.pushes.some(p => p.includes('HEAD:main'))).toBe(true)
+
+    // The next one loses its branch as well: held and told, not retried forever.
+    log(w, [
+      { event: 'start', goal: 'sub() returns a-b', worktree: '/repo/worktrees/goal-02-sub', branch: 'goal/02-sub' },
+      { event: 'met', goal: 'sub() returns a-b', branch: 'goal/02-sub' },
+    ])
+    w.gone.add('/repo/worktrees/goal-02-sub')
+    w.branchGone = true
+    await w.clock.advance(30_000)
+    expect(w.notifies.some(n => n.includes('held') && n.includes('branch goal/02-sub are gone'))).toBe(true)
+  })
 })
+

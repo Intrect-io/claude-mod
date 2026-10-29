@@ -105,8 +105,18 @@ export const POLICY = [
   'auto-claude is running this repository unattended (CLAUDE.md §6.5 rules for an unanswered question apply at once: nobody will answer).',
   '- Decide every choice yourself: the recommended option, or the safest when it is plainly wrong; write it with its reason under ## Decisions in .claude/auto-plan.md.',
   '- Merging is auto-claude\'s: never run gh pr merge or release yourself. Commit your milestone on its goal/* branch; push and PRs happen for you.',
+  '- goal-mode\'s loop sets each milestone as the goal itself: never call set_goal or /goal during the run (a goal of yours would hold the loop).',
   '- An irreversible step (deleting data, credentials, payment, a public release) is never taken: call mcp__goal-mode__defer_goal with the reason instead.',
 ].join('\n')
+
+// The reminder for a run still waiting on its plan, with what the files lack.
+export function planNudgeText(nudge: number, max: number, errors: readonly string[]): string {
+  return [
+    `[auto-claude] Reminder ${nudge}/${max}: the run is still waiting for its plan; nothing is built until mcp__auto-claude__${READY_TOOL} accepts it.`,
+    errors.length > 0 ? `What the files lack now:\n- ${errors.join('\n- ')}` : 'The files look ready: call it now.',
+    `Write .claude/auto-plan.md and .claude/goals.md as the first prompt of this run asked, then call mcp__auto-claude__${READY_TOOL}. Decide yourself; nobody is watching. After ${max} reminders the run stops.`,
+  ].join('\n')
+}
 
 // The queue line for repairing a PR whose CI failed or that no longer merges.
 export function fixLine(goal: string, pr: number | undefined, reason: string, check: string | undefined, branch: string): string {

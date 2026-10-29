@@ -16,7 +16,7 @@ It depends on [goal-mode](../goal-mode/), which supplies the loop: one worktree 
    - It writes `.claude/auto-plan.md`: the goal, a `Final check: <command>` line, milestones, and a decisions log.
    - It writes `.claude/goals.md`: one line per milestone, `- [ ] <end state> :: check: <command>`.
    - It calls `auto_plan_ready`, which validates both files. The plan needs a final check, at least 2 milestones, a check on every line and no duplicates.
-2. **Build.** auto-claude points the loop at `origin/<default>` through `.claude/goal-loop.base` and opens its gate one goal at a time through `.claude/goal-loop.gate`. goal-mode builds the milestone in `worktrees/goal-NN-…` and judges it.
+2. **Build.** auto-claude points the loop at `origin/<default>` through `.claude/goal-loop.base` and grants it one start at a time through `.claude/goal-loop.gate`. The gate is a credit, so goal counts left from earlier runs don't matter. goal-mode builds the milestone in `worktrees/goal-NN-…` and judges it.
 3. **Ship.** This runs as auto-claude's own process calls, never as a model turn.
    - **github**: push, `gh pr create`, wait for `gh pr checks`, re-read the PR state, then `gh pr merge --squash --delete-branch`.
    - **local**: run the milestone's check, rebase onto `origin/<default>`, push to it.
@@ -33,6 +33,12 @@ It depends on [goal-mode](../goal-mode/), which supplies the loop: one worktree 
 - **goal-mode's guards apply too.** Force pushes, direct pushes to main, `reset --hard`, deploy commands, `sudo`, edits outside the worktree and AskUserQuestion are all refused.
 - **Caps.** A run stops and reports after `maxMerges` (20) merges, after `maxHours` (24), or after `maxRounds` (3) rounds without the final check passing.
 - **Kill switch.** Create `.claude/auto-claude.stop`, or run `/auto-claude stop`. Either one also turns the loop off.
+- **Nothing stalls silently.**
+  - A `/goal-mode loop on` that starts nothing is retried with backoff. After 3 tries the person is told the loop's reply.
+  - A run still planning gets a reminder every 15 minutes that lists what the plan files lack. After 3 reminders the run stops.
+  - A shipping error that repeats is reported once.
+  - A run whose owning session has gone quiet for 10 minutes is reported as orphaned in other sessions, and `/auto-claude resume` picks it up there.
+  - Only the owning session receives the unattended rules.
 - **Reporting.** Progress shows in the status line piece (`auto·R1·M3/7·PR#12`), in notifications, and on the fleet dashboard's `#all` channel when the fleet mod is installed.
 
 Options: `ciMode` (`auto` | `github` | `local`), `maxRounds`, `maxMerges`, `maxHours` and `ciPollSec`.

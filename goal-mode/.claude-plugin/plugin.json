@@ -1,6 +1,6 @@
 {
   "name": "goal-mode",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Lets Claude set its own session goal; an independent evaluator keeps it working at Stop until the goal is met (defers to native ProposeGoal when available).",
   "types": "./types/index.d.ts",
   "license": "MIT",

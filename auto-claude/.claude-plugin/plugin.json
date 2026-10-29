@@ -1,6 +1,6 @@
 {
   "name": "auto-claude",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Finishes a repository's work unattended: Claude plans the long-term end state and its milestones, goal-mode's loop builds each one in a worktree, and auto-claude ships it (push, PR, CI, merge when green), then replans until the final check passes.",
   "author": {
     "name": "unohee"

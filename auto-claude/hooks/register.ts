@@ -1,9 +1,9 @@
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { AutoRecord, ShipItem } from '../types'
-import { fixLine, kickoffText, parseQueue, POLICY, READY_TOOL, replanText, validatePlan } from './plan'
+import { fixLine, kickoffText, parseQueue, planNudgeText, POLICY, READY_TOOL, replanText, validatePlan } from './plan'
 import { segment } from './segment'
-import { capReached, inFlight, MAX_RED, mergeable, parseChecks, prNumber, readLog, summary } from './ship'
+import { capReached, gateCredit, inFlight, MAX_RED, mergeable, parseChecks, prNumber, readLog, summary } from './ship'
 import type { Caps } from './ship'
 
 // auto-claude: an unattended run of one repository, driven on top of
@@ -29,9 +29,22 @@ const FILES = (root: string) => ({
 const EXCLUDES = ['.claude/auto-plan.md', '.claude/auto-claude.stop']
 const DENY = ['\\bgh\\s+pr\\s+merge\\b', '\\bgh\\s+release\\b', '\\bgit\\s+push\\b.*\\bHEAD:(main|master)\\b']
 
+// A run whose owning session has not ticked for this long is orphaned.
+const STALE_MS = 10 * 60_000
+// `loop on` runs that start nothing before the person is told, and the longest wait between them.
+const MAX_KICKS = 3
+const KICK_WAIT_MAX_MS = 30 * 60_000
+// A run still planning is reminded this often, this many times, then stopped.
+const PLAN_NUDGE_MS = 15 * 60_000
+const MAX_NUDGES = 3
+// Ticks one shipping error may repeat before the person is told.
+const REPEAT_TELL = 10
+
 let ticker: Timer | undefined
 let ticking = false
 let activeRoot: string | undefined
+// The owner an orphaned run was last reported for, once per session.
+let orphanTold: string | undefined
 
 type Run = { exitCode: number; stdout: string; stderr: string }
 
@@ -112,46 +125,103 @@ async function ensureLines($: EngineInterface, path: string, lines: readonly str
   await $.fs.write(path, `${head}${header}\n${missing.join('\n')}\n`)
 }
 
-// Raising the gate lets the loop start exactly one more goal; `loop on` takes
-// it. The command runs from the tick (measured: a timer set inside a tool
-// call never ran it), so release only asks for it.
-async function release($: EngineInterface, r: AutoRecord): Promise<AutoRecord> {
+// goal-loop.gate is a credit: granting 1 lets the loop start exactly one more
+// goal, whatever its own seq (which carries over from earlier runs); `loop on`
+// takes it. The command runs from the tick (measured: a timer set inside a
+// tool call never ran it), so release only asks for it.
+async function release($: EngineInterface, r: AutoRecord, pollMs: number): Promise<AutoRecord> {
   // Only while the loop is idle: a goal it is still building is not done yet.
   if (r.finished < r.started) return r
-  const gate = r.started + 1
-  if (r.gate >= gate && (r.kicked ?? 0) >= gate) return r
-  if (r.gate < gate) await $.fs.write(FILES(r.root).gate, `${gate}\n`)
-  const next: AutoRecord = { ...r, gate: Math.max(r.gate, gate), want: 'on' }
+  const f = FILES(r.root)
+  // goal-mode logs a start before it spends the credit: the gate is read
+  // first and the log after, so a spent gate is never mistaken for an idle loop.
+  const credit = gateCredit(await readText($, f.gate)) ?? 0
+  if (readLog((await readText($, f.log)) ?? '', r.logOffset).entries.some(e => e.event === 'start')) return r
+  if (credit <= 0) {
+    await $.fs.write(f.gate, '1\n')
+    const next: AutoRecord = { ...r, want: 'on' }
+    await writeRecord($, next)
+    return next
+  }
+  // Granted but not taken: `loop on` did not start it (a goal in the way,
+  // another owner, a refused command). Ask again, backing off, and tell the
+  // person once with what the loop answered.
+  if (r.want !== undefined) return r
+  const kicks = r.kicks ?? 0
+  const wait = Math.min(2 * pollMs * 2 ** Math.max(kicks - 1, 0), KICK_WAIT_MAX_MS)
+  if ((await $.clock.now()) - (r.kickedAt ?? 0) < wait) return r
+  let next: AutoRecord = { ...r, want: 'on' }
+  if (kicks >= MAX_KICKS && r.kickTold !== true) {
+    const reply = (r.kickReply ?? 'no reply').replace(/\s+/g, ' ').slice(0, 200)
+    await tell($, r, `the loop does not take the next milestone after ${kicks} tries of /goal-mode loop on: ${reply}`)
+    next = { ...next, kickTold: true, note: `/goal-mode loop on starts nothing: ${reply}` }
+  }
   await writeRecord($, next)
   return next
 }
 
-// The loop command a hook asked for, run from the tick's own timer.
+// The loop command a hook asked for, run from the tick's own timer. Its reply
+// is kept: whether it started anything shows in the log, not here.
 async function runWanted($: EngineInterface, r: AutoRecord): Promise<AutoRecord> {
   if (r.want === undefined) return r
   const args = r.want === 'on' ? 'loop on' : 'loop off'
+  let reply: string | undefined
   try {
-    await $.command.run({ command: 'goal-mode', args } as never)
+    reply = (await $.command.run({ command: 'goal-mode', args } as never)).text
   } catch (error) {
     $.ui.log(`auto-claude: /goal-mode ${args} failed: ${String(error).slice(0, 200)}`, { to: 'debug' })
-    return r
+    reply = `failed: ${String(error)}`
   }
-  const next: AutoRecord = { ...r, want: undefined, ...(r.want === 'on' ? { kicked: r.gate } : {}) }
+  const kick = r.want === 'on' ? { kicks: (r.kicks ?? 0) + 1, kickedAt: await $.clock.now(), kickReply: reply?.slice(0, 300) } : {}
+  const next: AutoRecord = { ...r, want: undefined, ...kick }
   await writeRecord($, next)
   return next
+}
+
+// Another session owns the run. Once its ticks stop, the run is stuck there:
+// say so here, once, instead of staying silent.
+async function reportOrphan($: EngineInterface, r: AutoRecord): Promise<void> {
+  if (!r.on || r.sessionId === undefined || orphanTold === r.sessionId) return
+  const quiet = (await $.clock.now()) - (r.beatAt ?? r.startedAt)
+  if (quiet < STALE_MS) return
+  orphanTold = r.sessionId
+  await segment($, 'auto·orphaned')
+  await tell($, r, `the session running it went quiet ${Math.round(quiet / 60_000)} min ago, so nothing moves; /${COMMAND} resume in this session to go on, or /${COMMAND} stop`)
 }
 
 async function stopRun($: EngineInterface, r: AutoRecord, why: string, phase: 'stopped' | 'done' = 'stopped'): Promise<AutoRecord> {
   const next: AutoRecord = { ...r, on: false, phase, note: why, want: 'off' }
+  // No gate left behind to hold a loop the person runs later by hand.
+  await $.fs.write(FILES(r.root).gate, '')
   await writeRecord($, next)
   await tell($, next, `${phase === 'done' ? 'finished' : 'stopped'}: ${why}. ${summary(next.merges, next.held, next.ships)}`)
   return next
 }
 
+// The milestone's worktree, made again from its branch when it was removed.
+// A missing directory as a process's cwd fails as "posix_spawn 'git' ENOENT"
+// (measured in Bun), which once looked like a missing git for a whole 24 h run.
+async function worktreeOf($: EngineInterface, r: AutoRecord, item: ShipItem): Promise<{ wt: string } | { gone: string }> {
+  const wt = item.worktree ?? r.root
+  if ((await run($, ['test', '-d', wt], r.root, 15_000)).exitCode === 0) return { wt }
+  if ((await run($, ['git', '-C', r.root, 'rev-parse', '--verify', '--quiet', `refs/heads/${item.branch}`], r.root, 15_000)).exitCode !== 0) {
+    return { gone: `its worktree ${wt} and branch ${item.branch} are gone` }
+  }
+  await run($, ['git', '-C', r.root, 'worktree', 'prune'], r.root, 15_000)
+  const made = await run($, ['git', '-C', r.root, 'worktree', 'add', wt, item.branch], r.root, 60_000)
+  return made.exitCode === 0 ? { wt } : { gone: `its worktree ${wt} could not be made again: ${out(made)}` }
+}
+
 // One step of a milestone through push, CI and merge.
 async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promise<{ r: AutoRecord; item: ShipItem }> {
-  const wt = item.worktree ?? r.root
   const update = (patch: Partial<ShipItem>) => ({ ...item, ...patch })
+  if (item.state !== 'push' && item.state !== 'ci') return { r, item }
+  const where = await worktreeOf($, r, item)
+  if ('gone' in where) {
+    await tell($, r, `held: ${item.goal.slice(0, 60)} (${where.gone})`)
+    return { r: { ...r, held: r.held + 1 }, item: update({ state: 'held', note: where.gone }) }
+  }
+  const wt = where.wt
 
   if (item.state === 'push') {
     if (r.ciMode === 'local') return { r, item: update({ state: 'ci' }) }
@@ -242,7 +312,7 @@ async function finalCheck($: EngineInterface, r: AutoRecord, caps: Caps): Promis
     return stopRun($, r, `the final check passed after ${r.round} round(s)`, 'done')
   }
   if (r.round >= caps.maxRounds) return stopRun($, r, `the final check still fails after ${r.round} round(s)`)
-  const next: AutoRecord = { ...r, phase: 'plan', round: r.round + 1, queueEmpty: false }
+  const next: AutoRecord = { ...r, phase: 'plan', round: r.round + 1, queueEmpty: false, phaseAt: await $.clock.now(), nudges: 0 }
   await writeRecord($, next)
   const text = replanText(next.round, check, `${ran.stdout}\n${ran.stderr}`)
   $.clock.after(100, () => {
@@ -251,18 +321,27 @@ async function finalCheck($: EngineInterface, r: AutoRecord, caps: Caps): Promis
   return next
 }
 
-async function tick($: EngineInterface, caps: Caps): Promise<void> {
+async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<void> {
   if (ticking || activeRoot === undefined) return
   ticking = true
   try {
     const got = await readRecord($, activeRoot)
-    if (got === undefined || got.sessionId !== (await $.session.id())) return
+    if (got === undefined) return
+    if (got.sessionId !== (await $.session.id())) {
+      await reportOrphan($, got)
+      return
+    }
     // A stop asked the loop off: that still runs once the run is off.
     if (!got.on) {
       if (got.want === 'off') await runWanted($, got)
       return
     }
-    let r: AutoRecord = await runWanted($, got)
+    let r: AutoRecord = { ...(await runWanted($, got)), beatAt: await $.clock.now() }
+    // A record from before the gate was a credit held an absolute count there.
+    if (r.credit !== true) {
+      await $.fs.write(FILES(r.root).gate, '0\n')
+      r = { ...r, credit: true }
+    }
     if ((await readText($, FILES(r.root).stop)) !== undefined) {
       await stopRun($, r, '.claude/auto-claude.stop appeared')
       return
@@ -273,12 +352,33 @@ async function tick($: EngineInterface, caps: Caps): Promise<void> {
       return
     }
 
+    // Planning is a model turn that may never end in auto_plan_ready (a
+    // question nobody answers, a dropped prompt): remind, then give up.
+    if (r.phase === 'plan') {
+      const now = await $.clock.now()
+      if (now - (r.phaseAt ?? now) >= PLAN_NUDGE_MS || r.phaseAt === undefined) {
+        const nudges = r.phaseAt === undefined ? 0 : (r.nudges ?? 0) + 1
+        if (nudges > MAX_NUDGES) {
+          await stopRun($, r, `no plan was accepted after ${MAX_NUDGES} reminders`)
+          return
+        }
+        r = { ...r, phaseAt: now, nudges }
+        if (nudges > 0) {
+          const f = FILES(r.root)
+          const verdict = validatePlan(await readText($, f.plan), await readText($, f.queue), r.round === 1)
+          $.prompt.submit({ text: planNudgeText(nudges, MAX_NUDGES, verdict.ok ? [] : verdict.errors) }).catch(() => {})
+        }
+      }
+      await writeRecord($, r)
+      return
+    }
+
     // What the loop did since the last look.
     const { entries, offset } = readLog((await readText($, FILES(r.root).log)) ?? '', r.logOffset)
     r = { ...r, logOffset: offset }
     for (const e of entries) {
       if (e.event === 'start' && e.branch !== undefined) {
-        r = { ...r, started: r.started + 1, worktrees: { ...r.worktrees, [e.branch]: e.worktree ?? '' } }
+        r = { ...r, started: r.started + 1, worktrees: { ...r.worktrees, [e.branch]: e.worktree ?? '' }, kicks: 0, kickTold: false, kickReply: undefined, ...(r.kickTold === true ? { note: undefined } : {}) }
       } else if (e.event === 'met' && e.goal !== undefined && e.branch !== undefined) {
         r = { ...r, finished: r.finished + 1 }
         const parent: string | undefined = r.fixes[e.goal]
@@ -304,7 +404,12 @@ async function tick($: EngineInterface, caps: Caps): Promise<void> {
     const item = inFlight(r.ships)
     if (item !== undefined && item.state !== 'fixing') {
       const step = await advance($, r, item)
-      r = { ...step.r, ships: step.r.ships.map(s => (s.headRef === item.headRef ? step.item : s)) }
+      // The same error tick after tick (measured: a git that would not spawn,
+      // retried for the whole 24 h cap) is told once.
+      const same = step.item.note !== undefined && step.item.note === item.note && step.item.state === item.state
+      const repeats = same ? (item.repeats ?? 0) + 1 : 0
+      if (repeats === REPEAT_TELL) await tell($, step.r, `stuck at ${item.state} for ${repeats} checks: ${(step.item.note ?? '').slice(0, 160)}`)
+      r = { ...step.r, ships: step.r.ships.map(s => (s.headRef === item.headRef ? { ...step.item, repeats } : s)) }
     }
     await writeRecord($, r)
 
@@ -315,7 +420,7 @@ async function tick($: EngineInterface, caps: Caps): Promise<void> {
         await finalCheck($, { ...r, phase: 'final' }, caps)
       } else if (r.phase === 'run') {
         const pending = parseQueue((await readText($, FILES(r.root).queue)) ?? '').some(i => i.mark === ' ')
-        if (pending) await release($, { ...r, queueEmpty: false })
+        if (pending) await release($, { ...r, queueEmpty: false }, pollMs)
       }
     }
   } catch (error) {
@@ -356,7 +461,10 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string): P
     logOffset: ((await readText($, f.log)) ?? '').split('\n').filter(l => l.trim() !== '').length,
     started: 0,
     finished: 0,
-    gate: 0,
+    credit: true,
+    beatAt: await $.clock.now(),
+    phaseAt: await $.clock.now(),
+    nudges: 0,
     worktrees: {},
     ships: [],
     fixes: {},
@@ -412,14 +520,15 @@ export const register: Register = (on, options) => {
     // A run this session owned goes on after a reload.
     if (root !== undefined) await show($, await readRecord($, root))
     ticker?.cancel()
-    ticker = $.clock.every(pollMs, () => void tick($, caps))
+    ticker = $.clock.every(pollMs, () => void tick($, caps, pollMs))
     return started
   })
 
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
     const r = activeRoot === undefined ? undefined : await readRecord($, activeRoot)
-    if (r === undefined || !r.on) return composed
+    // Only the session running it is unattended; another one has a person in it.
+    if (r === undefined || !r.on || r.sessionId !== (await $.session.id())) return composed
     return { ...composed, sections: [...composed.sections, { id: 'auto-claude:policy', text: POLICY, scope: 'session' as const }] }
   })
 
@@ -430,7 +539,7 @@ export const register: Register = (on, options) => {
     const f = FILES(r.root)
     const verdict = validatePlan(await readText($, f.plan), await readText($, f.queue), r.round === 1)
     if (!verdict.ok) return { result: `Not ready; fix and call ${READY_TOOL} again:\n- ${verdict.errors.join('\n- ')}` }
-    const next = await release($, { ...r, phase: 'run', queueEmpty: false })
+    const next = await release($, { ...r, phase: 'run', queueEmpty: false }, pollMs)
     await tell($, next, `round ${next.round} planned: ${verdict.pending.length} milestone(s); final check \`${verdict.finalCheck}\``)
     return {
       result: `Plan accepted: ${verdict.pending.length} milestone(s), final check \`${verdict.finalCheck}\`. goal-mode's loop starts the first one as this turn ends; tell the person the plan in a few lines and end the turn.`,
@@ -451,9 +560,31 @@ export const register: Register = (on, options) => {
     }
     if (action === 'resume') {
       if (r.on && r.sessionId === (await $.session.id())) return { text: 'The run is already on in this session.' }
-      const next = { ...r, on: true, phase: r.phase === 'done' || r.phase === 'stopped' ? ('run' as const) : r.phase, sessionId: await $.session.id(), startedAt: Date.now() }
+      const now = await $.clock.now()
+      const phase = r.phase === 'done' || r.phase === 'stopped' || r.phase === 'final' ? ('run' as const) : r.phase
+      // A run still planning gets its prompt again.
+      const next: AutoRecord = {
+        ...r,
+        on: true,
+        phase,
+        sessionId: await $.session.id(),
+        startedAt: Date.now(),
+        beatAt: now,
+        kicks: 0,
+        kickTold: false,
+        // The next tick grants a start and asks the loop on (or resumes its goal).
+        kickedAt: undefined,
+        ...(phase === 'plan' ? { phaseAt: now, nudges: 0 } : {}),
+      }
       activeRoot = r.root
+      orphanTold = undefined
       await writeRecord($, next)
+      if (phase === 'plan') {
+        const text = kickoffText(r.hint, `${r.remote}/${r.defaultBranch}`)
+        $.clock.after(100, () => {
+          $.prompt.submit({ text }).catch(() => $.ui.toast('auto-claude: the planning prompt was not submitted; send any message to start.'))
+        })
+      }
       return { text: `Resumed: phase ${next.phase}, round ${next.round}.` }
     }
     return { text: `Usage: /${COMMAND} start [aim] | status | stop | resume` }

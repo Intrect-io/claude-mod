@@ -31,6 +31,8 @@ describe('queue', () => {
     expect(items[1]?.check).toBe('pytest -q tests/test_a.py')
     expect(items[1]?.note).toBe('done - -> now')
     expect(nextPending(items)?.condition).toBe('plain goal without check')
+    // A fix line built on a shipped branch goes before later milestones.
+    expect(nextPending(parseQueue('- [ ] milestone 3 :: check: x\n- [ ] fix PR #2 :: check: y :: base: goal/02-b\n'))?.condition).toBe('fix PR #2')
     // An unknown condition leaves the file alone.
     expect(markItem(QUEUE, 'nope', '!', 'x')).toBe(QUEUE)
   })
