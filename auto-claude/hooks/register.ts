@@ -26,7 +26,7 @@ const FILES = (root: string) => ({
   stop: `${root}/.claude/auto-claude.stop`,
   exclude: `${root}/.git/info/exclude`,
 })
-const EXCLUDES = ['.claude/auto-plan.md', '.claude/auto-claude.stop']
+const EXCLUDES = ['.claude/auto-plan.md', '.claude/auto-claude.stop', '.claude/auto-claude.stop.cleared']
 const DENY = ['\\bgh\\s+pr\\s+merge\\b', '\\bgh\\s+release\\b', '\\bgit\\s+push\\b.*\\bHEAD:(main|master)\\b']
 
 // A run whose owning session has not ticked for this long is orphaned.
@@ -424,6 +424,20 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
   }
 }
 
+// A stop file left from an earlier run would end the new one at its first
+// tick (measured: a run started over one stopped within 30 s). Starting or
+// resuming is the person's word that the run should go, so the file is set
+// aside, never deleted: .claude/auto-claude.stop.cleared keeps the last one.
+async function clearStop($: EngineInterface, root: string): Promise<{ cleared: boolean } | { error: string }> {
+  const stop = FILES(root).stop
+  if (!(await $.fs.exists(stop).catch(() => false))) return { cleared: false }
+  const moved = await run($, ['mv', '-f', stop, `${stop}.cleared`], root, 15_000)
+  if (moved.exitCode !== 0) return { error: `a leftover .claude/auto-claude.stop could not be set aside (${out(moved)}); move it away and try again` }
+  return { cleared: true }
+}
+
+const clearedNote = (c: { cleared: boolean }) => (c.cleared ? ' A leftover .claude/auto-claude.stop was moved to .claude/auto-claude.stop.cleared.' : '')
+
 async function startCommand($: EngineInterface, hint: string, ciMode: string): Promise<string> {
   const root = await repoRoot($, await $.session.cwd())
   if (root === undefined) return 'Not inside a git repository.'
@@ -438,6 +452,8 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string): P
 
   const f = FILES(root)
   await ensureLines($, f.exclude, EXCLUDES, '# auto-claude')
+  const stop = await clearStop($, root)
+  if ('error' in stop) return `Not started: ${stop.error}.`
   await ensureLines($, f.deny, DENY, '# auto-claude: merging and releases are the driver\'s')
   await $.fs.write(f.base, `${remote}/${defaultBranch}\n`)
   // Closed until the plan is ready.
@@ -474,7 +490,7 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string): P
     $.prompt.submit({ text }).catch(() => $.ui.toast('auto-claude: the planning prompt was not submitted; send any message to start.'))
   })
 
-  return `auto-claude on in ${root} (${mode} CI, merges into ${defaultBranch}). Claude plans the run now.`
+  return `auto-claude on in ${root} (${mode} CI, merges into ${defaultBranch}). Claude plans the run now.${clearedNote(stop)}`
 }
 
 async function statusText($: EngineInterface): Promise<string> {
@@ -554,6 +570,8 @@ export const register: Register = (on, options) => {
     }
     if (action === 'resume') {
       if (r.on && r.sessionId === (await $.session.id())) return { text: 'The run is already on in this session.' }
+      const stop = await clearStop($, r.root)
+      if ('error' in stop) return { text: `Not resumed: ${stop.error}.` }
       const now = await $.clock.now()
       const phase = r.phase === 'done' || r.phase === 'stopped' || r.phase === 'final' ? ('run' as const) : r.phase
       // A run still planning gets its prompt again.
@@ -579,7 +597,7 @@ export const register: Register = (on, options) => {
           $.prompt.submit({ text }).catch(() => $.ui.toast('auto-claude: the planning prompt was not submitted; send any message to start.'))
         })
       }
-      return { text: `Resumed: phase ${next.phase}, round ${next.round}.` }
+      return { text: `Resumed: phase ${next.phase}, round ${next.round}.${clearedNote(stop)}` }
     }
     return { text: `Usage: /${COMMAND} start [aim] | status | stop | resume` }
   })
