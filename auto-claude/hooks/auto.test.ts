@@ -91,6 +91,8 @@ function world(on: On, store: Record<string, unknown> = {}) {
     notifies: [] as string[],
     pushes: [] as string[],
     checkExit: 0,
+    // The session's directory (its primary working directory).
+    cwd: '/repo',
     // What `gh pr checks` reports, how often it was asked, and the PRs merged.
     checks: '[{"bucket":"pass"}]',
     ciLooks: 0,
@@ -107,12 +109,15 @@ function world(on: On, store: Record<string, unknown> = {}) {
     loopReply: 'Loop on: started',
     clock: mock.clock(on, { now: 1_000 }),
   }
+  // A stored file exists; so does any directory, unless the test removed it (w.gone).
+  const removed = (path: string) => [...w.gone].some(g => path === g || path.startsWith(`${g}/`))
+  const exists = (path: string) => w.files.has(path) || (!path.includes('/.claude/') && !removed(path))
   mock.store(on, store)
   on('tool.register', (_, e) => ({ value: { tool: `mcp__auto-claude__${e.name}` } }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'me' }))
-  on('session.cwd', () => ({ value: '/repo' }))
+  on('session.cwd', () => ({ value: w.cwd }))
   on('prompt.compose', () => ({ sections: [] }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
@@ -125,7 +130,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
     const t = w.files.get(e.path)
     return t === undefined ? { deny: `ENOENT ${e.path}` } : { value: t }
   })
-  on('fs.exists', (_, e) => ({ value: w.files.has(e.path) }))
+  on('fs.exists', (_, e) => ({ value: exists(e.path) }))
   on('fs.write', (_, e) => {
     w.files.set(e.path, e.text)
     return { value: undefined }
@@ -142,6 +147,8 @@ function world(on: On, store: Record<string, unknown> = {}) {
     const a = e.argv.join(' ')
     w.runs.push(a)
     const ok = (stdout = '', exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    // git cannot start in a directory that is gone (Bun: posix_spawn ENOENT).
+    if (e.init?.cwd !== undefined && removed(e.init.cwd)) return ok('', -1)
     if (a.includes('--git-common-dir')) return ok('/repo/.git\n')
     if (e.argv[0] === 'mv') {
       const [from, to] = e.argv.slice(-2) as [string, string]
@@ -618,4 +625,17 @@ describe('a run, local CI', () => {
     for (let i = 0; i < 2; i++) await w.clock.advance(30_000)
     expect(w.merged).toHaveLength(1)
   })
+
+  test('start from a session whose directory was a removed worktree finds the repository above it', async ($, on) => {
+    const w = world(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    // The session had cd'ed into a milestone's worktree, which was removed after it landed.
+    w.cwd = '/repo/worktrees/goal-03-landed'
+    w.gone.add('/repo/worktrees/goal-03-landed')
+    const text = (await cmd($, 'start')).text ?? ''
+    expect(text).toContain('auto-claude on in /repo')
+    expect(text).toContain('/repo/worktrees/goal-03-landed no longer exists')
+    expect((await cmd($, 'status')).text).toContain('auto-claude on')
+  })
 })
+
