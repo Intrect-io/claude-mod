@@ -447,4 +447,49 @@ describe('the plugin', () => {
     await $.session.end({ reason: 'clear', sessionId: 'live' })
     expect(files.get('/h/.claude/statusline/live/model-tier.txt')).toBe('')
   })
+
+  test('a classifier that times out leaves a timeout log line in ~/.claude/model-tier.log with the tier and effort kept', async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000 })
+    on('ui.status', () => ({ value: undefined }))
+    on('session.model', () => ({ value: 'claude-sonnet-5-5' }))
+    on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1000000 }, rateLimits: [] } }))
+    on('tool.register', () => ({ value: { tool: 'mcp__model-tier__set_tier' } }))
+    on('command.register', () => ({ value: { command: 'tier' } }))
+    on('session.start', (_, e) => ({ cwd: e.cwd }))
+    on('session.id', () => ({ value: 'live' }))
+    on('prompt.submit', (_, e) => ({ text: e.text }))
+    mock.env(on, { HOME: '/h' })
+    const files = new Map<string, string>()
+    on('fs.read', (_, e) => {
+      const text = files.get(e.path)
+      return text === undefined ? { deny: 'ENOENT' } : { value: text }
+    })
+    on('fs.write', (_, e) => {
+      files.set(e.path, e.text)
+      return { value: undefined }
+    })
+    let slow = true
+    on('model.classify', async () => {
+      if (slow) await new Promise(() => {})
+      return { value: 'trivial' }
+    })
+    const LOG = '/h/.claude/model-tier.log'
+
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    const submitted = $.prompt.submit({ text: 'Redesign the cache layer across these services', wait: false, origin: { kind: 'composer' } })
+    await clock.advance(3_000)
+    await submitted
+    const lines = (files.get(LOG) ?? '').trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+    expect(lines.map(l => l.classifier).sort()).toEqual(['effort', 'tier'])
+    for (const line of lines) {
+      expect(line).toMatchObject({ event: 'classifier-timeout', ranMs: 3000, kept: { tier: 'sonnet', effort: null } })
+      expect(typeof line.ts).toBe('string')
+    }
+
+    // An answer in time writes nothing.
+    slow = false
+    await $.prompt.submit({ text: 'what time is it', wait: false, origin: { kind: 'composer' } })
+    expect((files.get(LOG) ?? '').trim().split('\n')).toHaveLength(2)
+  })
 })
+

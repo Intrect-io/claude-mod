@@ -1,6 +1,6 @@
 {
   "name": "model-tier",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Routes each main-loop turn to fable, opus, sonnet or haiku and a reasoning effort by task complexity, with a set_tier tool the model calls to correct either",
   "types": "./types/index.d.ts",
   "userConfig": {

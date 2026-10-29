@@ -41,6 +41,9 @@ only by `/tier fable` unless `maxAutoTier` allows it.
   is no cached prefix, so the first verdict applies at once.
 - **Classifier timeout.** If the classifier takes longer than
   `classifierTimeoutMs`, the current tier stays and the prompt is not held.
+  Each timeout appends one JSON line to `~/.claude/model-tier.log`
+  (`{"ts", "event": "classifier-timeout", "classifier": "tier"|"effort"|"subagent", "ranMs", "kept": {"tier", "effort"}}`,
+  the last 500 lines kept). These lines are the data for tuning the bound.
 - **Context guards.** Above `maxTokensForHaiku` prompt tokens the session never
   drops to haiku; above `maxTokensForDowngrade` it never steps down at all.
   Loaded into a running session, the mod reads the live context size first.
