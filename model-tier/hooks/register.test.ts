@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { AgentSpawnInput, HookStream, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import type { TierState } from '../types'
-import { decide, decideEffort, INITIAL, isTier, modelFor, providerOf, providerTierModels, tierModels } from './register'
+import { capTier, decide, decideEffort, INITIAL, isTier, maxAutoTier, modelFor, providerOf, providerTierModels, tierModels } from './register'
 
 const OPTS = { downgradeAfterTurns: 2, maxTokensForHaiku: 150000, maxTokensForDowngrade: 200000 }
 const at = (over: Partial<TierState>): TierState => ({ ...INITIAL, ...over })
@@ -96,6 +96,22 @@ describe('decide', () => {
   test('isTier reads resolved ids', () => {
     expect(isTier('claude-opus-5-5[1m]', 'opus')).toBe(true)
     expect(isTier('claude-haiku-5-5', 'sonnet')).toBe(false)
+  })
+})
+
+describe('maxAutoTier', () => {
+  test('defaults to opus, and a bad value falls back to it', () => {
+    expect(maxAutoTier(undefined)).toBe('opus')
+    expect(maxAutoTier('ultra')).toBe('opus')
+    expect(maxAutoTier('fable')).toBe('fable')
+  })
+
+  test('caps a verdict above it and leaves the rest alone', () => {
+    expect(capTier('fable', 'opus')).toBe('opus')
+    expect(capTier('opus', 'opus')).toBe('opus')
+    expect(capTier('haiku', 'opus')).toBe('haiku')
+    expect(capTier('fable', 'fable')).toBe('fable')
+    expect(capTier('opus', 'sonnet')).toBe('sonnet')
   })
 })
 
@@ -273,6 +289,20 @@ describe('the plugin', () => {
     expect(model).toBe('claude-haiku-5-5')
   })
 
+  test('an exceptionally hard subagent prompt runs on opus, not fable', async ($, on) => {
+    on('model.classify', () => ({ value: 'exceptionally-hard' }))
+    on('clock.sleep', () => new Promise(() => {}))
+    let model: string | undefined
+    on('agent.spawn', (_, e) => {
+      model = e.model
+      return { model: e.model ?? e.parentModel }
+    })
+
+    await $.agent.spawn(SPAWN)
+
+    expect(model).toBe('claude-opus-5-5')
+  })
+
   test('a typed subagent keeps its own model', async ($, on) => {
     on('model.classify', () => ({ value: 'trivial' }))
     let model: string | undefined = 'unset'
@@ -363,7 +393,7 @@ describe('the plugin', () => {
     expect(both.result).toBe('Switched to sonnet from the next request. Effort medium from the next request.')
   })
 
-  test('an exceptionally hard prompt goes to fable, and set_tier and /tier take fable', async ($, on) => {
+  test('an exceptionally hard prompt stays on opus, set_tier cannot pick fable, /tier fable can', async ($, on) => {
     on('ui.status', () => ({ value: undefined }))
     on('session.model', () => ({ value: 'claude-opus-5-5' }))
     on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1000000 }, rateLimits: [] } }))
@@ -381,13 +411,13 @@ describe('the plugin', () => {
     await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
     await $.prompt.submit({ text: 'Prove the scheduler is starvation-free under every interleaving', wait: false, origin: { kind: 'composer' } })
     await drain($.turn.step(STEP))
-    const r = await $.tool.call({ tool: 'mcp__model-tier__set_tier', tier: 'opus', reason: 'proof done, now edits' })
+    const r = await $.tool.call({ tool: 'mcp__model-tier__set_tier', tier: 'fable', effort: 'max', reason: 'opus is not enough' })
     await drain($.turn.step({ ...STEP, index: 1 }))
     const pinned = await $.command.run({ command: 'tier', args: 'fable', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
     await drain($.turn.step({ ...STEP, index: 2 }))
 
-    expect(r.result).toBe('Switched to opus from the next request.')
+    expect(r.result).toBe('fable is above the auto tier cap (opus); only the person can pick it with /tier fable. The tier stays opus. Effort max from the next request.')
     expect(pinned.text).toBe('Pinned to fable. /tier auto to release.')
-    expect(sent).toEqual(['claude-fable-5-1', 'claude-opus-5-5', 'claude-fable-5-1'])
+    expect(sent).toEqual(['claude-opus-5-5', 'claude-opus-5-5', 'claude-fable-5-1'])
   })
 })

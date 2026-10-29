@@ -1,6 +1,6 @@
 {
   "name": "model-tier",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Routes each main-loop turn to fable, opus, sonnet or haiku and a reasoning effort by task complexity, with a set_tier tool the model calls to correct either",
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -45,6 +45,12 @@
       "title": "Model id per tier",
       "description": "Full model ids to send, e.g. fable=claude-fable-5-1,opus=claude-opus-5-5,sonnet=claude-sonnet-5-5,haiku=claude-haiku-5-5 (aliases are not resolved on this path)",
       "default": "fable=claude-fable-5-1,opus=claude-opus-5-5,sonnet=claude-sonnet-5-5,haiku=claude-haiku-5-5"
+    },
+    "maxAutoTier": {
+      "type": "string",
+      "title": "Highest automatic tier",
+      "description": "The highest tier the classifier, subagent routing and the model's set_tier may pick (fable|opus|sonnet|haiku). Fable has its own rate limit on Claude Teams, so it is reserved for /tier fable by default",
+      "default": "opus"
     },
     "routeEffort": {
       "type": "boolean",
