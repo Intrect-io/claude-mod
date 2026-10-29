@@ -98,6 +98,8 @@ function world(on: On, store: Record<string, unknown> = {}) {
     // Worktree directories removed from under the run, and whether their branches went too.
     gone: new Set<string>(),
     branchGone: false,
+    // The check's exit in a fresh checkout, when it differs from the builder's worktree.
+    freshExit: undefined as number | undefined,
     // GitHub CI mode, and a branch push whose git cannot be spawned.
     github: false,
     gitGone: false,
@@ -165,7 +167,8 @@ function world(on: On, store: Record<string, unknown> = {}) {
     if (e.argv[0] === 'test' && e.argv[1] === '-d') return ok('', w.gone.has(String(e.argv[2])) ? 1 : 0)
     if (a.includes('rev-parse --verify')) return ok('', w.branchGone ? 1 : 0)
     if (a.includes('worktree add') && !a.includes('--detach')) w.gone.delete(String(e.argv[5]))
-    if (e.argv[0] === 'bash') return ok('', w.checkExit)
+    // A check run in the fresh checkout answers freshExit, when set.
+    if (e.argv[0] === 'bash') return ok('', String(e.init?.cwd ?? '').endsWith('/worktrees/auto-verify') && w.freshExit !== undefined ? w.freshExit : w.checkExit)
     if (w.gitGone && a.includes(' push -u ')) return { value: { exitCode: -1, stdout: '', stderr: "posix_spawn 'git' ENOENT", isStdoutTruncated: false, isStderrTruncated: false } }
     if (a.includes(' push ')) {
       w.pushes.push(a)
@@ -571,5 +574,48 @@ describe('a run, local CI', () => {
     expect(text).toContain('stalled: shipping stuck at push')
     expect(text).toContain('ENOENT')
     expect(text).toMatch(/the same error \d+ checks in a row/)
+  })
+
+  test('local: the check runs in a fresh checkout of the rebased head; one that passes only in the builder\'s worktree becomes a fix goal', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    log(w, [
+      { event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ])
+    w.freshExit = 1
+    await w.clock.advance(30_000)
+    expect(w.runs.some(r => r.includes('worktree add --detach /repo/worktrees/auto-verify'))).toBe(true)
+    expect(w.pushes.some(p => p.includes('HEAD:main'))).toBe(false)
+    const queue = w.files.get('/repo/.claude/goals.md') ?? ''
+    expect(queue).toContain('fresh checkout')
+    expect(queue).toContain(':: base: goal/01-add')
+    expect(w.runs.filter(r => r.includes('worktree remove --force /repo/worktrees/auto-verify')).length).toBeGreaterThanOrEqual(2)
+  })
+
+  test('github: before landing, the check runs in a fresh checkout of the head fetched from origin', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    await planned($, w)
+    log(w, [
+      { event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ])
+    w.freshExit = 1
+    await w.clock.advance(30_000)
+    expect(w.runs).toContain('git -C /repo fetch -q origin goal/01-add')
+    expect(w.runs).toContain('git -C /repo worktree add --detach /repo/worktrees/auto-verify origin/goal/01-add')
+    expect(w.merged).toHaveLength(0)
+    expect(w.files.get('/repo/.claude/goals.md') ?? '').toContain('fresh checkout of origin/goal/01-add')
+
+    // The fix goal's branch passes from a fresh checkout: it lands.
+    w.freshExit = 0
+    log(w, [
+      { event: 'start', goal: 'fix', worktree: '/repo/worktrees/goal-02-fix', branch: 'goal/02-fix' },
+    ])
+    const condition = parseQueue(w.files.get('/repo/.claude/goals.md') ?? '').find(i => i.base !== undefined)?.condition ?? ''
+    log(w, [{ event: 'met', goal: condition, branch: 'goal/02-fix' }])
+    for (let i = 0; i < 2; i++) await w.clock.advance(30_000)
+    expect(w.merged).toHaveLength(1)
   })
 })

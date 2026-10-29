@@ -20,6 +20,7 @@ It depends on [goal-mode](../goal-mode/), which supplies the loop: one worktree 
 3. **Ship.** This runs as auto-claude's own process calls, never as a model turn. Every step that is ready runs in the same tick, so a milestone whose CI is already green is landed and its successor started within one tick. While CI is pending it is looked at every 10 s. A PR that reports no checks yet is waited on for 90 s before "no checks" counts as a repository without CI.
    - **github**: push, `gh pr create`, wait for `gh pr checks`, re-read the PR state, then `gh pr merge --squash --delete-branch`.
    - **local**: run the milestone's check, rebase onto `origin/<default>`, push to it.
+   - Right before landing, the milestone's check runs once more in a **fresh checkout**. This is a detached worktree at `worktrees/auto-verify`, made from the branch head fetched from origin (github) or from the rebased commit (local). It is never the builder's worktree, where untracked or ignored files can make a check pass. A check that passes only in the builder's worktree becomes a fix goal, like a red CI.
    - The merged worktree is then removed.
    - When CI fails or the PR conflicts, auto-claude appends a fix goal built on the milestone's branch (`:: base: goal/NN-…`), and the loop builds that next. After 3 failures the milestone is held.
 4. **Finish or replan.** When the queue empties, auto-claude runs the final check on a fresh checkout of the merged default branch.

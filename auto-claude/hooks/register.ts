@@ -215,6 +215,21 @@ async function worktreeOf($: EngineInterface, r: AutoRecord, item: ShipItem): Pr
   return made.exitCode === 0 ? { wt } : { gone: `its worktree ${wt} could not be made again: ${out(made)}` }
 }
 
+// The milestone's check, run once more in a fresh detached checkout of `ref`
+// right before it lands: never the builder's worktree, where untracked or
+// ignored files and local state can make a check pass that main would fail.
+async function verifyFresh($: EngineInterface, r: AutoRecord, item: ShipItem, ref: string): Promise<string | undefined> {
+  if (item.check === undefined) return undefined
+  const dir = `${r.root}/worktrees/auto-verify`
+  await run($, ['git', '-C', r.root, 'worktree', 'remove', '--force', dir], r.root)
+  const made = await run($, ['git', '-C', r.root, 'worktree', 'add', '--detach', dir, ref], r.root, 60_000)
+  if (made.exitCode !== 0) return `could not make a fresh checkout of ${ref}: ${out(made)}`
+  const checked = await run($, ['bash', '-lc', item.check], dir, 600_000)
+  await run($, ['git', '-C', r.root, 'worktree', 'remove', '--force', dir], r.root)
+
+  return checked.exitCode === 0 ? undefined : `check failed in a fresh checkout of ${ref} (it passed in the builder's worktree): ${out(checked)}`
+}
+
 // One step of a milestone through push, CI and merge.
 async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promise<{ r: AutoRecord; item: ShipItem }> {
   const update = (patch: Partial<ShipItem>) => ({ ...item, ...patch })
@@ -242,17 +257,16 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
 
   let failure: string | undefined
   if (r.ciMode === 'local') {
-    if (item.check !== undefined) {
-      const checked = await run($, ['bash', '-lc', item.check], wt, 600_000)
-      if (checked.exitCode !== 0) failure = `check failed: ${out(checked)}`
-    }
-    if (failure === undefined) {
-      await run($, ['git', '-C', wt, 'fetch', '-q', r.remote], wt)
-      const rebased = await run($, ['git', '-C', wt, 'rebase', `${r.remote}/${r.defaultBranch}`], wt)
-      if (rebased.exitCode !== 0) {
-        await run($, ['git', '-C', wt, 'rebase', '--abort'], wt)
-        failure = `does not rebase onto ${r.defaultBranch}: ${out(rebased)}`
-      } else {
+    await run($, ['git', '-C', wt, 'fetch', '-q', r.remote], wt)
+    const rebased = await run($, ['git', '-C', wt, 'rebase', `${r.remote}/${r.defaultBranch}`], wt)
+    if (rebased.exitCode !== 0) {
+      await run($, ['git', '-C', wt, 'rebase', '--abort'], wt)
+      failure = `does not rebase onto ${r.defaultBranch}: ${out(rebased)}`
+    } else {
+      // The rebased commit is what lands, so that is what the check judges.
+      const head = (await run($, ['git', '-C', wt, 'rev-parse', 'HEAD'], wt)).stdout.trim()
+      failure = await verifyFresh($, r, item, head === '' ? item.branch : head)
+      if (failure === undefined) {
         const pushed = await run($, ['git', '-C', wt, 'push', r.remote, `HEAD:${r.defaultBranch}`], wt)
         if (pushed.exitCode !== 0) failure = `push to ${r.defaultBranch} failed: ${out(pushed)}`
       }
@@ -271,6 +285,11 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
       if (!state.open) return { r, item: update({ state: 'held', note: 'the PR is no longer open' }) }
       if (state.conflict) failure = `conflicts with ${r.defaultBranch}`
       else {
+        // CI judged the PR; the milestone's own check is judged on the pushed head too.
+        await run($, ['git', '-C', r.root, 'fetch', '-q', r.remote, item.headRef], r.root)
+        failure = await verifyFresh($, r, item, `${r.remote}/${item.headRef}`)
+      }
+      if (failure === undefined) {
         const merged = await run($, ['gh', 'pr', 'merge', String(item.pr), '--squash', '--delete-branch'], wt)
         if (merged.exitCode !== 0) return { r, item: update({ note: `merge failed: ${out(merged)}` }) }
       }
