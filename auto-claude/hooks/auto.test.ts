@@ -89,6 +89,10 @@ function world(on: On, store: Record<string, unknown> = {}) {
     notifies: [] as string[],
     pushes: [] as string[],
     checkExit: 0,
+    // What `gh pr checks` reports, how often it was asked, and the PRs merged.
+    checks: '[{"bucket":"pass"}]',
+    ciLooks: 0,
+    merged: [] as string[],
     // Worktree directories removed from under the run, and whether their branches went too.
     gone: new Set<string>(),
     branchGone: false,
@@ -146,6 +150,16 @@ function world(on: On, store: Record<string, unknown> = {}) {
     if (a.endsWith(' remote')) return ok('origin\n')
     if (a.includes('symbolic-ref')) return ok('origin/main\n')
     if (a.startsWith('gh repo view')) return ok('', w.github ? 0 : 1)
+    if (a.startsWith('gh pr create')) return ok('https://github.com/o/r/pull/7\n')
+    if (a.startsWith('gh pr checks')) {
+      w.ciLooks++
+      return ok(w.checks)
+    }
+    if (a.startsWith('gh pr view')) return ok('{"state":"OPEN","mergeable":"MERGEABLE"}')
+    if (a.startsWith('gh pr merge')) {
+      w.merged.push(a)
+      return ok()
+    }
     if (e.argv[0] === 'test' && e.argv[1] === '-d') return ok('', w.gone.has(String(e.argv[2])) ? 1 : 0)
     if (a.includes('rev-parse --verify')) return ok('', w.branchGone ? 1 : 0)
     if (a.includes('worktree add') && !a.includes('--detach')) w.gone.delete(String(e.argv[5]))
@@ -212,13 +226,13 @@ describe('a run, local CI', () => {
       { event: 'gated', goal: 'sub() returns a-b' },
     ])
     w.files.set('/repo/.claude/goals.md', QUEUE.replace('- [ ] add', '- [x] add'))
-    await w.clock.advance(30_000) // push → ci
-    await w.clock.advance(30_000) // check, rebase, push to main → merged, gate raised
+    // One tick: check, rebase, push to main, worktree removed, the next
+    // start granted and the loop asked on.
+    await w.clock.advance(30_000)
     expect(w.pushes.some(p => p.includes('HEAD:main') && p.includes('goal-01-add'))).toBe(true)
     expect(w.runs.some(r => r.includes('worktree remove /repo/worktrees/goal-01-add'))).toBe(true)
     // One more start granted, whatever goal-mode's own seq is.
     expect(w.files.get('/repo/.claude/goal-loop.gate')).toBe('1\n')
-    await w.clock.advance(30_000)
     expect(w.commands).toEqual(['goal-mode loop on', 'goal-mode loop on'])
 
     // Milestone 2, then the queue empties: the final check runs on merged main.
@@ -403,6 +417,56 @@ describe('a run, local CI', () => {
     expect((await cmd($, 'resume')).text).toContain('moved to .claude/auto-claude.stop.cleared')
     for (let i = 0; i < 3; i++) await w.clock.advance(30_000)
     expect((await cmd($, 'status')).text).toContain('auto-claude on')
+  })
+
+  test('github: a met milestone with green CI reaches its successor\'s start in one tick; a pending CI is looked at every 10 s', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    await planned($, w)
+    await w.clock.advance(30_000)
+    expect(w.commands).toEqual(['goal-mode loop on'])
+
+    // Met, CI already green: push, PR, checks, landing, grant and loop on in one tick.
+    log(w, [
+      { event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+      { event: 'gated', goal: 'sub() returns a-b' },
+    ])
+    w.files.set('/repo/.claude/goals.md', QUEUE.replace('- [ ] add', '- [x] add'))
+    await w.clock.advance(30_000)
+    expect(w.merged).toHaveLength(1)
+    expect(w.files.get(GATE)).toBe('1\n')
+    expect(w.commands).toEqual(['goal-mode loop on', 'goal-mode loop on'])
+
+    // The next one's CI is pending: looked at again within 10 s, landed once green.
+    log(w, [
+      { event: 'start', goal: 'sub() returns a-b', worktree: '/repo/worktrees/goal-02-sub', branch: 'goal/02-sub' },
+      { event: 'met', goal: 'sub() returns a-b', branch: 'goal/02-sub' },
+    ])
+    w.checks = '[{"bucket":"pending"}]'
+    await w.clock.advance(30_000)
+    expect(w.merged).toHaveLength(1)
+    const looks = w.ciLooks
+    w.checks = '[{"bucket":"pass"}]'
+    await w.clock.advance(10_000)
+    expect(w.ciLooks).toBe(looks + 1)
+    expect(w.merged).toHaveLength(2)
+  })
+
+  test('github: no checks reported right after the PR opens waits for the grace, then counts as no CI', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    w.checks = ''
+    await planned($, w)
+    log(w, [
+      { event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ])
+    await w.clock.advance(30_000)
+    // Opened this tick: GitHub has not registered its checks yet.
+    expect(w.merged).toHaveLength(0)
+    for (let i = 0; i < 4; i++) await w.clock.advance(30_000)
+    expect(w.merged).toHaveLength(1)
   })
 })
 
