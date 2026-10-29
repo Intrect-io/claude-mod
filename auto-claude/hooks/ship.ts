@@ -1,4 +1,4 @@
-import type { ShipItem } from '../types'
+import type { AutoRecord, ShipItem } from '../types'
 
 // The loop's JSONL log as events, from the line after `offset` on.
 export type LogEntry = { event: string; goal?: string; branch?: string; worktree?: string; reason?: string }
@@ -81,3 +81,51 @@ export function capReached(r: { merges: number; startedAt: number }, caps: Caps,
   if (now - r.startedAt >= caps.maxHours * 3600_000) return `the time cap (${caps.maxHours} h) was reached`
   return undefined
 }
+
+// Why a run that is on is not moving, with its evidence; undefined when it
+// moves or nothing points to a stall. Worst first: an orphaned owner moves
+// nothing at all.
+export type StallFacts = {
+  now: number
+  // The session asking (/auto-claude status), and whether the record's owner may be stale.
+  sessionId?: string
+  staleMs: number
+  // .claude/goal-loop.gate as goal-mode reads it.
+  credit?: number
+  // What the plan files lack, while planning.
+  planErrors: readonly string[]
+  maxNudges: number
+  // Planning this long is no longer just planning (the first reminder's wait).
+  planWaitMs: number
+}
+
+const ago = (now: number, at: number) => `${Math.max(0, Math.round((now - at) / 60_000))} min ago`
+
+export function diagnose(r: AutoRecord, f: StallFacts): string | undefined {
+  if (!r.on) return undefined
+  const beat = r.beatAt ?? r.startedAt
+  if (r.sessionId !== undefined && r.sessionId !== f.sessionId && f.now - beat >= f.staleMs) {
+    return `orphaned: the session running it (${r.sessionId.slice(0, 8)}) last ticked ${ago(f.now, beat)}, so nothing moves; /auto-claude resume here to go on`
+  }
+  // phaseAt is when planning began or was last reminded: a reminder already
+  // sent, or the first one's wait run out, means the plan is overdue.
+  const since = r.phaseAt ?? r.startedAt
+  if (r.phase === 'plan' && ((r.nudges ?? 0) >= 1 || f.now - since >= f.planWaitMs)) {
+    const lack = f.planErrors.length > 0 ? `the plan files lack: ${f.planErrors.join('; ').slice(0, 300)}` : 'the plan files look ready: call auto_plan_ready'
+    return `planning still waiting (reminder ${r.nudges ?? 0}/${f.maxNudges}, the last ${ago(f.now, since)}); ${lack}`
+  }
+  const item = inFlight(r.ships)
+  if (item !== undefined && item.note !== undefined && (item.repeats ?? 0) >= 1) {
+    return `shipping stuck at ${item.state}${item.pr !== undefined ? ` (PR #${item.pr})` : ''}: the same error ${(item.repeats ?? 0) + 1} checks in a row: ${item.note.slice(0, 200)}`
+  }
+  const idle = r.finished >= r.started && (item === undefined || item.state === 'fixing')
+  // One loop on whose start the next tick has not read yet is no stall: it
+  // takes a second ask (the watchdog's) to say the grant is not being taken.
+  if (r.phase === 'run' && idle && (f.credit ?? 0) > 0 && (r.kicks ?? 0) >= 2) {
+    const reply = (r.kickReply ?? 'no reply').replace(/\s+/g, ' ').slice(0, 200)
+    return `a granted start is not taken: /goal-mode loop on ran ${r.kicks}× (last ${r.kickedAt !== undefined ? ago(f.now, r.kickedAt) : 'at an unknown time'}) and answered: ${reply}`
+  }
+
+  return undefined
+}
+

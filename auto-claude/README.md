@@ -37,6 +37,7 @@ It depends on [goal-mode](../goal-mode/), which supplies the loop: one worktree 
   - A `/goal-mode loop on` that starts nothing is retried with backoff. After 3 tries the person is told the loop's reply.
   - A run still planning gets a reminder every 15 minutes that lists what the plan files lack. After 3 reminders the run stops.
   - A shipping error that repeats is reported once.
+  - `/auto-claude status` ends with a `stalled:` line when the run is not moving. It names the cause and gives the evidence: an orphaned owner (when it last ticked), a granted start the loop does not take (its last `loop on` reply), overdue planning (what the plan files lack), or a shipping error that repeats (its note and count).
   - A run whose owning session has gone quiet for 10 minutes is reported as orphaned in other sessions, and `/auto-claude resume` picks it up there.
   - Only the owning session receives the unattended rules.
 - **Reporting.** Progress shows in the status line piece (`auto·R1·M3/7·PR#12`) and in notifications.

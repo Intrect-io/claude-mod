@@ -516,4 +516,60 @@ describe('a run, local CI', () => {
     expect(w.files.get(GATE)?.trim()).toBe(regrant.gate)
     expect(w.commands).toEqual(['goal-mode loop on', 'goal-mode loop on'])
   })
+
+  test('status names an orphaned owner and how long ago it last ticked', async ($, on) => {
+    const other = { on: true, phase: 'run', root: '/repo', sessionId: 'gone-session', hint: '', round: 1, startedAt: Date.now(), beatAt: 1_000 - 25 * MIN, remote: 'origin', defaultBranch: 'main', ciMode: 'local', logOffset: 0, started: 1, finished: 1, credit: true, worktrees: {}, ships: [], fixes: {}, merges: 1, held: 0, queueEmpty: false }
+    world(on, { 'auto:/repo': other })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    const text = (await cmd($, 'status')).text ?? ''
+    expect(text).toContain('stalled: orphaned')
+    expect(text).toContain('gone-ses')
+    expect(text).toContain('25 min ago')
+    expect(text).toContain('/auto-claude resume')
+  })
+
+  test('status names a granted start the loop is not taking, with its last loop on reply', async ($, on) => {
+    const w = world(on)
+    w.loopReply = 'A session goal is active ("x"): /goal-mode clear it before starting the loop.'
+    await planned($, w)
+    await w.clock.advance(30_000)
+    // One ask whose start the next tick has not read yet is not a stall.
+    expect((await cmd($, 'status')).text).not.toContain('stalled:')
+    for (let i = 0; i < 6; i++) await w.clock.advance(30_000)
+    const text = (await cmd($, 'status')).text ?? ''
+    expect(text).toContain('stalled: a granted start is not taken')
+    expect(text).toContain('A session goal is active')
+  })
+
+  test('status names planning still waiting and what the plan files lack', async ($, on) => {
+    const w = world(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start')
+    await w.clock.advance(200)
+    // Just started: planning, not a stall.
+    expect((await cmd($, 'status')).text).not.toContain('stalled:')
+    await w.clock.advance(16 * MIN)
+    const text = (await cmd($, 'status')).text ?? ''
+    expect(text).toContain('stalled: planning still waiting')
+    expect(text).toContain('reminder 1/3')
+    expect(text).toContain('auto-plan.md is missing')
+  })
+
+  test('status names a shipping error that keeps coming back, with its note and count', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    w.gitGone = true
+    await planned($, w)
+    log(w, [
+      { event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ])
+    await w.clock.advance(30_000)
+    expect((await cmd($, 'status')).text).not.toContain('stalled:')
+    for (let i = 0; i < 3; i++) await w.clock.advance(30_000)
+    const text = (await cmd($, 'status')).text ?? ''
+    expect(text).toContain('stalled: shipping stuck at push')
+    expect(text).toContain('ENOENT')
+    expect(text).toMatch(/the same error \d+ checks in a row/)
+  })
 })
