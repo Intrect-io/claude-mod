@@ -11,10 +11,10 @@ const PLAN = '## Goal\nadd and sub work\n\nFinal check: `python3 -m unittest -q`
 const QUEUE = '- [ ] add() returns a+b :: check: python3 -m unittest -q test_add\n- [ ] sub() returns a-b :: check: python3 -m unittest -q test_sub\n'
 
 describe('plan', () => {
-  test('the queue grammar matches goal-mode\'s, :: base: included', () => {
+  test('the queue grammar is goal-mode\'s own (generated from shared/queue.ts), :: base: and notes included', () => {
     expect(parseQueue('- [ ] a :: check: x :: base: goal/01-a\n- [x] b <!-- done -->\n- [!] c :: check: y')).toEqual([
       { line: 0, mark: ' ', condition: 'a', check: 'x', base: 'goal/01-a' },
-      { line: 1, mark: 'x', condition: 'b', check: undefined },
+      { line: 1, mark: 'x', condition: 'b', check: undefined, note: 'done' },
       { line: 2, mark: '!', condition: 'c', check: 'y' },
     ])
   })

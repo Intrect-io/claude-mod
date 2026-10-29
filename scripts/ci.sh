@@ -2,7 +2,8 @@
 # Created: 2026-10-27
 # Purpose: The repository's CI, run the same way locally and in GitHub Actions:
 #   `claude plugin validate` for the marketplace and every mod, `claude plugin
-#   test` for every mod.
+#   test` for every mod, then `bun scripts/sync-shared.ts --check` for the
+#   copies generated from shared/.
 # Dependencies: claude (Claude Code CLI; no login needed), bun, perl
 # Test Status: run by .github/workflows/ci.yml and by the auto-claude milestone checks
 #
@@ -47,6 +48,12 @@ for mod in "${mods[@]}"; do
     failed+=("$mod test (pass=${passes:-?} fail=${fails:-?})")
   fi
 done
+
+echo "== shared: sync-shared --check"
+if ! out=$(bun scripts/sync-shared.ts --check 2>&1); then
+  printf '%s\n' "$out"
+  failed+=("sync-shared (a copy drifted from shared/)")
+fi
 
 if [ ${#failed[@]} -gt 0 ]; then
   echo "ci: FAILED: ${failed[*]}" >&2

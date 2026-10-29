@@ -1,36 +1,12 @@
-// auto-claude's pure part for planning: the queue grammar (a copy of
-// goal-mode/hooks/queue.ts, which a mod cannot import), plan validation, and
-// the prompts that start a run and replan it.
+// auto-claude's pure part for planning: plan validation and the prompts that
+// start a run and replan it. The queue grammar is goal-mode's own, generated
+// into ./queue.ts from shared/queue.ts.
 
-export type QueueItem = { line: number; mark: ' ' | 'x' | '!'; condition: string; check?: string; base?: string }
+import { parseQueue } from './queue'
+import type { QueueItem } from './queue'
 
-const ITEM = /^\s*[-*] \[([ xX!])\] (.*)$/
-const NOTE = /\s*<!--([\s\S]*?)-->\s*$/
-const CHECK = ' :: check:'
-const BASE = /\s+:: base:\s*(\S+)\s*$/
-
-export function parseQueue(text: string): QueueItem[] {
-  const items: QueueItem[] = []
-  text.split('\n').forEach((raw, line) => {
-    const match = raw.match(ITEM)
-    if (match === null) return
-    const mark = (match[1] === 'X' ? 'x' : match[1]) as QueueItem['mark']
-    let body = (match[2] ?? '').replace(NOTE, '')
-    let base: string | undefined
-    const baseMatch = body.match(BASE)
-    if (baseMatch !== null) {
-      base = baseMatch[1]
-      body = body.slice(0, baseMatch.index)
-    }
-    const at = body.indexOf(CHECK)
-    const condition = (at < 0 ? body : body.slice(0, at)).trim()
-    const check = at < 0 ? undefined : body.slice(at + CHECK.length).trim() || undefined
-    if (condition === '') return
-    items.push({ line, mark, condition, check, ...(base !== undefined ? { base } : {}) })
-  })
-
-  return items
-}
+export { parseQueue }
+export type { QueueItem }
 
 // `Final check: <command>` in auto-plan.md, backticks optional.
 export function finalCheckOf(plan: string): string | undefined {
