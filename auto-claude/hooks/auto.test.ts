@@ -468,5 +468,17 @@ describe('a run, local CI', () => {
     for (let i = 0; i < 4; i++) await w.clock.advance(30_000)
     expect(w.merged).toHaveLength(1)
   })
-})
 
+  test('session.start draws the piece even with no run (taking down a stale one); session.end clears it by the ending id', async ($, on) => {
+    const w = world(on)
+    on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+    const PIECE = '/home/.claude/statusline/me/auto-claude.txt'
+    w.files.set(PIECE, 'auto·R1·M2/7')
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect(w.files.get(PIECE)).toBe('')
+    await cmd($, 'start')
+    expect(w.files.get(PIECE)).toContain('auto·R1·plan')
+    await $.session.end({ reason: 'clear', sessionId: 'me' })
+    expect(w.files.get(PIECE)).toBe('')
+  })
+})

@@ -392,4 +392,20 @@ describe('phase 3', () => {
     // The branch's issue counts as mentioned: /commit may comment on it.
     expect((await $.tool.call({ tool: 'mcp__linear-server__save_comment', issueId: 'QQQ-9', body: 'PR' })).deny).toBeUndefined()
   })
+
+  test('session.start draws the normal status (no row) and session.end clears the piece by the ending id', async ($, on) => {
+    const w = world(on)
+    on('session.id', () => ({ value: 'live' }))
+    on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+    const statuses: unknown[] = []
+    on('ui.status', (_, e) => {
+      statuses.push((e as { text?: unknown }).text)
+      return { value: undefined }
+    })
+    await start($)
+    expect(statuses[0]).toBeUndefined()
+    w.files.set('/Users/u/.claude/statusline/ended/harness.txt', 'hb·5m')
+    await $.session.end({ reason: 'clear', sessionId: 'ended' })
+    expect(w.files.get('/Users/u/.claude/statusline/ended/harness.txt')).toBe('')
+  })
 })

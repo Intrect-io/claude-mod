@@ -40,6 +40,7 @@ P2: cost, upkeep or polish.
 
 ### all mods: a notice row from an earlier version outlives a reload
 
+- **Status:** resolved: every mod draws its normal notice row and piece in `session.start` with nothing in the way. auto-claude now also draws when there is no run, and model-tier awaits its draw. Each mod has a test named "session.start draws … session.end clears …" that asserts the first `ui.status` is the normal value (`undefined`) or that a stale piece is taken down.
 - **Evidence.** It happened twice this session. `⚠ model-tier: tier: opus (auto)` stayed after 0.2 stopped using `$.ui.status`, and `⚠ fleet: hub offline` stayed on vela because counted failures skipped the redraw. Fixed one at a time, in `model-tier/hooks/register.ts` (`show` clears the row) and `fleet/hooks/register.ts` (`showStatus` once at start).
 - **Fix.**
   - Every mod calls its `showStatus` unconditionally in `session.start`: `goal-mode/hooks/register.tsx:1326`, `harness/hooks/register.ts:44`, model-tier `show`.
@@ -47,6 +48,7 @@ P2: cost, upkeep or polish.
 
 ### statusline pieces: never cleared, never collected
 
+- **Status:** resolved for new pieces: each mod clears its status line piece at `session.end`, by the ending session's id, so `/clear` cannot orphan it. The same "session.end" test in each mod proves it. Not done: sweeping folders left by older sessions. The hub that was to run it is gone (see the plan's decisions).
 - **Evidence.** `*/hooks/segment.ts` (`let last` at line 10) writes `~/.claude/statusline/<session>/<mod>.txt`. Nothing clears it at `session.end` (`fleet/hooks/register.ts:309` ends without `segment($, '')`). Measured: 12 session folders already, most for sessions that have ended.
 - **Fix.**
   - `segment($, '')` in each mod's `session.end`.

@@ -12,6 +12,7 @@ import { heartbeatCommand, heartbeatPrompt, heartbeatTurnComplete, heartbeatTurn
 import { seedFromTranscript } from './linear-guard'
 import { gcSignature, gcSummary, parseGcReport } from './memory-gc'
 import { lintPrompt, lintStop, lintToolCall } from './report-lint'
+import { segment } from './segment'
 import { issueIds, registerShipGate, shipPrompt, shipStop } from './ship-gate'
 import { DEFAULT_TOGGLES, INITIAL_SHIP } from './state'
 
@@ -49,6 +50,12 @@ function showStatus($: EngineInterface, toggles: Toggles) {
 
 export const register: Register = (on, options) => {
   const guardOptions = { orderTools: typeof options.orderTools === 'string' && options.orderTools !== '' ? options.orderTools : DEFAULT_ORDER_TOOLS }
+
+  // A piece never outlives its session: cleared at its end, by the ending id.
+  on('session.end', async ($, e, next) => {
+    await segment($, '', e.sessionId)
+    return next(e)
+  })
 
   on('session.start', async ($, e, next) => {
     const stored = await $.store.get(STORE_KEY)

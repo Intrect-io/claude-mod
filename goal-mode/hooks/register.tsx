@@ -244,6 +244,12 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // A piece never outlives its session: cleared at its end, by the ending id.
+  on('session.end', async ($, e, next) => {
+    await segment($, '', e.sessionId)
+    return next(e)
+  })
+
   // Remembers who this session is; on a resumed session that owned a loop,
   // picks the loop goal back up.
   on('classic.SessionStart', async ($, e, next) => {

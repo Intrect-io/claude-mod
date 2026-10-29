@@ -208,11 +208,11 @@ export function tierOf(model: string): Tier | undefined {
 const label = (s: TierState) => `${s.tier}${s.effort ? `·${s.effort}` : ''} (${s.source === s.effortSource || s.effort === undefined ? s.source : `${s.source}/${s.effortSource}`})`
 
 // The tier rides the person's status line; nothing about it needs a notice row.
-function show($: EngineInterface, s: TierState, enabled: boolean) {
+function show($: EngineInterface, s: TierState, enabled: boolean): Promise<void> {
   const pinned = s.source === 'pinned' || s.effortSource === 'pinned'
   // A row an earlier version pinned outlives a reload: take it down.
   $.ui.status(undefined)
-  void segment($, enabled ? `${s.tier}${s.effort ? `·${s.effort}` : ''}${pinned ? ' (pin)' : ''}` : '')
+  return segment($, enabled ? `${s.tier}${s.effort ? `·${s.effort}` : ''}${pinned ? ' (pin)' : ''}` : '')
 }
 
 /** Labels `text`, or gives up after `timeoutMs` so a slow classifier never holds the prompt. */
@@ -305,8 +305,14 @@ export const register: Register = (on, options) => {
     const { context } = await $.session.usage()
     const tokens = context.tokens ?? 0
     if (tokens > 0) await update($, state, v => ({ ...v, lastInputTokens: Math.max(v.lastInputTokens, tokens) }))
-    show($, await read($, state), enabled)
+    await show($, await read($, state), enabled)
     return started
+  })
+
+  // A piece never outlives its session: cleared at its end, by the ending id.
+  on('session.end', async ($, e, next) => {
+    await segment($, '', e.sessionId)
+    return next(e)
   })
 
   on('command.run', { command: 'tier' }, async ($, e) => {
@@ -319,22 +325,22 @@ export const register: Register = (on, options) => {
       const level = arg.slice('effort'.length).trim()
       if (level === 'auto') {
         const s = await update($, state, (v): TierState => ({ ...v, effortSource: 'auto', pendingEffortDown: undefined, pendingEffortCount: 0 }))
-        show($, s, enabled)
+        void show($, s, enabled)
         return { text: 'Effort follows the classifier again from the next prompt.' }
       }
       if (!isEffort(level)) return { text: 'Usage: /tier effort [auto|low|medium|high|xhigh|max]' }
       const s = await update($, state, (v): TierState => ({ ...v, effort: level, effortSource: 'pinned', pendingEffortDown: undefined, pendingEffortCount: 0 }))
-      show($, s, enabled)
+      void show($, s, enabled)
       return { text: `Effort pinned to ${level}. /tier effort auto to release.` }
     }
     if (arg === 'auto') {
       const s = await update($, state, (v): TierState => ({ ...v, source: 'auto', pendingDown: undefined, pendingCount: 0 }))
-      show($, s, enabled)
+      void show($, s, enabled)
       return { text: `Auto routing on; tier stays ${s.tier} until the next prompt.` }
     }
     if (!isTierName(arg)) return { text: 'Usage: /tier [auto|fable|opus|sonnet|haiku] | /tier effort [auto|low|medium|high|xhigh|max]' }
     const s = await update($, state, (v): TierState => ({ ...v, tier: arg, source: 'pinned', pendingDown: undefined, pendingCount: 0 }))
-    show($, s, enabled)
+    void show($, s, enabled)
     return { text: `Pinned to ${arg}. /tier auto to release.` }
   })
 
@@ -350,7 +356,7 @@ export const register: Register = (on, options) => {
     ])
     if (proposed) s = await update($, state, v => decide(v, proposed, decideOptions))
     if (effort) s = await update($, state, v => decideEffort(v, effort, decideOptions))
-    show($, s, enabled)
+    void show($, s, enabled)
     const effortPart = s.effort ? ` with ${s.effort} effort (${s.effortSource})` : ''
     const note =
       `[model-tier] This turn runs on ${s.tier} (${s.source})${effortPart}. Review that pick against the work ahead: ` +
@@ -373,7 +379,7 @@ export const register: Register = (on, options) => {
       if (effort !== undefined && v.effortSource !== 'pinned') next = { ...next, effort, effortSource: 'model', pendingEffortDown: undefined, pendingEffortCount: 0 }
       return next
     })
-    show($, s, enabled)
+    void show($, s, enabled)
     const parts: string[] = []
     if (refused) parts.push(`${refused} is above the auto tier cap (${maxAuto}); only the person can pick it with /tier ${refused}. The tier stays ${s.tier}.`)
     if (tier !== undefined) parts.push(s.source === 'pinned' ? `The person pinned ${s.tier} with /tier; it stays.` : `Switched to ${tier} from the next request.`)

@@ -5,19 +5,23 @@ import type { EngineInterface } from 'claude-code'
 // joins ~/.claude/statusline/<sessionId>/<mod>.txt after its own fields, so the
 // engine's one-row-per-plugin notices (`$.ui.status`) stay for what needs the
 // person's eye. A leading '!' asks the status line to draw the piece in red;
-// '' clears it. A mod imports nothing outside its folder, so each mod gets its
+// '' clears it, and every mod clears its own at session.end, so a piece never
+// outlives its session. A mod imports nothing outside its folder, so each mod gets its
 // own copy of this file, with MOD filled in.
 
 const MOD = 'goal-mode'
 let last: string | undefined
 
-export async function segment($: EngineInterface, text: string): Promise<void> {
-  if (text === last) return
+// `sessionId`: whose piece, when it is not the running session's (a
+// session.end names the ending one; after /clear the process goes on under
+// a new id).
+export async function segment($: EngineInterface, text: string, sessionId?: string): Promise<void> {
+  if (text === last && sessionId === undefined) return
   last = text
   try {
     const home = await $.env.get('HOME')
     if (home === undefined) return
-    await $.fs.write(`${home}/.claude/statusline/${await $.session.id()}/${MOD}.txt`, text)
+    await $.fs.write(`${home}/.claude/statusline/${sessionId ?? (await $.session.id())}/${MOD}.txt`, text)
   } catch {
     // No status line piece is worth failing a hook over.
     last = undefined
