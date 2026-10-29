@@ -408,4 +408,14 @@ describe('phase 3', () => {
     await $.session.end({ reason: 'clear', sessionId: 'ended' })
     expect(w.files.get('/Users/u/.claude/statusline/ended/harness.txt')).toBe('')
   })
+
+  test('the venv note is added once per session; every Python call is still rewritten', async ($, on) => {
+    const w = world(on)
+    await start($)
+    const first = await $.tool.call({ tool: 'Bash', command: 'pytest -q' })
+    const second = await $.tool.call({ tool: 'Bash', command: 'python3 -c "print(1)"' })
+    expect(first.context?.join(' ')).toContain('inside the platform venv')
+    expect(second.context?.join(' ') ?? '').not.toContain('inside the platform venv')
+    expect(w.ran.filter(r => r.startsWith('source /Users/u/dev/mlx_env/bin/activate && '))).toHaveLength(2)
+  })
 })

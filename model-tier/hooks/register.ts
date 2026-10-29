@@ -91,6 +91,11 @@ export function tierModels(spec: unknown): Record<Tier, string> {
   return models
 }
 
+/** Whether this turn gets the pick note: the first one, a new pick, or an uncertain one. */
+export function noteDue(noted: string | undefined, pick: string, uncertain: boolean): boolean {
+  return noted === undefined || noted !== pick || uncertain
+}
+
 export const INITIAL: TierState = {
   tier: 'opus',
   source: 'auto',
@@ -391,6 +396,19 @@ export const register: Register = (on, options) => {
     if (tierLabel?.timedOut) await logTimeout($, { classifier: 'tier', ranMs: classifierTimeoutMs, kept })
     if (effortLabel?.timedOut) await logTimeout($, { classifier: 'effort', ranMs: classifierTimeoutMs, kept })
     void show($, s, enabled)
+    // The note asks the model to review the pick. Measured with inkblot on
+    // 2026-10-29: 0 of 6 set_tier calls when the pick stood. So it speaks only
+    // when there is news: the first turn, a changed pick, or a pick that may
+    // be wrong (a classifier timed out, or its verdict was held back: a
+    // downgrade waiting for more turns, or the haiku context guard).
+    const pick = `${s.tier}·${s.effort ?? ''}`
+    const uncertain =
+      tierLabel?.timedOut === true ||
+      effortLabel?.timedOut === true ||
+      (proposed !== undefined && proposed !== s.tier) ||
+      (effort !== undefined && effort !== s.effort)
+    if (!noteDue(s.notedPick, pick, uncertain)) return next(e)
+    s = await update($, state, v => ({ ...v, notedPick: pick }))
     const effortPart = s.effort ? ` with ${s.effort} effort (${s.effortSource})` : ''
     const note =
       `[model-tier] This turn runs on ${s.tier} (${s.source})${effortPart}. Review that pick against the work ahead: ` +

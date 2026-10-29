@@ -11,6 +11,9 @@ const envAtom = atom({ plugin: 'harness', key: 'env' } as const, {}, { shape: 'e
 const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT_TOGGLES, { shape: 'toggles-1' })
 const lintAtom = atom({ plugin: 'harness', key: 'lint' } as const, INITIAL_LINT, { shape: 'lint-1' })
 const shipAtom = atom({ plugin: 'harness', key: 'ship' } as const, INITIAL_SHIP, { shape: 'ship-2' })
+// The venv note was given in this session: once is enough (it rode every
+// Python call, measured 2026-10-29, saying the same thing each time).
+const venvNotedAtom = atom({ plugin: 'harness', key: 'venvNoted' } as const, false, { shape: 'venv-noted-1' })
 
 // Always-on guards for the user's CLAUDE.md rules that a single tool call can
 // decide. Each check is pure and returns the refusal text, or undefined.
@@ -234,7 +237,8 @@ export async function guardsToolCall(
       const notes: string[] = []
       // The model sees its own command in the transcript; tell it the run
       // happened inside the venv so it does not report a system-Python result.
-      if (venv !== undefined && ran.deny === undefined) {
+      if (venv !== undefined && ran.deny === undefined && !(await read($, venvNotedAtom))) {
+        await update($, venvNotedAtom, () => true)
         notes.push(`harness ran this inside the platform venv (${env.venv}); the result is from the venv, not the system Python.`)
       }
       if (ran.deny === undefined && isVersionBump(command) && !(await read($, shipAtom)).prListed) notes.push(versionBumpNote())

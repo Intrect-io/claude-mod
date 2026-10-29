@@ -21,6 +21,8 @@ export type TierState = {
   pendingEffortCount: number
   /** The provider that answered most recently (from the step's usage), e.g. anthropic, openai, ollama. */
   lastProvider?: string
+  /** The pick the turn note last told the model ("tier·effort"); unset before the first note. */
+  notedPick?: string
 }
 
 declare module 'claude-code' {
