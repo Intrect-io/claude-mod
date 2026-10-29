@@ -150,6 +150,7 @@ describe('auto goal', () => {
 
   test('cheap gates', async () => {
     expect(autoGoalCandidate('고쳐줘')).toBe(false)
+    expect(autoGoalCandidate('[auto-claude] The person started an autonomous run of this repository. Plan it now and fix the build.')).toBe(false)
     expect(autoGoalCandidate('<command-name>/context</command-name> 이건 명령 턴이라 건너뛴다')).toBe(false)
     expect(autoGoalCandidate('왜 이렇게 동작하는지 원인을 자세히 설명해 줄 수 있을까요?')).toBe(false)
     expect(autoGoalCandidate('harness mod의 Phase 0부터 3까지 전부 구현하고 테스트까지 통과시켜줘')).toBe(true)

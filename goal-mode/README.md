@@ -44,6 +44,8 @@ For each pending line the loop:
 3. at every Stop, runs the line's `check` itself in the worktree (non-zero exit blocks with its output, no model call), refuses uncommitted changes, then asks the evaluator;
 4. on success marks the line `[x]` and starts the next one.
 
+A line with `:: base: <branch>` starts from that branch and goes before the other pending lines, since it repairs work that later lines may build on.
+
 When stuck (5 unmet checks in a row, or the evaluator fails) it waits 2 minutes and sends a "change your approach" prompt, at most twice. After that the line is marked `[!]` and the loop moves on. The model may call `defer_goal` for an external blocker after 2 failed checks; the deferral is applied at the next Stop.
 
 While a loop goal runs, the plugin refuses:
@@ -59,6 +61,8 @@ Other notes:
 - Log: `.claude/goal-loop.log` (JSONL).
 - Excluded from git automatically via `.git/info/exclude`: the queue, log, deny file and `worktrees/`.
 - Branches are never merged automatically; review and merge them yourself.
+- Drivers (auto-claude) steer the loop through two files. `.claude/goal-loop.base` names the ref new worktrees start from. `.claude/goal-loop.gate` holds a credit: the number of goals that may still start. Each start spends one, and at `0` the loop waits, still on. The credit does not depend on the loop's own goal count, which carries over between runs.
+- A goal the model set itself does not hold a driver's `loop on`; the driver's queue replaces it. A goal the person set still does.
 - `/goal-mode loop off|status|resume`: `resume` takes over a loop whose session went away. A resumed (`claude --continue`) owner session continues by itself.
 - Only one session may run a repository's loop at a time: another session active in the last 10 minutes keeps it.
 

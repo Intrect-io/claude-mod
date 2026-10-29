@@ -112,24 +112,41 @@ async function loopOn($: Engine, w: World) {
 }
 
 describe('loop', () => {
-  test('a gate holds the loop before the next goal; raising it and loop on goes on', async ($, on) => {
-    const w = world(on)
+  test('a gate is a credit: each start spends one, and at 0 the loop holds until it is raised', async ($, on) => {
+    // The loop's seq carries over from earlier runs; the gate does not count it.
+    const w = world(on, QUEUE, { [`loop:${ROOT}`]: { on: false, repoRoot: ROOT, sessionId: 'old', heartbeatAt: 0, seq: 17, retries: 0 } })
     w.checkExit = 0
     w.verdicts.push('{"met": true, "reason": "ok"}')
     w.files.set(`${ROOT}/.claude/goal-loop.gate`, '1\n')
     await start($)
     await loopOn($, w)
     expect(w.worktrees).toHaveLength(1)
+    expect(w.files.get(`${ROOT}/.claude/goal-loop.gate`)).toBe('0\n')
 
     await $.classic.Stop(STOP)
     await w.clock.advance(1_000)
     expect(w.worktrees).toHaveLength(1)
     expect(w.files.get(`${ROOT}/.claude/goal-loop.log`)).toContain('"event":"gated"')
+    expect((await loopOn($, w)).text).toContain("held by the driver's gate")
 
-    w.files.set(`${ROOT}/.claude/goal-loop.gate`, '2')
+    w.files.set(`${ROOT}/.claude/goal-loop.gate`, '1')
     const reply = await loopOn($, w)
     expect(reply.text).toContain('started "fix mul"')
     expect(w.worktrees).toHaveLength(2)
+    expect(w.files.get(`${ROOT}/.claude/goal-loop.gate`)).toBe('0\n')
+  })
+
+  test('a driver\'s loop on replaces a goal the model set; a person\'s loop on refuses it', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await $.tool.call({ tool: 'mcp__goal-mode__set_goal', condition: 'the model picked this mid-run' } as never)
+    expect((await loopOn($, w)).text).toContain('A session goal is active')
+    expect(w.worktrees).toHaveLength(0)
+
+    const reply = await $.command.run({ command: 'goal-mode', args: 'loop on', origin: { kind: 'plugin', name: 'auto-claude' }, presentation: PRESENTATION } as never)
+    await w.clock.advance(1_000)
+    expect(reply.text).toContain('started "fix add"')
+    expect(w.worktrees).toHaveLength(1)
   })
 
   test('worktrees start from goal-loop.base, or the line\'s own :: base:', async ($, on) => {

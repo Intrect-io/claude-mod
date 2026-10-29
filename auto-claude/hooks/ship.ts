@@ -20,6 +20,13 @@ export function readLog(text: string, offset: number): { entries: LogEntry[]; of
   return { entries, offset: lines.length }
 }
 
+// goal-loop.gate as goal-mode reads it: starts still allowed, undefined for none.
+export function gateCredit(text: string | undefined): number | undefined {
+  if (text === undefined || text.trim() === '') return undefined
+  const n = Number.parseInt(text.trim(), 10)
+  return Number.isFinite(n) && n >= 0 ? n : undefined
+}
+
 export type Checks = 'pending' | 'green' | 'red' | 'none'
 
 // `gh pr checks <n> --json bucket`: an array of { bucket: pass|fail|pending|skipping|cancel }.

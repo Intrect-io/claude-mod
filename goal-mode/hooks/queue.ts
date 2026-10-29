@@ -52,8 +52,10 @@ export function parseQueue(text: string): QueueItem[] {
   return items
 }
 
+// A line built on another branch (`:: base:`, a driver's fix goal) goes first:
+// it repairs work already shipped, which later lines may build on.
 export function nextPending(items: readonly QueueItem[]): QueueItem | undefined {
-  return items.find(item => item.mark === ' ')
+  return items.find(item => item.mark === ' ' && item.base !== undefined) ?? items.find(item => item.mark === ' ')
 }
 
 // Marks the first pending line whose condition matches, so a person editing
