@@ -314,4 +314,17 @@ describe('loop', () => {
     expect(w.prompts[0]).toContain('Continuing (resumed session)')
     expect((await $.classic.Stop(STOP)).block).toContain('exited 1')
   })
+
+  test('session.start draws the normal piece (taking down a stale one); session.end clears it by the ending id', async ($, on) => {
+    const w = world(on)
+    mock.env(on, { HOME: '/h' })
+    on('session.id', () => ({ value: 'me' }))
+    on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+    w.files.set('/h/.claude/statusline/me/goal-mode.txt', 'goal·3')
+    await start($)
+    expect(w.files.get('/h/.claude/statusline/me/goal-mode.txt')).toBe('')
+    w.files.set('/h/.claude/statusline/ended/goal-mode.txt', 'loop·goal·1')
+    await $.session.end({ reason: 'clear', sessionId: 'ended' })
+    expect(w.files.get('/h/.claude/statusline/ended/goal-mode.txt')).toBe('')
+  })
 })

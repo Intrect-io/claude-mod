@@ -4,10 +4,10 @@ Claude Code mods (plugins with a hooks module), served as a local folder marketp
 
 | mod | version | what it does |
 | --- | --- | --- |
-| [goal-mode](goal-mode/) | 0.6.0 | Session goals, handed to Claude Code's own `/goal` where it exists (its own evaluator elsewhere): set by you (`/goal-mode set <condition> [--check <cmd>]`) or by Claude itself (nudged on outcome requests and approved plans) |
-| [harness](harness/) | 0.2.1 | The integrated harness: the user's Claude rules enforced at the tool call, session tooling and workflow automation (formerly house-rules) |
-| [auto-claude](auto-claude/) | 0.2.4 | Unattended run of a repository on top of goal-mode's loop: plans the long-term goal and milestones, ships each (push, PR, CI, merge when green), replans until the final check passes |
-| [model-tier](model-tier/) | 0.5.0 | Routes each main-loop turn to fable, opus, sonnet or haiku and a reasoning effort by task complexity, with a `set_tier` tool the model calls to correct either |
+| [goal-mode](goal-mode/) | 0.6.1 | Session goals, handed to Claude Code's own `/goal` where it exists (its own evaluator elsewhere): set by you (`/goal-mode set <condition> [--check <cmd>]`) or by Claude itself (nudged on outcome requests and approved plans) |
+| [harness](harness/) | 0.2.2 | The integrated harness: the user's Claude rules enforced at the tool call, session tooling and workflow automation (formerly house-rules) |
+| [auto-claude](auto-claude/) | 0.2.5 | Unattended run of a repository on top of goal-mode's loop: plans the long-term goal and milestones, ships each (push, PR, CI, merge when green), replans until the final check passes |
+| [model-tier](model-tier/) | 0.5.1 | Routes each main-loop turn to fable, opus, sonnet or haiku and a reasoning effort by task complexity, with a `set_tier` tool the model calls to correct either |
 
 ## Install
 

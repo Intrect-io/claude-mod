@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from 'claude-code/testing'
 import type { AgentSpawnInput, HookStream, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import type { TierState } from '../types'
@@ -419,5 +419,32 @@ describe('the plugin', () => {
     expect(r.result).toBe('fable is above the auto tier cap (opus); only the person can pick it with /tier fable. The tier stays opus. Effort max from the next request.')
     expect(pinned.text).toBe('Pinned to fable. /tier auto to release.')
     expect(sent).toEqual(['claude-opus-5-5', 'claude-opus-5-5', 'claude-fable-5-1'])
+  })
+
+  test('session.start draws the tier piece and takes down any row; session.end clears the piece by the ending id', async ($, on) => {
+    const statuses: unknown[] = []
+    on('ui.status', (_, e) => {
+      statuses.push((e as { text?: unknown }).text)
+      return { value: undefined }
+    })
+    on('session.model', () => ({ value: 'claude-sonnet-5-5' }))
+    on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1000000 }, rateLimits: [] } }))
+    on('tool.register', () => ({ value: { tool: 'mcp__model-tier__set_tier' } }))
+    on('command.register', () => ({ value: { command: 'tier' } }))
+    on('session.start', (_, e) => ({ cwd: e.cwd }))
+    on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+    on('session.id', () => ({ value: 'live' }))
+    mock.env(on, { HOME: '/h' })
+    const files = new Map<string, string>()
+    on('fs.write', (_, e) => {
+      files.set(e.path, e.text)
+      return { value: undefined }
+    })
+
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    expect(statuses[0]).toBeUndefined()
+    expect(files.get('/h/.claude/statusline/live/model-tier.txt')).toBe('sonnet')
+    await $.session.end({ reason: 'clear', sessionId: 'live' })
+    expect(files.get('/h/.claude/statusline/live/model-tier.txt')).toBe('')
   })
 })

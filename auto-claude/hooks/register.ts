@@ -560,11 +560,18 @@ export const register: Register = (on, options) => {
     })
     const root = await repoRoot($, e.cwd).catch(() => undefined)
     activeRoot = root
-    // A run this session owned goes on after a reload.
-    if (root !== undefined) await show($, await readRecord($, root))
+    // A run this session owned goes on after a reload; no run draws nothing,
+    // which also takes down a piece an earlier load left.
+    await show($, root === undefined ? undefined : await readRecord($, root))
     ticker?.cancel()
     ticker = $.clock.every(pollMs, () => void tick($, caps, pollMs))
     return started
+  })
+
+  // A piece never outlives its session: cleared at its end, by the ending id.
+  on('session.end', async ($, e, next) => {
+    await segment($, '', e.sessionId)
+    return next(e)
   })
 
   on('prompt.compose', async ($, e, next) => {
