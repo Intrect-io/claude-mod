@@ -215,38 +215,67 @@ function show($: EngineInterface, s: TierState, enabled: boolean): Promise<void>
   return segment($, enabled ? `${s.tier}${s.effort ? `·${s.effort}` : ''}${pinned ? ' (pin)' : ''}` : '')
 }
 
-/** Labels `text`, or gives up after `timeoutMs` so a slow classifier never holds the prompt. */
-async function classify($: EngineInterface, text: string, model: string, timeoutMs: number, max: Tier): Promise<Tier | undefined> {
+// A classifier's answer, or the timeout that beat it.
+type Labelled<T> = { value: T | undefined; timedOut: boolean }
+
+const TIMED_OUT = Symbol('timed out')
+
+/** The first of `labelled` and a `timeoutMs` sleep, so a slow classifier never holds the prompt. */
+async function within<T>($: EngineInterface, labelled: Promise<T | undefined>, timeoutMs: number): Promise<Labelled<T>> {
   const stop = new AbortController()
   // A sleep that fails or is aborted never wins the race: only a real timeout does.
   const timeout = $.clock.sleep(timeoutMs, { signal: stop.signal }).then(
-    () => undefined,
-    () => new Promise<undefined>(() => {}),
-  )
-  const labelled = $.model.classify(text.slice(0, CLASSIFY_CHARS), LABELS, { model }).then(label =>
-    label === undefined || !(label in LABEL_TIER) ? undefined : capTier(LABEL_TIER[label as (typeof LABELS)[number]], max),
+    () => TIMED_OUT,
+    () => new Promise<typeof TIMED_OUT>(() => {}),
   )
   try {
-    return await Promise.race([labelled, timeout])
+    const got = await Promise.race([labelled, timeout])
+    return got === TIMED_OUT ? { value: undefined, timedOut: true } : { value: got, timedOut: false }
   } finally {
     stop.abort()
   }
 }
 
-/** The effort a prompt needs, or undefined on a timeout or a label outside the set. */
-async function classifyEffort($: EngineInterface, text: string, model: string, timeoutMs: number): Promise<Effort | undefined> {
-  const stop = new AbortController()
-  const timeout = $.clock.sleep(timeoutMs, { signal: stop.signal }).then(
-    () => undefined,
-    () => new Promise<undefined>(() => {}),
+/** Labels `text` with a tier, capped at `max`. */
+function classify($: EngineInterface, text: string, model: string, timeoutMs: number, max: Tier): Promise<Labelled<Tier>> {
+  const labelled = $.model.classify(text.slice(0, CLASSIFY_CHARS), LABELS, { model }).then(label =>
+    label === undefined || !(label in LABEL_TIER) ? undefined : capTier(LABEL_TIER[label as (typeof LABELS)[number]], max),
   )
+  return within($, labelled, timeoutMs)
+}
+
+/** The effort a prompt needs; undefined for a label outside the set. */
+function classifyEffort($: EngineInterface, text: string, model: string, timeoutMs: number): Promise<Labelled<Effort>> {
   const labelled = $.model.classify(text.slice(0, CLASSIFY_CHARS), EFFORT_LABELS, { model }).then(found =>
     found !== undefined && found in LABEL_EFFORT ? LABEL_EFFORT[found as (typeof EFFORT_LABELS)[number]] : undefined,
   )
+  return within($, labelled, timeoutMs)
+}
+
+const LOG_MAX_LINES = 500
+
+/**
+ * One JSON line per classifier timeout in ~/.claude/model-tier.log: which
+ * classifier, how long it ran before it was given up on, and the tier and
+ * effort the turn kept. This is the data for tuning `classifierTimeoutMs`
+ * (measured once: a design prompt stayed on haiku·low after a timeout).
+ */
+async function logTimeout($: EngineInterface, entry: { classifier: 'tier' | 'effort' | 'subagent'; ranMs: number; kept: { tier: Tier; effort?: Effort } }): Promise<void> {
   try {
-    return await Promise.race([labelled, timeout])
-  } finally {
-    stop.abort()
+    const home = await $.env.get('HOME')
+    if (home === undefined) return
+    const path = `${home}/.claude/model-tier.log`
+    let text = ''
+    try {
+      text = await $.fs.read(path)
+    } catch {
+      // First line.
+    }
+    const lines = text.split('\n').filter(line => line !== '')
+    lines.push(JSON.stringify({ ts: new Date(await $.clock.now()).toISOString(), event: 'classifier-timeout', ...entry, kept: { tier: entry.kept.tier, effort: entry.kept.effort ?? null } }))
+    await $.fs.write(path, `${lines.slice(-LOG_MAX_LINES).join('\n')}\n`)
+  } catch {
+    // A log line is never worth failing a prompt over.
   }
 }
 
@@ -350,12 +379,17 @@ export const register: Register = (on, options) => {
     let s = current
     const wantTier = current.source !== 'pinned'
     const wantEffort = routeEffort && current.effortSource !== 'pinned'
-    const [proposed, effort] = await Promise.all([
+    const [tierLabel, effortLabel] = await Promise.all([
       wantTier ? classify($, e.text, classifierModel, classifierTimeoutMs, maxAuto).catch(() => undefined) : undefined,
       wantEffort ? classifyEffort($, e.text, classifierModel, classifierTimeoutMs).catch(() => undefined) : undefined,
     ])
+    const proposed = tierLabel?.value
+    const effort = effortLabel?.value
     if (proposed) s = await update($, state, v => decide(v, proposed, decideOptions))
     if (effort) s = await update($, state, v => decideEffort(v, effort, decideOptions))
+    const kept = { tier: s.tier, effort: s.effort }
+    if (tierLabel?.timedOut) await logTimeout($, { classifier: 'tier', ranMs: classifierTimeoutMs, kept })
+    if (effortLabel?.timedOut) await logTimeout($, { classifier: 'effort', ranMs: classifierTimeoutMs, kept })
     void show($, s, enabled)
     const effortPart = s.effort ? ` with ${s.effort} effort (${s.effortSource})` : ''
     const note =
@@ -441,7 +475,12 @@ export const register: Register = (on, options) => {
 
   on('agent.spawn', async ($, e, next) => {
     if (!enabled || e.fork || e.model !== undefined || !ROUTABLE_AGENTS.has(e.subagentType)) return next(e)
-    const tier = await classify($, e.prompt, classifierModel, classifierTimeoutMs, maxAuto).catch(() => undefined)
+    const labelled = await classify($, e.prompt, classifierModel, classifierTimeoutMs, maxAuto).catch(() => undefined)
+    const tier = labelled?.value
+    if (labelled?.timedOut) {
+      const s = await read($, state)
+      await logTimeout($, { classifier: 'subagent', ranMs: classifierTimeoutMs, kept: { tier: s.tier, effort: s.effort } })
+    }
     return next(tier ? { ...e, model: models[tier] } : e)
   }).catch(($, e, next) => next(e))
 }
