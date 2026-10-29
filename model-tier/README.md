@@ -1,7 +1,8 @@
 # model-tier
 
 A Claude Code mod that routes each main-loop turn to **opus**, **sonnet** or **haiku**
-by task complexity, and lets the model correct the choice itself.
+by task complexity, and lets the model correct the choice itself. **fable** is reached
+only by `/tier fable` unless `maxAutoTier` allows it.
 
 ## How it works
 
@@ -10,6 +11,10 @@ by task complexity, and lets the model correct the choice itself.
   (haiku by default), mapped to haiku / sonnet / opus / fable (`claude-fable-5-1`).
   - Fable is the top tier, for novel research, deep design across many systems, or work where opus already failed.
   - Its label is named as a rare case on purpose, because fable is the scarcest and most rate-limited model.
+  - `maxAutoTier` (default `opus`) caps what the classifier, subagent routing and `set_tier` pick.
+    Fable has its own, tighter rate limit on Claude Teams, so by default an `exceptionally-hard`
+    verdict runs on opus. Only `/tier fable` reaches it: a session started on fable with `/model`
+    steps down at the first classifier verdict.
   - A refused fable request falls back to the session's model, as any tier does.
 - **Effort (on prompt submit, in parallel).** A second classification labels how
   hard the problem is to think through: `recall-or-lookup` / `routine-reasoning` /
@@ -24,7 +29,8 @@ by task complexity, and lets the model correct the choice itself.
   note tells the model the pick (`runs on opus (auto) with high effort (auto)`) and
   asks it to review that pick against the work ahead. The model calls the tool when
   either the tier or the effort is clearly too weak or wasteful. The change applies
-  from the next model request.
+  from the next model request. A tier above `maxAutoTier` is left out of the tool's
+  schema, and a call that asks for one keeps the current tier.
 - **Switching.** A `turn.step` hook rewrites the `model` of every main-loop request.
   Subagent steps are untouched.
 - **Subagents.** `general-purpose` / `claude` spawns with no explicit model get a
@@ -62,6 +68,7 @@ showing the session's configured model: this mod rewrites requests, not the sett
 | `classifierModel` | `haiku` | model used to label prompts |
 | `classifierTimeoutMs` | `3000` | keep the current tier and effort when classifying takes longer |
 | `routeEffort` | `true` | also classify and send a reasoning effort per turn |
+| `maxAutoTier` | `opus` | highest tier the classifier, subagent routing and `set_tier` may pick; `fable` lifts the cap |
 
 ## Development
 

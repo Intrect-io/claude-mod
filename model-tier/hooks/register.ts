@@ -9,8 +9,16 @@ const SET_TIER = `mcp__${PLUGIN}__set_tier`
 const TIERS: readonly Tier[] = ['haiku', 'sonnet', 'opus', 'fable']
 const RANK: Record<Tier, number> = { haiku: 0, sonnet: 1, opus: 2, fable: 3 }
 const isTierName = (v: unknown): v is Tier => typeof v === 'string' && (TIERS as readonly string[]).includes(v)
+// The highest tier anything but the person picks: the classifier, subagent
+// routing and the model's own set_tier. Fable has its own, tighter rate limit
+// on Claude Teams, so by default only /tier fable reaches it.
+export const DEFAULT_MAX_AUTO_TIER: Tier = 'opus'
+export const maxAutoTier = (v: unknown): Tier => (isTierName(v) ? v : DEFAULT_MAX_AUTO_TIER)
+export const capTier = (t: Tier, max: Tier): Tier => (RANK[t] > RANK[max] ? max : t)
 // The top label names a rare case outright: label names steer the classifier
-// (see EFFORT_LABELS), and fable is the scarcest, most rate-limited tier.
+// (see EFFORT_LABELS), and fable is the scarcest, most rate-limited tier. The
+// label set stays the same under a lower `maxAutoTier`, so the other three
+// labels classify as before; only the tier it maps to is capped.
 const LABELS = ['trivial', 'standard', 'complex', 'exceptionally-hard'] as const
 const LABEL_TIER: Record<(typeof LABELS)[number], Tier> = {
   trivial: 'haiku',
@@ -208,7 +216,7 @@ function show($: EngineInterface, s: TierState, enabled: boolean) {
 }
 
 /** Labels `text`, or gives up after `timeoutMs` so a slow classifier never holds the prompt. */
-async function classify($: EngineInterface, text: string, model: string, timeoutMs: number): Promise<Tier | undefined> {
+async function classify($: EngineInterface, text: string, model: string, timeoutMs: number, max: Tier): Promise<Tier | undefined> {
   const stop = new AbortController()
   // A sleep that fails or is aborted never wins the race: only a real timeout does.
   const timeout = $.clock.sleep(timeoutMs, { signal: stop.signal }).then(
@@ -216,7 +224,7 @@ async function classify($: EngineInterface, text: string, model: string, timeout
     () => new Promise<undefined>(() => {}),
   )
   const labelled = $.model.classify(text.slice(0, CLASSIFY_CHARS), LABELS, { model }).then(label =>
-    label === undefined ? undefined : LABEL_TIER[label as (typeof LABELS)[number]],
+    label === undefined || !(label in LABEL_TIER) ? undefined : capTier(LABEL_TIER[label as (typeof LABELS)[number]], max),
   )
   try {
     return await Promise.race([labelled, timeout])
@@ -254,6 +262,8 @@ export const register: Register = (on, options) => {
   const classifierTimeoutMs = Number(options.classifierTimeoutMs ?? 3000)
   const providers = providerTierModels(options.providerTierModels)
   const routeEffort = options.routeEffort !== false
+  const maxAuto = maxAutoTier(options.maxAutoTier)
+  const autoTiers = TIERS.filter(t => RANK[t] <= RANK[maxAuto])
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -262,7 +272,9 @@ export const register: Register = (on, options) => {
       name: 'set_tier',
       description:
         'Switch the model and/or the reasoning effort that run the rest of this task: ' +
-        'fable for exceptionally hard problems (novel research, deep design across many systems, or where opus already failed); ' +
+        (autoTiers.includes('fable')
+          ? 'fable for exceptionally hard problems (novel research, deep design across many systems, or where opus already failed); '
+          : '') +
         'opus for design, debugging and multi-file reasoning; sonnet for routine implementation; ' +
         'haiku for lookups, formatting and mechanical edits. Effort: low for quick answers, ' +
         'medium for ordinary work, high for careful reasoning, xhigh for hard investigations, ' +
@@ -271,7 +283,7 @@ export const register: Register = (on, options) => {
       inputSchema: {
         type: 'object',
         properties: {
-          tier: { type: 'string', enum: TIERS },
+          tier: { type: 'string', enum: autoTiers },
           effort: { type: 'string', enum: EFFORTS },
           reason: { type: 'string', description: 'One line on why' },
         },
@@ -333,7 +345,7 @@ export const register: Register = (on, options) => {
     const wantTier = current.source !== 'pinned'
     const wantEffort = routeEffort && current.effortSource !== 'pinned'
     const [proposed, effort] = await Promise.all([
-      wantTier ? classify($, e.text, classifierModel, classifierTimeoutMs).catch(() => undefined) : undefined,
+      wantTier ? classify($, e.text, classifierModel, classifierTimeoutMs, maxAuto).catch(() => undefined) : undefined,
       wantEffort ? classifyEffort($, e.text, classifierModel, classifierTimeoutMs).catch(() => undefined) : undefined,
     ])
     if (proposed) s = await update($, state, v => decide(v, proposed, decideOptions))
@@ -348,10 +360,12 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: 'mcp__model-tier__set_tier' }, async ($, e) => {
     const input = e as unknown as { tier?: unknown; effort?: unknown; reason?: unknown }
-    if (input.tier !== undefined && !isTierName(input.tier)) return { deny: 'tier must be one of fable, opus, sonnet, haiku' }
+    if (input.tier !== undefined && !isTierName(input.tier)) return { deny: `tier must be one of ${autoTiers.join(', ')}` }
     if (input.effort !== undefined && !isEffort(input.effort)) return { deny: 'effort must be one of low, medium, high, xhigh, max' }
     if (input.tier === undefined && input.effort === undefined) return { deny: 'give tier, effort or both' }
-    const tier = input.tier as Tier | undefined
+    // Above the cap only the person may go (/tier): keep the tier, still apply the effort.
+    const refused = input.tier !== undefined && !autoTiers.includes(input.tier as Tier) ? (input.tier as Tier) : undefined
+    const tier = refused ? undefined : (input.tier as Tier | undefined)
     const effort = input.effort as Effort | undefined
     const s = await update($, state, (v): TierState => {
       let next = v
@@ -361,6 +375,7 @@ export const register: Register = (on, options) => {
     })
     show($, s, enabled)
     const parts: string[] = []
+    if (refused) parts.push(`${refused} is above the auto tier cap (${maxAuto}); only the person can pick it with /tier ${refused}. The tier stays ${s.tier}.`)
     if (tier !== undefined) parts.push(s.source === 'pinned' ? `The person pinned ${s.tier} with /tier; it stays.` : `Switched to ${tier} from the next request.`)
     if (effort !== undefined) parts.push(s.effortSource === 'pinned' ? `The person pinned ${s.effort} effort with /tier effort; it stays.` : `Effort ${effort} from the next request.`)
     return { result: parts.join(' ') }
@@ -420,7 +435,7 @@ export const register: Register = (on, options) => {
 
   on('agent.spawn', async ($, e, next) => {
     if (!enabled || e.fork || e.model !== undefined || !ROUTABLE_AGENTS.has(e.subagentType)) return next(e)
-    const tier = await classify($, e.prompt, classifierModel, classifierTimeoutMs).catch(() => undefined)
+    const tier = await classify($, e.prompt, classifierModel, classifierTimeoutMs, maxAuto).catch(() => undefined)
     return next(tier ? { ...e, model: models[tier] } : e)
   }).catch(($, e, next) => next(e))
 }
