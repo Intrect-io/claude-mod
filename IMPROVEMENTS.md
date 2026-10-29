@@ -54,6 +54,7 @@ P2: cost, upkeep or polish.
 
 ### segment helper copied into four mods
 
+- **Status:** resolved by `scripts/sync-shared.ts`: `shared/segment.ts` (with `MOD` filled in) and `shared/queue.ts` generate each mod's copy, and `bash scripts/ci.sh` fails on drift (`sync-shared --check`). The queue grammar was the dangerous copy. auto-claude's hand copy had already drifted: it dropped the notes that goal-mode's parser keeps.
 - **Evidence.** `goal-mode/`, `harness/`, `model-tier/` and `auto-claude/` each hold their own `hooks/segment.ts`. Four md5s, differing only in `MOD`.
 - **Fix.** Keep the copies (a mod imports nothing outside its folder), but generate them: `scripts/sync-shared.ts` writes `segment.ts` (and the grant verdict above) from `shared/`, and CI fails when a copy drifts.
 
