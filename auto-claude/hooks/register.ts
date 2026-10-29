@@ -3,7 +3,7 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 import type { AutoRecord, ShipItem } from '../types'
 import { fixLine, kickoffText, parseQueue, planNudgeText, POLICY, READY_TOOL, replanText, validatePlan } from './plan'
 import { segment } from './segment'
-import { capReached, gateCredit, inFlight, MAX_RED, mergeable, parseChecks, prNumber, readLog, summary } from './ship'
+import { capReached, diagnose, gateCredit, inFlight, MAX_RED, mergeable, parseChecks, prNumber, readLog, summary } from './ship'
 import type { Caps } from './ship'
 
 // auto-claude: an unattended run of one repository, driven on top of
@@ -526,6 +526,21 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string): P
   return `auto-claude on in ${root} (${mode} CI, merges into ${defaultBranch}). Claude plans the run now.${clearedNote(stop)}`
 }
 
+async function stallLine($: EngineInterface, r: AutoRecord): Promise<string | undefined> {
+  const f = FILES(r.root)
+  const planErrors = r.phase === 'plan' ? ((v => (v.ok ? [] : v.errors))(validatePlan(await readText($, f.plan), await readText($, f.queue), r.round === 1))) : []
+  const why = diagnose(r, {
+    now: await $.clock.now(),
+    sessionId: await $.session.id(),
+    staleMs: STALE_MS,
+    credit: gateCredit(await readText($, f.gate)),
+    planErrors,
+    maxNudges: MAX_NUDGES,
+    planWaitMs: PLAN_NUDGE_MS,
+  })
+  return why === undefined ? undefined : `stalled: ${why}`
+}
+
 async function statusText($: EngineInterface): Promise<string> {
   const root = activeRoot ?? (await repoRoot($, await $.session.cwd()))
   const r = root === undefined ? undefined : await readRecord($, root)
@@ -536,6 +551,7 @@ async function statusText($: EngineInterface): Promise<string> {
     `queue: ${queue.filter(i => i.mark === 'x').length} done, ${queue.filter(i => i.mark === '!').length} blocked, ${queue.filter(i => i.mark === ' ').length} pending · ${summary(r.merges, r.held, r.ships)}`,
     ...r.ships.filter(s => s.state !== 'merged').map(s => `- ${s.state}${s.pr !== undefined ? ` PR #${s.pr}` : ''}: ${s.goal.slice(0, 70)}${s.note ? ` (${s.note.slice(0, 80)})` : ''}`),
     r.note !== undefined ? `note: ${r.note}` : undefined,
+    await stallLine($, r),
   ]
   return lines.filter((l): l is string => l !== undefined).join('\n')
 }
