@@ -12,6 +12,7 @@ P2: cost, upkeep or polish.
 
 ### goal-mode: a goal handed off mid-turn could be lost
 
+- **Status:** resolved in be954dd ("hand a mid-turn goal to /goal at the stop, not on a timer"), guarded by the test "set_goal hands the goal to /goal as the turn ends; no evaluator of its own runs", and deployed to the Mac and vela with goal-mode 0.6.0 on 2026-10-29.
 - **Evidence.**
   - Measured in session a5d6cd33: `set_goal` answered "Goal handed to Claude Code's /goal", but no `/goal` ever ran. The transcript holds only the `/goal clear` that `auto` queued.
   - The first attempt was lost to an interrupt (Esc), which drops a queued command.

@@ -32,7 +32,7 @@ It depends on [goal-mode](../goal-mode/), which supplies the loop: one worktree 
 - **Merging.** Only auto-claude merges. It adds `gh pr merge`, `gh release` and pushes to `HEAD:main` to `.claude/goal-loop.deny`, so the model is refused them.
 - **goal-mode's guards apply too.** Force pushes, direct pushes to main, `reset --hard`, deploy commands, `sudo`, edits outside the worktree and AskUserQuestion are all refused.
 - **Caps.** A run stops and reports after `maxMerges` (20) merges, after `maxHours` (24), or after `maxRounds` (3) rounds without the final check passing.
-- **Kill switch.** Create `.claude/auto-claude.stop`, or run `/auto-claude stop`. Either one also turns the loop off.
+- **Kill switch.** Create `.claude/auto-claude.stop`, or run `/auto-claude stop`. Either one also turns the loop off. `/auto-claude start` and `resume` move a stop file left from an earlier run to `.claude/auto-claude.stop.cleared`, so it cannot end the new run at its first tick.
 - **Nothing stalls silently.**
   - A `/goal-mode loop on` that starts nothing is retried with backoff. After 3 tries the person is told the loop's reply.
   - A run still planning gets a reminder every 15 minutes that lists what the plan files lack. After 3 reminders the run stops.

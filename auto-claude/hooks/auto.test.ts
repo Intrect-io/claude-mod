@@ -117,6 +117,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
     const t = w.files.get(e.path)
     return t === undefined ? { deny: `ENOENT ${e.path}` } : { value: t }
   })
+  on('fs.exists', (_, e) => ({ value: w.files.has(e.path) }))
   on('fs.write', (_, e) => {
     w.files.set(e.path, e.text)
     return { value: undefined }
@@ -134,6 +135,14 @@ function world(on: On, store: Record<string, unknown> = {}) {
     w.runs.push(a)
     const ok = (stdout = '', exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (a.includes('--git-common-dir')) return ok('/repo/.git\n')
+    if (e.argv[0] === 'mv') {
+      const [from, to] = e.argv.slice(-2) as [string, string]
+      const text = w.files.get(from)
+      if (text === undefined) return ok('', 1)
+      w.files.set(to, text)
+      w.files.delete(from)
+      return ok()
+    }
     if (a.endsWith(' remote')) return ok('origin\n')
     if (a.includes('symbolic-ref')) return ok('origin/main\n')
     if (a.startsWith('gh repo view')) return ok('', w.github ? 0 : 1)
@@ -372,6 +381,28 @@ describe('a run, local CI', () => {
     w.branchGone = true
     await w.clock.advance(30_000)
     expect(w.notifies.some(n => n.includes('held') && n.includes('branch goal/02-sub are gone'))).toBe(true)
+  })
+
+  test('a run started over a stale stop file keeps running, and resume sets one aside too', async ($, on) => {
+    const w = world(on)
+    w.files.set('/repo/.claude/auto-claude.stop', '')
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect((await cmd($, 'start')).text).toContain('moved to .claude/auto-claude.stop.cleared')
+    expect(w.files.has('/repo/.claude/auto-claude.stop')).toBe(false)
+    expect(w.files.has('/repo/.claude/auto-claude.stop.cleared')).toBe(true)
+    expect(w.files.get('/repo/.git/info/exclude')).toContain('.claude/auto-claude.stop.cleared')
+    for (let i = 0; i < 3; i++) await w.clock.advance(30_000)
+    expect((await cmd($, 'status')).text).toContain('auto-claude on · phase plan')
+
+    // A stop file written while the run is on still stops it.
+    w.files.set('/repo/.claude/auto-claude.stop', '')
+    await w.clock.advance(30_000)
+    expect((await cmd($, 'status')).text).toContain('phase stopped')
+
+    // Resuming is the person's word to go on: the file is set aside again.
+    expect((await cmd($, 'resume')).text).toContain('moved to .claude/auto-claude.stop.cleared')
+    for (let i = 0; i < 3; i++) await w.clock.advance(30_000)
+    expect((await cmd($, 'status')).text).toContain('auto-claude on')
   })
 })
 
