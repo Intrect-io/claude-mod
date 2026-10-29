@@ -91,20 +91,43 @@ export function checkEnterWorktree(input: { name?: unknown; path?: unknown }): s
   return 'Harness rule (CLAUDE.md §3): EnterWorktree would create it under .claude/worktrees/. Create it with `git worktree add worktrees/<name> -b <branch>` and enter it with EnterWorktree path.'
 }
 
+// An absolute, normalized path: `target` against `cwd` when it is relative.
+function resolvePath(target: string, cwd: string | undefined): string {
+  const joined = target.startsWith('/') || cwd === undefined ? target : `${cwd}/${target}`
+  const parts: string[] = []
+  for (const part of joined.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') parts.pop()
+    else parts.push(part)
+  }
+
+  return `/${parts.join('/')}`
+}
+
 // Deleting goes through a trash folder. Removing things already in a trash
-// folder, or in temporary and scratch space, stays allowed.
-export function checkDelete(command: string, env: GuardEnv): string | undefined {
+// folder, or in temporary and scratch space, stays allowed. A relative target
+// is judged where it lands from the session's cwd (and any `cd` before it), so
+// `rm junk.txt` inside /tmp is allowed just like `rm /tmp/…/junk.txt`.
+export function checkDelete(command: string, env: GuardEnv, cwd?: string): string | undefined {
+  let dir = cwd
   const allowed = (target: string): boolean => {
-    const full = expandHome(target, env.home)
-    if (/(^|\/)trash(\/|$)/.test(full) && !full.includes('..')) return true
+    const expanded = expandHome(target, env.home)
+    if (/(^|\/)trash(\/|$)/.test(expanded) && !expanded.includes('..')) return true
+    if (!expanded.startsWith('/') && dir === undefined) return false
+    const full = resolvePath(expanded, dir)
     const roots = ['/tmp', '/private/tmp', '/var/folders', env.tmpdir].filter((root): root is string => root !== undefined && root !== '')
 
-    return full.startsWith('/') && !full.includes('..') && roots.some(root => isInside(full, root.replace(/\/$/, '')))
+    return roots.some(root => isInside(full, resolvePath(root, undefined)))
   }
 
   for (const segment of segments(stripProse(command))) {
     const words = commandWords(segment)
     const program = programOf(words)
+    if (program === 'cd') {
+      const to = words[1] === undefined ? env.home : expandHome(words[1], env.home)
+      dir = to === undefined ? undefined : to.startsWith('/') ? resolvePath(to, undefined) : dir === undefined ? undefined : resolvePath(to, dir)
+      continue
+    }
     if (program === 'rm' || program === 'unlink' || program === 'rmdir') {
       const targets = words.slice(1).filter(word => !word.startsWith('-'))
       const blocked = targets.find(target => !allowed(target))
@@ -196,7 +219,7 @@ export async function guardsToolCall(
         checkAttribution(command, files) ??
         checkOpenswarm(command) ??
         checkForcePush(command) ??
-        checkDelete(command, env) ??
+        checkDelete(command, env, await $.session.cwd().catch(() => undefined)) ??
         checkWorktree(command, env, await repoRoot($)) ??
         checkLlmPort(stripProse(command)) ??
         checkSystemPython(command)
