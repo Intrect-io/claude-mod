@@ -27,6 +27,10 @@ type World = {
   evaluations: number
   notifications: string[]
   clock: ReturnType<typeof mock.clock>
+  // The session's directory now (unset: the repository root), and
+  // directories removed from under it, where git cannot start.
+  cwd?: string
+  gone: Set<string>
 }
 
 // The engine and the machine beneath the plugin: files in memory, git and the
@@ -47,7 +51,11 @@ function world(on: On, queue = QUEUE, store: Record<string, unknown> = {}): Worl
     evaluations: 0,
     notifications: [],
     clock: mock.clock(on, { now: 0 }),
+    gone: new Set(),
   }
+  const removed = (path: string) => [...w.gone].some(g => path === g || path.startsWith(`${g}/`))
+  on('session.cwd', () => ({ value: w.cwd ?? ROOT }))
+  on('fs.exists', (_, e) => ({ value: w.files.has(e.path) || !removed(e.path) }))
   mock.store(on, store)
   on('tool.register', (_, e) => ({ value: { tool: `mcp__goal-mode__${e.name}` } }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
@@ -79,7 +87,9 @@ function world(on: On, queue = QUEUE, store: Record<string, unknown> = {}): Worl
     const ok = (stdout = '', exitCode = 0) => ({
       value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
     })
-    if (argv.includes('rev-parse')) return ok(`${ROOT}/.git\n`)
+    const cwd = e.init?.cwd ?? ROOT
+    if (removed(cwd)) return ok('', -1)
+    if (argv.includes('rev-parse')) return cwd.startsWith('/elsewhere') ? ok('', 128) : ok(`${ROOT}/.git\n`)
     if (argv.includes('worktree')) {
       w.worktrees.push(String(argv[5]))
       w.adds.push([...argv])
@@ -372,4 +382,26 @@ describe('loop', () => {
       seen += fresh.length
     }
   })
+
+  test('loop on finds the repository when the directory recorded at session start is stale or removed', async ($, on) => {
+    const w = world(on)
+    // Recorded at session.start: a milestone's worktree, since removed.
+    await $.session.start({ cwd: `${ROOT}/worktrees/goal-11-landed`, surface: 'terminal', isInteractive: true })
+    w.gone.add(`${ROOT}/worktrees/goal-11-landed`)
+    // The session itself is back at the repository root.
+    w.cwd = ROOT
+    expect((await loopOn($, w)).text).toContain('started "fix add"')
+    await command($, 'loop off')
+
+    // Both the live and the recorded directory gone: the nearest ancestor that exists.
+    w.cwd = `${ROOT}/worktrees/goal-12-landed/apps/web`
+    w.gone.add(`${ROOT}/worktrees/goal-12-landed`)
+    expect((await command($, 'loop status')).text).toContain('Loop off')
+
+    // Outside any repository: the reply names where it looked.
+    w.cwd = '/elsewhere'
+    await $.session.start({ cwd: '/elsewhere', surface: 'terminal', isInteractive: true })
+    expect((await command($, 'loop status')).text).toContain('Not inside a git repository: the loop needs one (looked from /elsewhere)')
+  })
 })
+
