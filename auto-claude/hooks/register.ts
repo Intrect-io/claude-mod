@@ -119,6 +119,23 @@ async function repoRoot($: EngineInterface, cwd: string): Promise<string | undef
   return r.exitCode === 0 && common.endsWith('/.git') ? common.slice(0, -'/.git'.length) : undefined
 }
 
+// The repository of the session's directory, or of its nearest ancestor that
+// still exists. A session that cd'ed into a milestone's worktree keeps it as
+// its directory after auto-claude removes that worktree. git cannot even
+// start in a missing directory (Bun: "posix_spawn 'git' ENOENT"), and that
+// used to read as "Not inside a git repository".
+async function sessionRoot($: EngineInterface): Promise<{ root?: string; cwd: string; used: string }> {
+  const cwd = await $.session.cwd()
+  let dir = cwd
+  while (dir !== '/' && !(await $.fs.exists(dir).catch(() => true))) dir = dir.slice(0, dir.lastIndexOf('/')) || '/'
+  return { root: await repoRoot($, dir), cwd, used: dir }
+}
+
+const notInRepo = (s: { cwd: string; used: string }) =>
+  s.used === s.cwd
+    ? `Not inside a git repository: ${s.cwd}.`
+    : `Not inside a git repository: the session's directory ${s.cwd} no longer exists, and ${s.used} is not in one.`
+
 async function ensureLines($: EngineInterface, path: string, lines: readonly string[], header: string): Promise<void> {
   const text = (await readText($, path)) ?? ''
   const have = new Set(text.split('\n').map(l => l.trim()))
@@ -491,8 +508,9 @@ async function clearStop($: EngineInterface, root: string): Promise<{ cleared: b
 const clearedNote = (c: { cleared: boolean }) => (c.cleared ? ' A leftover .claude/auto-claude.stop was moved to .claude/auto-claude.stop.cleared.' : '')
 
 async function startCommand($: EngineInterface, hint: string, ciMode: string): Promise<string> {
-  const root = await repoRoot($, await $.session.cwd())
-  if (root === undefined) return 'Not inside a git repository.'
+  const where = await sessionRoot($)
+  const root = where.root
+  if (root === undefined) return notInRepo(where)
   const existing = await readRecord($, root)
   if (existing?.on === true) return `A run is already on here (phase ${existing.phase}); /${COMMAND} status, or /${COMMAND} stop first.`
   const remote = (await run($, ['git', '-C', root, 'remote'], root)).stdout.split('\n').map(s => s.trim()).find(s => s === 'origin') ?? undefined
@@ -542,7 +560,8 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string): P
     $.prompt.submit({ text }).catch(() => $.ui.toast('auto-claude: the planning prompt was not submitted; send any message to start.'))
   })
 
-  return `auto-claude on in ${root} (${mode} CI, merges into ${defaultBranch}). Claude plans the run now.${clearedNote(stop)}`
+  const moved = where.used === where.cwd ? '' : ` (the session's directory ${where.cwd} no longer exists; used ${where.used})`
+  return `auto-claude on in ${root}${moved} (${mode} CI, merges into ${defaultBranch}). Claude plans the run now.${clearedNote(stop)}`
 }
 
 async function stallLine($: EngineInterface, r: AutoRecord): Promise<string | undefined> {
@@ -561,7 +580,7 @@ async function stallLine($: EngineInterface, r: AutoRecord): Promise<string | un
 }
 
 async function statusText($: EngineInterface): Promise<string> {
-  const root = activeRoot ?? (await repoRoot($, await $.session.cwd()))
+  const root = activeRoot ?? (await sessionRoot($)).root
   const r = root === undefined ? undefined : await readRecord($, root)
   if (r === undefined) return 'No auto-claude run in this repository.'
   const queue = parseQueue((await readText($, FILES(r.root).queue)) ?? '')
@@ -635,7 +654,7 @@ export const register: Register = (on, options) => {
     const [action = 'status', ...rest] = e.args.trim().split(/\s+/).filter(w => w !== '')
     if (action === 'start') return { text: await startCommand($, rest.join(' '), ciMode) }
     if (action === 'status') return { text: await statusText($) }
-    const root = activeRoot ?? (await repoRoot($, await $.session.cwd()))
+    const root = activeRoot ?? (await sessionRoot($)).root
     const r = root === undefined ? undefined : await readRecord($, root)
     if (r === undefined) return { text: 'No auto-claude run in this repository.' }
     if (action === 'stop') {
