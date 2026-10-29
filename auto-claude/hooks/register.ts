@@ -102,12 +102,6 @@ async function tell($: EngineInterface, r: AutoRecord, text: string): Promise<vo
   } catch {
     // No notification channel.
   }
-  // The fleet dashboard's repo channel, where the fleet mod is installed.
-  try {
-    await $.tool.call({ tool: 'mcp__fleet__fleet_post', channel: '#all', text: line } as never)
-  } catch {
-    // No fleet.
-  }
 }
 
 async function repoRoot($: EngineInterface, cwd: string): Promise<string | undefined> {

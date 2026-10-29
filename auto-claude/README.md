@@ -39,6 +39,6 @@ It depends on [goal-mode](../goal-mode/), which supplies the loop: one worktree 
   - A shipping error that repeats is reported once.
   - A run whose owning session has gone quiet for 10 minutes is reported as orphaned in other sessions, and `/auto-claude resume` picks it up there.
   - Only the owning session receives the unattended rules.
-- **Reporting.** Progress shows in the status line piece (`auto·R1·M3/7·PR#12`), in notifications, and on the fleet dashboard's `#all` channel when the fleet mod is installed.
+- **Reporting.** Progress shows in the status line piece (`auto·R1·M3/7·PR#12`) and in notifications.
 
 Options: `ciMode` (`auto` | `github` | `local`), `maxRounds`, `maxMerges`, `maxHours` and `ciPollSec`.

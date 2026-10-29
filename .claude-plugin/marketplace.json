@@ -34,15 +34,6 @@
       "category": "development"
     },
     {
-      "name": "fleet",
-      "description": "Links this session to fleet-hub: IRC-style channels between sessions, dashboard telemetry, and orchestrator messages delivered as prompts with a §6.5 grant verdict.",
-      "author": {
-        "name": "unohee"
-      },
-      "source": "./fleet",
-      "category": "development"
-    },
-    {
       "name": "auto-claude",
       "description": "Unattended run of a repository: Claude plans the long-term end state and milestones, goal-mode's loop builds each, auto-claude pushes, opens PRs and merges when CI is green, then replans until the final check passes.",
       "author": {

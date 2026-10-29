@@ -129,7 +129,6 @@ function world(on: On, store: Record<string, unknown> = {}) {
     w.commands.push(`${e.command} ${e.args ?? ''}`.trim())
     return { text: w.loopReply }
   })
-  on('tool.call', () => ({ result: 'no fleet' }))
   on('process.run', (_, e) => {
     const a = e.argv.join(' ')
     w.runs.push(a)

@@ -2,7 +2,7 @@
 # Created: 2026-10-27
 # Purpose: The repository's CI, run the same way locally and in GitHub Actions:
 #   `claude plugin validate` for the marketplace and every mod, `claude plugin
-#   test` for every mod, then fleet-hub's typecheck and `bun test`.
+#   test` for every mod.
 # Dependencies: claude (Claude Code CLI; no login needed), bun, perl
 # Test Status: run by .github/workflows/ci.yml and by the auto-claude milestone checks
 #
@@ -48,15 +48,8 @@ for mod in "${mods[@]}"; do
   fi
 done
 
-if [ -d fleet-hub ]; then
-  echo "== fleet-hub: install, typecheck, test"
-  if ! (cd fleet-hub && bun install --frozen-lockfile >/dev/null && bunx tsc -p . && bun test); then
-    failed+=("fleet-hub")
-  fi
-fi
-
 if [ ${#failed[@]} -gt 0 ]; then
   echo "ci: FAILED: ${failed[*]}" >&2
   exit 1
 fi
-echo "ci: marketplace, ${#mods[@]} mods and fleet-hub passed"
+echo "ci: marketplace and ${#mods[@]} mods passed"
