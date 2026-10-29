@@ -60,6 +60,8 @@ declare module 'claude-code' {
       lint: Shaped<LintState>
       activity: Shaped<{ files: string[] }>
       heartbeat: Shaped<HeartbeatState>
+      // The venv note was given in this session.
+      venvNoted: Shaped<boolean>
     }
   }
 }

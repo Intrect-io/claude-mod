@@ -18,7 +18,7 @@ Refuses or rewrites a single tool call.
 - **Worktrees:** worktrees outside `<repo>/worktrees/`. A successful add also writes `worktrees/` into `.git/info/exclude`. `EnterWorktree` with `name` is refused, and so is an Agent call with `isolation: "worktree"`.
 - **Deletes:** direct `rm`, `unlink`, `rmdir`, `find -delete` and `git clean -f`. Targets in a `trash/` folder, `/tmp` or `$TMPDIR` are allowed.
 - **Force push:** refused. `--force-with-lease` is allowed.
-- **Python:** without the platform venv, the activation is prefixed. A system interpreter called by absolute path (`/usr/bin/python3`, `/opt/homebrew/bin/python3*`) is refused.
+- **Python:** without the platform venv, the activation is prefixed. The model is told so once per session, on the first rewritten call. A system interpreter called by absolute path (`/usr/bin/python3`, `/opt/homebrew/bin/python3*`) is refused.
 - **LM Studio port:** 1234 is refused; it is 1237.
 - **OpenSwarm:** the retired OpenSwarm review gate is refused.
 - **Notes only:**

@@ -491,5 +491,45 @@ describe('the plugin', () => {
     await $.prompt.submit({ text: 'what time is it', wait: false, origin: { kind: 'composer' } })
     expect((files.get(LOG) ?? '').trim().split('\n')).toHaveLength(2)
   })
-})
 
+  test('the turn note appears only when it changes: first turn, a new pick, a held downgrade or a timeout', async ($, on) => {
+    const clock = mock.clock(on, { now: 1_000 })
+    on('ui.status', () => ({ value: undefined }))
+    on('session.model', () => ({ value: 'claude-sonnet-5-5' }))
+    // A context already sent: downgrades wait for downgradeAfterTurns verdicts.
+    on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1000000, tokens: 5000 }, rateLimits: [] } }))
+    on('tool.register', () => ({ value: { tool: 'mcp__model-tier__set_tier' } }))
+    on('command.register', () => ({ value: { command: 'tier' } }))
+    on('session.start', (_, e) => ({ cwd: e.cwd }))
+    mock.env(on, { HOME: '/h' })
+    on('fs.read', () => ({ deny: 'ENOENT' }))
+    on('fs.write', () => ({ value: undefined }))
+    let label = 'complex'
+    let slow = false
+    on('model.classify', async () => {
+      if (slow) await new Promise(() => {})
+      return { value: label }
+    })
+    let context: readonly string[] = []
+    on('prompt.submit', (_, e) => {
+      context = e.context ?? []
+      return { text: e.text }
+    })
+    const noted = async (text: string) => {
+      const sent = $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
+      if (slow) await clock.advance(3_000)
+      await sent
+      return context.some(c => c.includes('[model-tier]'))
+    }
+
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    expect(await noted('Redesign the cache layer')).toBe(true) // first turn: opus
+    expect(await noted('and the queue layer too')).toBe(false) // same pick
+    label = 'trivial'
+    expect(await noted('what time is it')).toBe(true) // haiku proposed, held: opus stays
+    expect(await noted('and the date')).toBe(true) // the downgrade lands: haiku
+    expect(await noted('and the weekday')).toBe(false) // same pick
+    slow = true
+    expect(await noted('and the year')).toBe(true) // the classifier timed out
+  })
+})

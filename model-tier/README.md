@@ -25,12 +25,19 @@ only by `/tier fable` unless `maxAutoTier` allows it.
   - Effort follows the same sticky rule as tiers: up at once, down after `downgradeAfterTurns` lower verdicts.
   - The labels are named for depth rather than answer length. A "three-line answer" design question first came out `low` under a label called `quick-answer`.
 - **Self-correction.** The mod registers a `set_tier` tool
-  (`mcp__model-tier__set_tier`) that takes `tier`, `effort` or both. Each turn's
+  (`mcp__model-tier__set_tier`) that takes `tier`, `effort` or both. A turn
   note tells the model the pick (`runs on opus (auto) with high effort (auto)`) and
   asks it to review that pick against the work ahead. The model calls the tool when
   either the tier or the effort is clearly too weak or wasteful. The change applies
-  from the next model request. A tier above `maxAutoTier` is left out of the tool's
-  schema, and a call that asks for one keeps the current tier.
+  from the next model request. The note comes only when it carries news:
+  - on the first turn;
+  - when the tier or effort changed;
+  - when the pick may be wrong (a classifier timed out, or its verdict was held back by
+    the downgrade rule or the haiku context guard).
+
+  Measured with inkblot: 0 of 6 `set_tier` calls on turns where the pick stood.
+  A tier above `maxAutoTier` is left out of the tool's schema, and a call that
+  asks for one keeps the current tier.
 - **Switching.** A `turn.step` hook rewrites the `model` of every main-loop request.
   Subagent steps are untouched.
 - **Subagents.** `general-purpose` / `claude` spawns with no explicit model get a
