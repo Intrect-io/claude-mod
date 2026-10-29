@@ -67,6 +67,19 @@ test('EnterWorktree: only an existing worktrees/ path', async () => {
   expect(checkEnterWorktree({ path: `${ROOT}/.claude/worktrees/feat` })).toBeDefined()
 })
 
+// "<cwd> $ <command>"
+table('delete refused, relative paths judged from the cwd', input => {
+  const [cwd = '', command = ''] = input.split(' $ ')
+  return checkDelete(command, ENV, cwd) !== undefined
+}, [
+  ['/private/tmp/ws $ rm junk.txt', false],
+  ['/Users/me/dev/app $ rm junk.txt', true],
+  ['/tmp/ws $ rm ../../etc/passwd', true],
+  ['/Users/me/dev/app $ cd /tmp/ws && rm junk.txt', false],
+  ['/Users/me/dev/app $ cd sub && rm x', true],
+  ['/tmp $ rm -rf /tmp/../etc', true],
+])
+
 table('delete refused', command => checkDelete(command, ENV) !== undefined, [
   ['rm -rf build', true],
   ['rm notes.txt', true],
