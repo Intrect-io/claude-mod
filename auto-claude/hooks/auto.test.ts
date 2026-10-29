@@ -1,6 +1,8 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
+import { LOOP_PROTOCOL } from './loop-protocol'
+import type { ProtocolStep } from './loop-protocol'
 import { finalCheckOf, fixLine, kickoffText, parseQueue, validatePlan } from './plan'
 import { capReached, inFlight, mergeable, parseChecks, prNumber, readLog } from './ship'
 
@@ -480,5 +482,38 @@ describe('a run, local CI', () => {
     expect(w.files.get(PIECE)).toContain('auto·R1·plan')
     await $.session.end({ reason: 'clear', sessionId: 'me' })
     expect(w.files.get(PIECE)).toBe('')
+  })
+
+  test('the driver plays its part of the shared loop protocol (shared/loop-protocol.jsonl) through a whole milestone', async ($, on) => {
+    const w = world(on)
+    const [held, grant, started, met, regrant] = LOOP_PROTOCOL.steps as [ProtocolStep, ProtocolStep, ProtocolStep, ProtocolStep, ProtocolStep]
+    expect([held, grant, started, met, regrant].map(s => `${s.by} ${s.do}`)).toEqual(['loop loop on', 'driver grant', 'loop loop on', 'loop met', 'driver grant'])
+    // The loop's side, as recorded: its log lines and the gate it leaves.
+    const play = (step: ProtocolStep) => {
+      log(w, step.log.map(entry => Object.fromEntries(Object.entries(entry).map(([k, v]) => [k, v === '<any>' ? 'x' : v.replace('{root}', '/repo')])) as { event: string }))
+      w.files.set(GATE, `${step.gate}\n`)
+    }
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start')
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set('/repo/.claude/goals.md', LOOP_PROTOCOL.queue)
+
+    // The loop is on and held at the gate before the plan is ready.
+    play(held)
+    await $.tool.call({ tool: 'mcp__auto-claude__auto_plan_ready' } as never)
+    expect(w.files.get(GATE)?.trim()).toBe(grant.gate)
+
+    // The driver asks the loop on; the loop starts the milestone.
+    await w.clock.advance(30_000)
+    expect(w.commands).toEqual(['goal-mode loop on'])
+    play(started)
+
+    // Met: the driver lands it, grants the next start and asks the loop on again.
+    w.files.set('/repo/.claude/goals.md', LOOP_PROTOCOL.queue.replace('- [ ] a', '- [x] a'))
+    play(met)
+    await w.clock.advance(30_000)
+    expect(w.pushes.some(p => p.includes('HEAD:main') && p.includes('goal-01-a'))).toBe(true)
+    expect(w.files.get(GATE)?.trim()).toBe(regrant.gate)
+    expect(w.commands).toEqual(['goal-mode loop on', 'goal-mode loop on'])
   })
 })

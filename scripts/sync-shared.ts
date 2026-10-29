@@ -14,7 +14,9 @@ import { dirname, join } from 'node:path'
 
 const ROOT = join(dirname(import.meta.path), '..')
 
-type Copy = { source: string; target: string; vars?: Record<string, string> }
+// `module`: a .jsonl source written as a TypeScript module exporting its lines,
+// since a mod's tests can import only from inside the mod.
+type Copy = { source: string; target: string; vars?: Record<string, string>; module?: string }
 
 const COPIES: Copy[] = [
   ...['goal-mode', 'harness', 'model-tier', 'auto-claude'].map(mod => ({
@@ -23,10 +25,25 @@ const COPIES: Copy[] = [
     vars: { MOD: mod },
   })),
   ...['goal-mode', 'auto-claude'].map(mod => ({ source: 'shared/queue.ts', target: `${mod}/hooks/queue.ts` })),
+  ...['goal-mode', 'auto-claude'].map(mod => ({ source: 'shared/loop-protocol.jsonl', target: `${mod}/hooks/loop-protocol.ts`, module: 'LOOP_PROTOCOL' })),
 ]
 
+const MODULE_TYPES = `export type ProtocolEntry = Record<string, string>
+export type ProtocolStep = { by: 'loop' | 'driver'; do: string; gate: string; log: ProtocolEntry[] }
+export type Protocol = { about: string; queue: string; steps: ProtocolStep[] }
+`
+
+function moduleOf(name: string, jsonl: string): string {
+  const rows = jsonl.split('\n').filter(line => line.trim() !== '').map(line => JSON.parse(line) as Record<string, unknown>)
+  const [head, ...steps] = rows
+  if (head === undefined || typeof head.about !== 'string' || typeof head.queue !== 'string') throw new Error('loop protocol: the first line needs about and queue')
+  const value = { about: head.about, queue: head.queue, steps }
+
+  return `${MODULE_TYPES}\nexport const ${name}: Protocol = ${JSON.stringify(value, null, 2)}\n`
+}
+
 export function render(copy: Copy, text: string): string {
-  let body = text
+  let body = copy.module === undefined ? text : moduleOf(copy.module, text)
   for (const [name, value] of Object.entries(copy.vars ?? {})) body = body.replaceAll(`{{${name}}}`, value)
   const left = body.match(/\{\{[A-Z_]+\}\}/)
   if (left !== null) throw new Error(`${copy.source}: ${left[0]} has no value for ${copy.target}`)
