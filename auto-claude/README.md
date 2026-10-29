@@ -17,7 +17,7 @@ It depends on [goal-mode](../goal-mode/), which supplies the loop: one worktree 
    - It writes `.claude/goals.md`: one line per milestone, `- [ ] <end state> :: check: <command>`.
    - It calls `auto_plan_ready`, which validates both files. The plan needs a final check, at least 2 milestones, a check on every line and no duplicates.
 2. **Build.** auto-claude points the loop at `origin/<default>` through `.claude/goal-loop.base` and grants it one start at a time through `.claude/goal-loop.gate`. The gate is a credit, so goal counts left from earlier runs don't matter. goal-mode builds the milestone in `worktrees/goal-NN-…` and judges it.
-3. **Ship.** This runs as auto-claude's own process calls, never as a model turn.
+3. **Ship.** This runs as auto-claude's own process calls, never as a model turn. Every step that is ready runs in the same tick, so a milestone whose CI is already green is landed and its successor started within one tick. While CI is pending it is looked at every 10 s. A PR that reports no checks yet is waited on for 90 s before "no checks" counts as a repository without CI.
    - **github**: push, `gh pr create`, wait for `gh pr checks`, re-read the PR state, then `gh pr merge --squash --delete-branch`.
    - **local**: run the milestone's check, rebase onto `origin/<default>`, push to it.
    - The merged worktree is then removed.

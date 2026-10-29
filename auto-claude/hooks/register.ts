@@ -39,9 +39,18 @@ const PLAN_NUDGE_MS = 15 * 60_000
 const MAX_NUDGES = 3
 // Ticks one shipping error may repeat before the person is told.
 const REPEAT_TELL = 10
+// While a PR's CI is pending it is looked at this often, between the ticks.
+const CI_FAST_MS = 10_000
+// Ready steps one tick takes a milestone through (push, PR, CI, landing).
+const MAX_STEPS = 4
+// A PR that reports no checks yet may only be slow to register them: it is
+// waited on this long before "no checks" means the repository has no CI.
+const NO_CI_GRACE_MS = 90_000
 
 let ticker: Timer | undefined
 let ticking = false
+// A fast look at a pending CI is already scheduled.
+let fastTick = false
 let activeRoot: string | undefined
 // The owner an orphaned run was last reported for, once per session.
 let orphanTold: string | undefined
@@ -221,12 +230,12 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
     if (r.ciMode === 'local') return { r, item: update({ state: 'ci' }) }
     const pushed = await run($, ['git', '-C', wt, 'push', '-u', r.remote, `${item.branch}:${item.headRef}`, ...(item.branch !== item.headRef ? ['--force-with-lease'] : [])], wt)
     if (pushed.exitCode !== 0) return { r, item: update({ note: `push failed: ${out(pushed)}` }) }
-    if (item.pr !== undefined) return { r, item: update({ state: 'ci', since: Date.now() }) }
+    if (item.pr !== undefined) return { r, item: update({ state: 'ci', since: await $.clock.now() }) }
     const made = await run($, ['gh', 'pr', 'create', '--head', item.headRef, '--base', r.defaultBranch, '--title', item.goal.slice(0, 120), '--body', `Milestone of an auto-claude run.\n\nCheck: \`${item.check ?? '-'}\`\n\nPlan: .claude/auto-plan.md (local to the run).`], wt)
     const pr = prNumber(made.stdout + made.stderr)
     if (pr === undefined) return { r, item: update({ note: `gh pr create failed: ${out(made)}` }) }
     await tell($, r, `opened PR #${pr}: ${item.goal.slice(0, 80)}`)
-    return { r, item: update({ state: 'ci', pr, since: Date.now() }) }
+    return { r, item: update({ state: 'ci', pr, since: await $.clock.now() }) }
   }
 
   if (item.state !== 'ci') return { r, item }
@@ -251,6 +260,9 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
   } else {
     const checks = parseChecks((await run($, ['gh', 'pr', 'checks', String(item.pr), '--json', 'bucket'], wt)).stdout)
     if (checks === 'pending') return { r, item }
+    // Asked right after the PR was opened, GitHub has usually not registered
+    // its checks yet: that is pending too, until the grace runs out.
+    if (checks === 'none' && (await $.clock.now()) - item.since < NO_CI_GRACE_MS) return { r, item }
     if (checks === 'red') failure = 'CI failed (gh pr checks)'
     if (failure === undefined) {
       // Looked at again right before merging.
@@ -383,7 +395,7 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
           r = { ...r, ships: r.ships.map((s): ShipItem => (s.headRef === parent ? { ...s, branch, worktree: wt, state: 'push' } : s)) }
         } else {
           const check: string | undefined = parseQueue((await readText($, FILES(r.root).queue)) ?? '').find(i => i.condition === e.goal)?.check
-          r = { ...r, ships: [...r.ships, { goal: e.goal, headRef: e.branch, branch: e.branch, worktree: r.worktrees[e.branch], check, state: 'push', red: 0, since: Date.now() }] }
+          r = { ...r, ships: [...r.ships, { goal: e.goal, headRef: e.branch, branch: e.branch, worktree: r.worktrees[e.branch], check, state: 'push', red: 0, since: await $.clock.now() }] }
         }
       } else if (e.event === 'blocked' || e.event === 'deferred') {
         r = { ...r, held: r.held + 1, finished: r.finished + 1 }
@@ -395,8 +407,13 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
       }
     }
 
-    const item = inFlight(r.ships)
-    if (item !== undefined && item.state !== 'fixing') {
+    // Every step that is ready runs now, not one per tick: a milestone met
+    // with its CI already green is pushed, opened, landed and followed by the
+    // next grant in this one tick (measured before: ~90 s of a 2.5 min gap
+    // was waiting for ticks).
+    for (let steps = 0; steps < MAX_STEPS; steps++) {
+      const item = inFlight(r.ships)
+      if (item === undefined || item.state === 'fixing') break
       const step = await advance($, r, item)
       // The same error tick after tick (measured: a git that would not spawn,
       // retried for the whole 24 h cap) is told once.
@@ -404,8 +421,20 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
       const repeats = same ? (item.repeats ?? 0) + 1 : 0
       if (repeats === REPEAT_TELL) await tell($, step.r, `stuck at ${item.state} for ${repeats} checks: ${(step.item.note ?? '').slice(0, 160)}`)
       r = { ...step.r, ships: step.r.ships.map(s => (s.headRef === item.headRef ? { ...step.item, repeats } : s)) }
+      // Waiting (CI pending, an error to retry): the next tick looks again.
+      if (step.item.state === item.state) break
     }
     await writeRecord($, r)
+
+    // A pending CI is looked at again soon, between the ticks.
+    const waiting = inFlight(r.ships)
+    if (waiting?.state === 'ci' && r.ciMode === 'github' && !fastTick) {
+      fastTick = true
+      $.clock.after(CI_FAST_MS, () => {
+        fastTick = false
+        void tick($, caps, pollMs)
+      })
+    }
 
     // Nothing shipping: let the loop take its next goal (a fix goal included).
     const busy = inFlight(r.ships)
@@ -414,7 +443,11 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
         await finalCheck($, { ...r, phase: 'final' }, caps)
       } else if (r.phase === 'run') {
         const pending = parseQueue((await readText($, FILES(r.root).queue)) ?? '').some(i => i.mark === ' ')
-        if (pending) await release($, { ...r, queueEmpty: false }, pollMs)
+        if (pending) {
+          // The grant and its loop on in the same tick: release only asks.
+          const released = await release($, { ...r, queueEmpty: false }, pollMs)
+          if (released.want === 'on') await runWanted($, released)
+        }
       }
     }
   } catch (error) {
