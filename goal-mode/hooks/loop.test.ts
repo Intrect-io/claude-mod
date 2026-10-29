@@ -1,6 +1,9 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
+import { LOOP_PROTOCOL } from './loop-protocol'
+import type { ProtocolEntry } from './loop-protocol'
+
 type On = Parameters<TestBody>[1]
 type Engine = Parameters<TestBody>[0]
 
@@ -326,5 +329,47 @@ describe('loop', () => {
     w.files.set('/h/.claude/statusline/ended/goal-mode.txt', 'loop·goal·1')
     await $.session.end({ reason: 'clear', sessionId: 'ended' })
     expect(w.files.get('/h/.claude/statusline/ended/goal-mode.txt')).toBe('')
+  })
+
+  test('the loop writes the shared loop protocol (shared/loop-protocol.jsonl) step by step', async ($, on) => {
+    const GATE = `${ROOT}/.claude/goal-loop.gate`
+    const LOG = `${ROOT}/.claude/goal-loop.log`
+    const w = world(on, LOOP_PROTOCOL.queue)
+    w.checkExit = 0
+    w.verdicts.push('{"met": true, "reason": "ok"}')
+    w.files.set(GATE, '0\n')
+    await start($)
+    const logged = () =>
+      (w.files.get(LOG) ?? '')
+        .split('\n')
+        .filter(line => line !== '')
+        .map(line => {
+          const { ts: _ts, ...rest } = JSON.parse(line) as Record<string, unknown>
+          return rest
+        })
+    // "<any>" takes the value the loop wrote; every other field must match.
+    const expected = (want: ProtocolEntry[], got: Array<Record<string, unknown>>) =>
+      want.map((entry, i) =>
+        Object.fromEntries(Object.entries(entry).map(([k, v]) => [k, v === '<any>' ? got[i]?.[k] : v.replace('{root}', ROOT)])),
+      )
+
+    let seen = 0
+    for (const step of LOOP_PROTOCOL.steps) {
+      if (step.by === 'driver') {
+        expect(step.do).toBe('grant')
+        w.files.set(GATE, `${step.gate}\n`)
+      } else if (step.do === 'loop on') {
+        await loopOn($, w)
+      } else if (step.do === 'met') {
+        await $.classic.Stop(STOP)
+        await w.clock.advance(1_000)
+      } else {
+        throw new Error(`the protocol names a loop step this test cannot play: ${step.do}`)
+      }
+      expect((w.files.get(GATE) ?? '').trim()).toBe(step.gate)
+      const fresh = logged().slice(seen)
+      expect(fresh).toEqual(expected(step.log, fresh))
+      seen += fresh.length
+    }
   })
 })
