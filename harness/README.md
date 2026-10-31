@@ -51,10 +51,10 @@ Refuses or rewrites a single tool call.
 
 Keeps repos under `~/dev` within a size budget: 5 GB of the whole directory, `.git` and ignored files included. Measured on 2026-10-31, most overruns came from `worktrees/`, `trash/` and `testing/`, which the user's own rules produce. A few came from a `.git` full of loose objects.
 
-- **Measure:** a few seconds after the session starts, `du -k -d 1` and `git count-objects -v` run in the background. The result is cached per repo. Over budget, the status line shows `repo 7.2GB/5.0GB`, and a toast appears when the numbers changed. The next session start gives the model the breakdown (largest dirs, a `git gc` hint when loose objects outweigh packs), once per change.
+- **Measure:** a few seconds after the session starts, `du -k -d 1` and `git count-objects -v` run in the background. The result is cached per repo. Over budget, the status line shows `repo 7.2GB/5.0GB`, and a toast appears when the numbers changed. The next session start gives the model the breakdown (largest dirs, a `git gc` hint when loose objects outweigh packs), once per change. The repo is measured again 5 seconds after a command that may free space (`rm`, `mv`, `find -delete`, `git worktree remove|prune`, `git gc|prune|clean|rm`, `git lfs prune`), every 30 minutes, and by `/repo-size`. So a cleanup clears the status and toasts that the repo is back under budget without waiting for a new session.
 - **Refuses:**
   - `git add` and `git commit -a` that would stage a file over 50 MB that is not LFS-tracked (`git check-attr filter`). Ignored files are not counted.
-  - `git worktree add` and `EnterWorktree` while the last measurement is over budget and worktrees of merged branches are left over. A branch counts as merged if `git branch --merged` lists it, or if its remote branch is `[gone]` (a squash merge).
+  - `git worktree add` and `EnterWorktree` while the repo is over budget (a measurement older than 10 minutes is taken again first) and worktrees of merged branches are left over. A branch counts as merged if `git branch --merged` lists it, or if its remote branch is `[gone]` (a squash merge).
 - **`/repo-size`:** measures now and lists cleanup candidates: leftover worktrees, `trash/` entries older than 30 days, and `git gc` when it would help. It deletes nothing. Emptying `trash/` needs the user's AskUserQuestion approval.
 - **Per-repo budget:** `<repo>/.claude/repo-size.json` holds `{ "budgetGB": 8, "ignore": ["db/", "models/"] }`. Use it where data is the work, so the warning does not become permanent noise.
 
