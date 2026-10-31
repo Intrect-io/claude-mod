@@ -11,7 +11,8 @@ import { guardsToolCall, loadGuardEnv } from './guards'
 import { heartbeatCommand, heartbeatPrompt, heartbeatTurnComplete, heartbeatTurnStart, TICK_MS, tick } from './heartbeat'
 import { seedFromTranscript } from './linear-guard'
 import { gcSignature, gcSummary, parseGcReport } from './memory-gc'
-import { cachedReport, devRepoRoot, measureRepo, repoSizeCommand, sizeSignature, sizeSummary, statusText } from './repo-size'
+import { cachedReport, devRepoRoot, formatKb, measureRepo, repoSizeCommand, shrinksRepo, sizeSignature, sizeSummary, statusText } from './repo-size'
+import type { SizeReport } from './repo-size'
 import { lintPrompt, lintStop, lintToolCall } from './report-lint'
 import { segment } from './segment'
 import { issueIds, registerShipGate, shipPrompt, shipStop } from './ship-gate'
@@ -30,6 +31,10 @@ const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT
 let ticker: Timer | undefined
 // The repo-size status piece, set once the background measurement is in.
 let repoPiece: string | undefined
+// repo-size: the pending measurement (one at a time, a later request moves it)
+// and the periodic one that catches a long session's growth and cleanup.
+let measureTimer: Timer | undefined
+let measureTicker: Timer | undefined
 
 const COMMAND = 'harness'
 const EXTRA_COMMANDS = [
@@ -43,6 +48,9 @@ const SIZE_SEEN_KEY = 'repoSizeSeen'
 type SessionStartResult = EventResult<'classic.SessionStart'>
 // Long enough that the session's first prompt is not competing with du.
 const MEASURE_DELAY_MS = 3_000
+// After a command that may have freed space: soon, but after a burst of them.
+const REMEASURE_DELAY_MS = 5_000
+const MEASURE_EVERY_MS = 30 * 60_000
 const STORE_KEY = 'toggles'
 const FEATURES: Record<string, keyof Toggles> = {
   guards: 'guards',
@@ -96,22 +104,30 @@ async function repoSizeStart($: EngineInterface, below: SessionStartResult): Pro
 }
 
 // Measures the session's repo off the session's path, then shows the verdict.
-function scheduleMeasure($: EngineInterface) {
-  $.clock.after(MEASURE_DELAY_MS, () => {
+function scheduleMeasure($: EngineInterface, delayMs = MEASURE_DELAY_MS) {
+  measureTimer?.cancel()
+  measureTimer = $.clock.after(delayMs, () => {
+    measureTimer = undefined
     void (async () => {
+      if (!(await read($, togglesAtom)).repoSize) return
       const home = (await read($, envAtom)).home ?? (await $.env.get('HOME'))
       const root = await devRepoRoot($, home)
       if (root === undefined) return
       const before = await cachedReport($, root)
       const report = await measureRepo($, root, Date.now())
-      if (report === undefined) return
-      repoPiece = statusText(report)
-      showStatus($, await read($, togglesAtom))
-      if (report.over && (before === undefined || sizeSignature(before) !== sizeSignature(report))) {
-        $.ui.toast(`repo-size: ${report.root} ${statusText(report) ?? ''} — /repo-size lists cleanup candidates`)
-      }
+      if (report !== undefined) showMeasured($, before, report)
     })().catch(error => $.ui.log(`harness: repo-size measure failed: ${String(error).slice(0, 200)}`, { to: 'debug' }))
   })
+}
+
+// The status follows every measurement; a toast only when the verdict or the
+// size moved, including the way back under budget after a cleanup.
+function showMeasured($: EngineInterface, before: SizeReport | undefined, report: SizeReport) {
+  repoPiece = statusText(report)
+  void read($, togglesAtom).then(toggles => showStatus($, toggles))
+  if (before !== undefined && sizeSignature(before) === sizeSignature(report)) return
+  if (report.over) $.ui.toast(`repo-size: ${report.root} ${statusText(report) ?? ''} — /repo-size lists cleanup candidates`)
+  else if (before?.over === true) $.ui.toast(`repo-size: ${report.root} is back under budget (${formatKb(report.totalKb)}/${formatKb(report.budgetKb)})`)
 }
 
 export const register: Register = (on, options) => {
@@ -138,6 +154,8 @@ export const register: Register = (on, options) => {
     repoPiece = undefined
     showStatus($, toggles)
     if (toggles.repoSize) scheduleMeasure($)
+    measureTicker?.cancel()
+    measureTicker = $.clock.every(MEASURE_EVERY_MS, () => scheduleMeasure($, 0))
     await $.command.register({
       name: COMMAND,
       description: 'Harness: /harness [status | on|off guards|ship-gate|report-lint|repo-size | skip-codeql | heartbeat start [5m]|stop|status]',
@@ -166,9 +184,16 @@ export const register: Register = (on, options) => {
 
   // The engine takes one matcher-less hook per event from a plugin, so the
   // features' handlers for the same event run as one chain.
-  on('tool.call', ($, e, next) =>
-    guardsToolCall($, e, Object.assign((ev: typeof e) => lintToolCall($, ev, Object.assign((ev2: typeof e) => trackToolCall($, ev2, next), next)), next), guardOptions),
-  )
+  on('tool.call', async ($, e, next) => {
+    const result = await guardsToolCall($, e, Object.assign((ev: typeof e) => lintToolCall($, ev, Object.assign((ev2: typeof e) => trackToolCall($, ev2, next), next)), next), guardOptions)
+    // repo-size: a command that may have freed space is measured again.
+    const command = (e as unknown as { command?: unknown }).command
+    if (e.tool === 'Bash' && typeof command === 'string' && result.deny === undefined && shrinksRepo(command) && (await read($, togglesAtom)).repoSize) {
+      scheduleMeasure($, REMEASURE_DELAY_MS)
+    }
+
+    return result
+  })
   on('classic.UserPromptSubmit', ($, e, next) =>
     shipPrompt($, e, Object.assign((ev: typeof e) => lintPrompt($, ev, Object.assign((ev2: typeof e) => heartbeatPrompt($, ev2, next), next)), next)),
   )
@@ -202,9 +227,14 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'repo-size' }, async $ => {
-    const env = await read($, envAtom)
+    const home = (await read($, envAtom)).home ?? (await $.env.get('HOME'))
+    const root = await devRepoRoot($, home)
+    const before = root === undefined ? undefined : await cachedReport($, root)
+    const text = await repoSizeCommand($, home, Date.now())
+    const after = root === undefined ? undefined : await cachedReport($, root)
+    if (after !== undefined && after.at !== before?.at) showMeasured($, before, after)
 
-    return { text: await repoSizeCommand($, env.home ?? (await $.env.get('HOME')), Date.now()) }
+    return { text }
   })
 
   on('command.run', { command: 'repo-status' }, async $ => ({ text: await repoStatus($, Date.now()) }))

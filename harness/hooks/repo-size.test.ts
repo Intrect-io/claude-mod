@@ -13,6 +13,7 @@ import {
   parseCountObjects,
   parseDu,
   readBudget,
+  shrinksRepo,
   sizeSignature,
   stagedTargets,
   statusText,
@@ -26,6 +27,7 @@ const ROOT = '/Users/u/dev/repo'
 const GB = 1024 * 1024
 const MB = 1024 * 1024
 const DU = [`${3 * GB}\t${ROOT}/worktrees`, `${2 * GB}\t${ROOT}/trash`, `${GB}\t${ROOT}/.git`, `100\t${ROOT}/src`, `${6 * GB + 100}\t${ROOT}`].join('\n')
+const SMALL_DU = [`${GB}\t${ROOT}/.git`, `100\t${ROOT}/src`, `${GB + 100}\t${ROOT}`].join('\n')
 const OBJECTS = 'count: 10\nsize: 1048576\nin-pack: 3\npacks: 1\nsize-pack: 2048\n'
 
 describe('repo-size parsing', () => {
@@ -107,6 +109,25 @@ describe('repo-size guards', () => {
     expect(isWorktreeAdd('git worktree remove worktrees/x')).toBe(false)
   })
 
+  const shrinking: Array<[string, boolean]> = [
+    ['git worktree remove worktrees/old', true],
+    ['git worktree prune', true],
+    ['git -C ../repo gc --aggressive', true],
+    ['mv worktrees/old trash/', true],
+    ['rm -rf trash/old', true],
+    ['find trash -mtime +30 -delete', true],
+    ['git lfs prune', true],
+    ['git worktree add worktrees/x', false],
+    ['find . -name "*.py"', false],
+    ['git commit -m "rm old worktrees"', false],
+    ['ls worktrees', false],
+  ]
+  for (const [command, expected] of shrinking) {
+    test(`measured again after: ${command}`, async () => {
+      expect(shrinksRepo(command)).toBe(expected)
+    })
+  }
+
   test('trash entries find named as moved in over 30 days ago, largest first', async () => {
     const sizes = [
       { name: 'new', kb: 900 },
@@ -121,10 +142,10 @@ describe('repo-size guards', () => {
 
 // --- Through the engine ---
 
-type World = { ran: string[]; toasts: string[]; statuses: Array<string | undefined>; sizes: Map<string, number>; lfs: Set<string>; worktrees: string }
+type World = { du: string; ran: string[]; toasts: string[]; statuses: Array<string | undefined>; sizes: Map<string, number>; lfs: Set<string>; worktrees: string }
 
 function world(on: On, store: Record<string, unknown> = {}): World {
-  const w: World = { ran: [], toasts: [], statuses: [], sizes: new Map(), lfs: new Set(), worktrees: `worktree ${ROOT}\nHEAD a\nbranch refs/heads/main` }
+  const w: World = { du: DU, ran: [], toasts: [], statuses: [], sizes: new Map(), lfs: new Set(), worktrees: `worktree ${ROOT}\nHEAD a\nbranch refs/heads/main` }
   mock.store(on, store)
   mock.env(on, { HOME: '/Users/u', TMPDIR: '/var/folders/xx/T/' })
   on('session.messages', () => ({ value: [] }))
@@ -151,7 +172,7 @@ function world(on: On, store: Record<string, unknown> = {}): World {
     const out = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (argv.includes('--git-common-dir')) return out(`${ROOT}/.git\n`)
     if (argv.includes('--show-toplevel')) return out(`${ROOT}\n`)
-    if (argv[0] === 'du') return out(DU)
+    if (argv[0] === 'du') return out(w.du)
     if (argv.includes('count-objects')) return out(OBJECTS)
     if (argv.includes('ls-files')) return out([...w.sizes.keys()].map(path => path.slice(ROOT.length + 1)).join('\0'))
     if (argv.includes('check-attr')) {
@@ -239,6 +260,48 @@ describe('repo-size in a session', () => {
     expect(ran.text).toContain('over budget')
     expect(ran.text).toContain(`${ROOT}/worktrees/old`)
     expect(ran.text).toContain('git gc')
+  })
+
+  test('a cleanup in the session is measured again: status cleared, back-under toast, gate open', async ($, on) => {
+    const clock = mock.clock(on)
+    const w = world(on)
+    w.worktrees += `\n\nworktree ${ROOT}/worktrees/old\nHEAD b\nbranch refs/heads/feat/old`
+    await start($)
+    await clock.advance(5_000)
+    expect(w.statuses.at(-1)).toBe('repo 6.0GB/5.0GB')
+
+    // The user cleans up: the next measurement sees the smaller repo.
+    w.du = SMALL_DU
+    await $.tool.call({ tool: 'Bash', command: 'mv worktrees/big trash/ && rm -rf trash/big' })
+    await clock.advance(6_000)
+    expect(w.statuses.at(-1)).toBeUndefined()
+    expect(w.toasts.at(-1)).toContain('back under budget')
+
+    // Leftover worktrees remain, but the repo is under budget now: no refusal.
+    const add = await $.tool.call({ tool: 'Bash', command: 'git worktree add worktrees/next -b next' })
+    expect(add.deny).toBeUndefined()
+  })
+
+  test('a long session is measured again every 30 minutes', async ($, on) => {
+    const clock = mock.clock(on)
+    const w = world(on)
+    await start($)
+    await clock.advance(5_000)
+    expect(w.statuses.at(-1)).toBe('repo 6.0GB/5.0GB')
+
+    w.du = SMALL_DU
+    await clock.advance(30 * 60_000)
+    expect(w.statuses.at(-1)).toBeUndefined()
+  })
+
+  test('/repo-size updates the status line with what it measured', async ($, on) => {
+    const clock = mock.clock(on)
+    const w = world(on)
+    await start($)
+    await clock.advance(5_000)
+    w.du = SMALL_DU
+    await $.command.run({ command: 'repo-size', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
+    expect(w.statuses.at(-1)).toBeUndefined()
   })
 
   test('turned off, nothing is measured or refused', async ($, on) => {

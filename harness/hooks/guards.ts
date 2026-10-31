@@ -3,7 +3,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { GuardEnv } from '../types'
 import { checkAgentWorktree, checkMemorySecret, checkSystemPython, checkTradingOrder, DEFAULT_ORDER_TOOLS, isVersionBump, versionBumpNote } from './extra-guards'
-import { cachedReport, checkWorktreeGrowth, devRepoRoot, isWorktreeAdd, largeStageRefusal, leftoverMerged, stagedTargets } from './repo-size'
+import { cachedReport, checkWorktreeGrowth, devRepoRoot, isWorktreeAdd, largeStageRefusal, leftoverMerged, measureRepo, stagedTargets } from './repo-size'
 import { commandWords, expandHome, isInside, programOf, segments, stripProse, unquote } from './shell'
 import { DEFAULT_TOGGLES, INITIAL_LINT, INITIAL_SHIP } from './state'
 import type { ToolCallHook } from './state'
@@ -287,14 +287,21 @@ async function repoGrowthRefusal($: EngineInterface, command: string, home: stri
   return largeStageRefusal($, command, await $.session.cwd().catch(() => undefined))
 }
 
-// Judged from the last measurement, so the call is not held up by a fresh du.
+// A measurement older than this is taken again before it refuses anything.
+const STALE_MS = 10 * 60_000
+
+// Judged from the last measurement, so most calls are not held up by a du; a
+// refusal is only given on a recent one (the repo may have been cleaned since).
 async function worktreeGrowthRefusal($: EngineInterface, home: string | undefined): Promise<string | undefined> {
   const root = await devRepoRoot($, home)
   if (root === undefined) return undefined
-  const report = await cachedReport($, root)
+  let report = await cachedReport($, root)
   if (report === undefined || !report.over) return undefined
+  const leftovers = await leftoverMerged($, root)
+  if (leftovers.length === 0) return undefined
+  if (Date.now() - report.at > STALE_MS) report = (await measureRepo($, root, Date.now())) ?? report
 
-  return checkWorktreeGrowth(report, await leftoverMerged($, root))
+  return checkWorktreeGrowth(report, leftovers)
 }
 
 // Facts the guards need, read once per session.

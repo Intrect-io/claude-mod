@@ -191,6 +191,28 @@ export function checkWorktreeGrowth(report: SizeReport | undefined, leftovers: r
   return `Harness rule (repo-size): ${report.root} is ${formatKb(report.totalKb)}, over its ${formatKb(report.budgetKb)} budget, and worktrees of merged branches (or ones whose remote branch is gone) are still there: ${leftovers.join(', ')}. Check each has no uncommitted changes and \`git worktree remove <path>\` them before adding another (CLAUDE.md §3).`
 }
 
+// Commands after which the repo may be smaller: the measurement is taken again
+// so the status and the worktree gate do not keep judging the old size.
+const SHRINKING = new Set(['rm', 'unlink', 'rmdir', 'mv', 'trash'])
+const SHRINKING_GIT = new Set(['gc', 'prune', 'clean', 'rm', 'mv'])
+
+export function shrinksRepo(command: string): boolean {
+  return segments(stripProse(command)).some(segment => {
+    const words = commandWords(segment)
+    const program = programOf(words)
+    if (SHRINKING.has(program)) return true
+    if (program === 'find') return words.includes('-delete')
+    if (program !== 'git') return false
+    const args = words.slice(1).filter((word, at, all) => !(word === '-C' || all[at - 1] === '-C'))
+    const sub = args[0] ?? ''
+    if (SHRINKING_GIT.has(sub)) return true
+    if (sub === 'worktree') return args[1] === 'remove' || args[1] === 'prune'
+    if (sub === 'lfs') return args[1] === 'prune'
+
+    return false
+  })
+}
+
 export function isWorktreeAdd(command: string): boolean {
   return segments(stripProse(command)).some(segment => {
     const words = commandWords(segment)
