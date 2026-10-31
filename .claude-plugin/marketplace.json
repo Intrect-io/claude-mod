@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "goal-mode",
-      "description": "Claude가 스스로 세션 goal을 걸고, 독립 evaluator(sonnet)가 Stop마다 충족 여부를 판정해 미충족이면 계속 작업시킨다. 네이티브 ProposeGoal이 있으면 그쪽을 쓴다.",
+      "description": "Claude가 스스로 세션 goal을 걸어 Claude Code의 /goal에 넘기고, 큐에 쌓인 goal을 무인 loop로 돌리며 자체 evaluator가 그 goal만 판정한다.",
       "author": {
         "name": "unohee"
       },

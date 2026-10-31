@@ -101,7 +101,9 @@ function world(on: On, queue = QUEUE, store: Record<string, unknown> = {}): Worl
   })
   on('model.complete', () => {
     w.evaluations++
-    return { value: { isAnswered: true as const, text: w.verdicts.shift() ?? '{"met": false, "reason": "x"}', usage: USAGE } }
+    const text = w.verdicts.shift() ?? '{"met": false, "reason": "x"}'
+    if (text === 'throw') throw new Error('blocked model')
+    return { value: { isAnswered: true as const, text, usage: USAGE } }
   })
   on('tool.call', () => ({ result: 'ran' }))
 
@@ -147,19 +149,6 @@ describe('loop', () => {
     expect(reply.text).toContain('started "fix mul"')
     expect(w.worktrees).toHaveLength(2)
     expect(w.files.get(`${ROOT}/.claude/goal-loop.gate`)).toBe('0\n')
-  })
-
-  test('a driver\'s loop on replaces a goal the model set; a person\'s loop on refuses it', async ($, on) => {
-    const w = world(on)
-    await start($)
-    await $.tool.call({ tool: 'mcp__goal-mode__set_goal', condition: 'the model picked this mid-run' } as never)
-    expect((await loopOn($, w)).text).toContain('A session goal is active')
-    expect(w.worktrees).toHaveLength(0)
-
-    const reply = await $.command.run({ command: 'goal-mode', args: 'loop on', origin: { kind: 'plugin', name: 'auto-claude' }, presentation: PRESENTATION } as never)
-    await w.clock.advance(1_000)
-    expect(reply.text).toContain('started "fix add"')
-    expect(w.worktrees).toHaveLength(1)
   })
 
   test('worktrees start from goal-loop.base, or the line\'s own :: base:', async ($, on) => {
@@ -249,6 +238,46 @@ describe('loop', () => {
     await w.clock.advance(1_000)
     expect(w.prompts.at(-1)).toContain('Goal #2: fix mul')
     expect(w.notifications.some(text => text.includes('blocked'))).toBe(true)
+  })
+
+  test('an evaluator request the engine refuses retries the goal instead of throwing', async ($, on) => {
+    const w = world(on)
+    w.checkExit = 0
+    w.verdicts.push('throw')
+    await start($)
+    await loopOn($, w)
+
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
+    await w.clock.advance(120_000)
+    expect(w.prompts.at(-1)).toContain('Retry 1/2')
+  })
+
+  test('a transcript past the read cap is judged by a fork', async ($, on) => {
+    const w = world(on)
+    w.checkExit = 0
+    w.files.delete('/tmp/s.jsonl')
+    let forks = 0
+    on('model.fork', () => {
+      forks++
+      return { value: { isAnswered: true as const, text: '{"met": false, "reason": "x"}', usage: USAGE } }
+    })
+    await start($)
+    await loopOn($, w)
+
+    expect((await $.classic.Stop(STOP)).block).toContain('x')
+    expect(forks).toBe(1)
+    expect(w.evaluations).toBe(0)
+  })
+
+  test("a subagent's stop is not judged", async ($, on) => {
+    const w = world(on)
+    w.checkExit = 0
+    await start($)
+    await loopOn($, w)
+
+    expect((await $.classic.Stop({ ...STOP, agent_id: 'a1' })).block).toBeUndefined()
+    expect(w.evaluations).toBe(0)
+    expect(w.files.get(`${ROOT}/.claude/goals.md`)).toBe(QUEUE)
   })
 
   test('defer_goal is refused early, then applied at the next stop', async ($, on) => {

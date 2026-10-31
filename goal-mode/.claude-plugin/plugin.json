@@ -1,7 +1,7 @@
 {
   "name": "goal-mode",
-  "version": "0.6.3",
-  "description": "Lets Claude set its own session goal; an independent evaluator keeps it working at Stop until the goal is met (defers to native ProposeGoal when available).",
+  "version": "0.7.0",
+  "description": "Lets Claude set its own session goal in Claude Code's /goal, and runs an unattended loop of queued goals that its own evaluator judges.",
   "types": "./types/index.d.ts",
   "license": "MIT",
   "author": {
@@ -12,12 +12,6 @@
       "type": "boolean",
       "title": "Auto-declare goals",
       "description": "Nudge the model to set a goal when a prompt asks for an outcome (a request verb, not a question) and when a plan is approved",
-      "default": true
-    },
-    "nativeGoal": {
-      "type": "boolean",
-      "title": "Use Claude Code's /goal",
-      "description": "Hand goals (set_goal, /goal-mode set|auto) to the built-in /goal where this build has it, so they show and are judged as the person's own /goal; off keeps this plugin's own evaluator",
       "default": true
     }
   }

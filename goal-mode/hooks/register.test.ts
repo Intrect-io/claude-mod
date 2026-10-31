@@ -24,45 +24,34 @@ const TRANSCRIPT = [
   }),
 ].join('\n')
 
-// Stands in for the engine beneath the plugin; `verdicts` are the evaluator's
-// replies in order, `calls` counts evaluator requests.
-function engine(on: On, verdicts: Array<string | 'fail' | 'throw'>, transcript: string | 'too-big' = TRANSCRIPT, clock = true) {
-  const calls = { complete: 0, fork: 0, lastPrompt: '' }
+// Stands in for the engine beneath the plugin; `native` offers Claude Code's
+// /goal, and `calls` counts evaluator requests.
+function engine(on: On, native = true, clock = true) {
+  const calls = { complete: 0, logs: [] as string[] }
   on('tool.register', (_, e) => ({ value: { tool: `mcp__goal-mode__${e.name}` } }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
+  if (native) on('command.list', () => ({ value: [{ name: 'goal', description: 'Set a goal', source: 'builtin' }] }) as never)
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   // A test that drives timers brings mock.clock, which answers clock.now itself.
   if (clock) on('clock.now', () => ({ value: 1_000 }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
+  on('ui.log', (_, e) => {
+    calls.logs.push(e.text)
+    return { value: undefined }
+  })
   on('prompt.compose', () => ({ sections: [] }))
   on('classic.Stop', () => ({}))
   on('classic.UserPromptSubmit', () => ({}))
-  on('fs.read', () =>
-    transcript === 'too-big' ? { deny: 'over 4 MiB' } : { value: transcript },
-  )
-  const reply = () => {
-    const next = verdicts.shift() ?? '{"met": false, "reason": "default"}'
-    if (next === 'throw') throw new Error('blocked model')
-    return next === 'fail'
-      ? { value: { isAnswered: false as const, reason: 'api-error' as const, status: 500, error: 'server_error' as const, usage: USAGE } }
-      : { value: { isAnswered: true as const, text: next, usage: USAGE } }
-  }
-  on('model.complete', (_, e) => {
+  on('fs.read', () => ({ value: TRANSCRIPT }))
+  on('model.complete', () => {
     calls.complete++
-    calls.lastPrompt = String(e.prompt)
-    return reply()
-  })
-  on('model.fork', () => {
-    calls.fork++
-    return reply()
+    return { value: { isAnswered: true as const, text: '{"met": false, "reason": "x"}', usage: USAGE } }
   })
 
   return calls
 }
 
-// The kit stamps an empty transcript_path, which $.fs.read refuses; a session
-// always has one.
 const PRESENTATION = { isFullscreen: false, columns: 80 }
 
 const STOP = {
@@ -71,21 +60,12 @@ const STOP = {
   transcript_path: '/tmp/session.jsonl',
 }
 
+const run = ($: Parameters<TestBody>[0], args: string) =>
+  $.command.run({ command: 'goal-mode', args, origin: { kind: 'composer' }, presentation: PRESENTATION })
+
 describe('set_goal', () => {
-  test('sets a goal once and refuses a second one', async ($, on) => {
-    engine(on, [])
-    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-
-    const first = await $.tool.call({ tool: TOOL_ID, condition: '`pytest -q` exits 0' })
-    expect(first.deny).toBeUndefined()
-    expect(String(first.result)).toContain('Goal set')
-
-    const second = await $.tool.call({ tool: TOOL_ID, condition: 'something else' })
-    expect(second.deny).toContain('already set')
-  })
-
   test('refuses an empty or oversized condition', async ($, on) => {
-    engine(on, [])
+    engine(on)
     await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
     expect((await $.tool.call({ tool: TOOL_ID, condition: '  ' })).deny).toContain('required')
@@ -93,7 +73,7 @@ describe('set_goal', () => {
   })
 
   test('refuses in plan mode', async ($, on) => {
-    engine(on, [])
+    engine(on)
     await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
     await $.classic.UserPromptSubmit({ prompt: 'plan it', permission_mode: 'plan' })
 
@@ -101,12 +81,28 @@ describe('set_goal', () => {
   })
 
   test('defers to the native ProposeGoal tool once it is seen', async ($, on) => {
-    engine(on, [])
+    engine(on)
     on('tool.describe', (_, e) => ({ description: e.description }))
     await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
     await $.tool.describe({ tool: 'ProposeGoal', description: 'native', provider: { plugin: 'engine', tier: 'core' } })
 
     expect((await $.tool.call({ tool: TOOL_ID, condition: 'tests pass' })).deny).toContain('ProposeGoal')
+  })
+
+  test('without /goal, goals are unavailable: logged once at start, refused, never nudged or judged', async ($, on) => {
+    const calls = engine(on, false)
+    on('prompt.submit', (_, e) => ({ text: e.text }))
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    expect(calls.logs).toEqual([expect.stringContaining('no /goal command')])
+
+    expect((await $.tool.call({ tool: TOOL_ID, condition: 'tests pass' })).deny).toContain('no /goal command')
+    expect((await run($, 'set tests pass')).text).toContain('no /goal command')
+    expect((await run($, 'auto')).text).toContain('no /goal command')
+    expect((await run($, '')).text).toContain('no /goal command')
+    const prompt = await $.classic.UserPromptSubmit({ prompt: '이 저장소의 모든 테스트가 통과하도록 실패하는 테스트를 전부 고쳐줘', permission_mode: 'default' })
+    expect(prompt.additionalContext ?? []).toEqual([])
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
+    expect(calls.complete).toBe(0)
   })
 })
 
@@ -114,7 +110,7 @@ describe('auto goal', () => {
   const TASK = '이 저장소의 모든 테스트가 통과하도록 실패하는 테스트를 전부 고쳐줘'
 
   test('a plan approved mid-turn no longer leaves set_goal refusing plan mode', async ($, on) => {
-    engine(on, [])
+    engine(on)
     on('tool.call', () => ({ result: 'approved' }))
     await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
     await $.classic.UserPromptSubmit({ prompt: 'plan it', permission_mode: 'plan' })
@@ -124,8 +120,8 @@ describe('auto goal', () => {
     expect((await $.tool.call({ tool: TOOL_ID, condition: 'tests pass' })).deny).toBeUndefined()
   })
 
-  test('an outcome request gets the nudge; chat and questions do not', async ($, on) => {
-    engine(on, [])
+  test('an outcome request gets the nudge; chat, questions and plan mode do not', async ($, on) => {
+    engine(on)
     await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
     const yes = await $.classic.UserPromptSubmit({ prompt: TASK, permission_mode: 'default' })
@@ -136,16 +132,8 @@ describe('auto goal', () => {
 
     const question = await $.classic.UserPromptSubmit({ prompt: '이 함수가 왜 테스트에서 실패하는지 설명해 줄 수 있나요?', permission_mode: 'default' })
     expect(question.additionalContext ?? []).toEqual([])
-  })
-
-  test('no nudge once a goal is set, in plan mode, or when turned off', async ($, on) => {
-    engine(on, [])
-    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
     expect((await $.classic.UserPromptSubmit({ prompt: TASK, permission_mode: 'plan' })).additionalContext ?? []).toEqual([])
-    await $.classic.UserPromptSubmit({ prompt: 'ok', permission_mode: 'default' })
-    expect((await $.tool.call({ tool: TOOL_ID, condition: 'tests pass' })).deny).toBeUndefined()
-    expect((await $.classic.UserPromptSubmit({ prompt: TASK, permission_mode: 'default' })).additionalContext ?? []).toEqual([])
   })
 
   test('cheap gates', async () => {
@@ -157,203 +145,27 @@ describe('auto goal', () => {
   })
 })
 
-describe('Stop evaluator', () => {
-  test('no goal: the stop passes and no evaluator runs', async ($, on) => {
-    const calls = engine(on, [])
-    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-
-    const stop = await $.classic.Stop(STOP)
-    expect(stop.block).toBeUndefined()
-    expect(calls.complete + calls.fork).toBe(0)
+// What an earlier version stored for this session's goal, held until the
+// plugin writes the goal.
+function seedHeldGoal(on: On) {
+  let written = false
+  const keyOf = (e: unknown) => (e as { key?: string }).key ?? (e as { ref?: { key?: string } }).ref?.key
+  on('state.set', (_, e, next) => {
+    if (keyOf(e) === 'goal') written = true
+    return next(e)
   })
-
-  test('unmet blocks with the reason, met clears the goal', async ($, on) => {
-    const calls = engine(on, [
-      '{"met": false, "reason": "no test run after the last edit"}',
-      '{"met": true, "reason": "pytest shows 3 passed"}',
-    ])
-    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-    await $.tool.call({ tool: TOOL_ID, condition: '`pytest -q` exits 0' })
-
-    const first = await $.classic.Stop(STOP)
-    expect(first.block).toContain('no test run after the last edit')
-    expect(first.block).toContain('`pytest -q` exits 0')
-
-    const second = await $.classic.Stop({ ...STOP, stop_hook_active: true })
-    expect(second.block).toBeUndefined()
-    expect(calls.complete).toBe(2)
-
-    // Cleared: a new goal can be set and further stops are free.
-    expect((await $.tool.call({ tool: TOOL_ID, condition: 'next' })).deny).toBeUndefined()
+  on('state.get', (_, e, next) => {
+    if (keyOf(e) !== 'goal' || written) return next(e)
+    return { value: { value: { shape: 'goal-2', value: { condition: 'tests pass', check: 'pytest -q', source: 'model', setAt: 0, checks: 4, unmetThisTurn: 0, parseFailures: 0, recentReasons: [], status: 'active' } }, version: 1 } } as never
   })
-
-  test('pauses after the per-turn cap, and a typed prompt resumes it', async ($, on) => {
-    const calls = engine(on, Array(20).fill('{"met": false, "reason": "still failing"}'))
-    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-    await $.tool.call({ tool: TOOL_ID, condition: 'impossible' })
-
-    for (let i = 0; i < 4; i++) {
-      expect((await $.classic.Stop({ ...STOP, stop_hook_active: i > 0 })).block).toBeDefined()
-    }
-    expect((await $.classic.Stop({ ...STOP, stop_hook_active: true })).block).toBeUndefined()
-    expect(calls.complete).toBe(5)
-
-    // Paused: stops pass without evaluating.
-    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
-    expect(calls.complete).toBe(5)
-
-    await $.classic.UserPromptSubmit({ prompt: 'keep going', permission_mode: 'default' })
-    expect((await $.classic.Stop(STOP)).block).toBeDefined()
-    expect(calls.complete).toBe(6)
-  })
-
-  test('an evaluator failure pauses instead of blocking', async ($, on) => {
-    engine(on, ['fail'])
-    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-    await $.tool.call({ tool: TOOL_ID, condition: 'tests pass' })
-
-    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
-    const status = await $.command.run({ command: 'goal-mode', args: 'status', origin: { kind: 'composer' }, presentation: PRESENTATION })
-    expect(status.text).toContain('Paused')
-  })
-
-  test('a request the engine refuses to send pauses instead of throwing', async ($, on) => {
-    engine(on, ['throw'])
-    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-    await $.tool.call({ tool: TOOL_ID, condition: 'tests pass' })
-
-    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
-    const status = await $.command.run({ command: 'goal-mode', args: 'status', origin: { kind: 'composer' }, presentation: PRESENTATION })
-    expect(status.text).toContain('Paused')
-    expect(status.text).toContain('could not complete')
-  })
-
-  test('a transcript past the read cap is judged by a fork', async ($, on) => {
-    const calls = engine(on, ['{"met": false, "reason": "x"}'], 'too-big')
-    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-    await $.tool.call({ tool: TOOL_ID, condition: 'tests pass' })
-
-    expect((await $.classic.Stop(STOP)).block).toBeDefined()
-    expect(calls.fork).toBe(1)
-    expect(calls.complete).toBe(0)
-  })
-
-  test("a subagent's stop is not evaluated", async ($, on) => {
-    const calls = engine(on, [])
-    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-    await $.tool.call({ tool: TOOL_ID, condition: 'tests pass' })
-
-    expect((await $.classic.Stop({ ...STOP, agent_id: 'a1' })).block).toBeUndefined()
-    expect(calls.complete).toBe(0)
-  })
-
-  test('/goal-mode clear removes the goal', async ($, on) => {
-    const calls = engine(on, [])
-    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-    await $.tool.call({ tool: TOOL_ID, condition: 'tests pass' })
-
-    const cleared = await $.command.run({ command: 'goal-mode', args: 'clear', origin: { kind: 'composer' }, presentation: PRESENTATION })
-    expect(cleared.text).toContain('Goal cleared')
-    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
-    expect(calls.complete).toBe(0)
-  })
-})
-
-describe('/goal-mode set', () => {
-  const run = ($: Parameters<TestBody>[0], args: string) =>
-    $.command.run({ command: 'goal-mode', args, origin: { kind: 'composer' }, presentation: PRESENTATION })
-
-  test('the person sets the goal; the evaluator then judges it and work starts', async ($, on) => {
-    const calls = engine(on, ['{"met": false, "reason": "no test output yet"}'], TRANSCRIPT, false)
-    const clock = mock.clock(on, { now: 1_000 })
-    const prompts: string[] = []
-    on('prompt.submit', (_, e) => {
-      prompts.push(e.text)
-      return { text: e.text }
-    })
-    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-
-    const set = await run($, 'set `bun test` exits 0 --check bun test')
-    expect(set.text).toContain('Goal set: `bun test` exits 0')
-    expect(set.text).toContain('Check: bun test')
-    expect((await run($, '')).text).toContain('(set by you)')
-    // The kickoff is submitted once the command has returned.
-    await clock.advance(100)
-    expect(prompts[0]).toContain('The person set this session\'s goal')
-
-    expect((await $.classic.Stop(STOP)).block).toContain('no test output yet')
-    expect(calls.complete).toBe(1)
-  })
-
-  test('Claude refines a direction the person set, once; the evaluator sees their words', async ($, on) => {
-    const calls = engine(on, ['{"met": false, "reason": "not yet"}'])
-    on('prompt.submit', (_, e) => ({ text: e.text }))
-    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-    await run($, 'set 새로 추진할 목표를 정해봐')
-
-    const refined = await $.tool.call({ tool: TOOL_ID, condition: 'PR #12 merged with CI green', check: 'gh pr view 12' })
-    expect(refined.deny).toBeUndefined()
-    expect(String(refined.result)).toContain('is now: PR #12 merged with CI green')
-    const status = (await run($, '')).text
-    expect(status).toContain('(yours, refined by Claude): PR #12 merged with CI green')
-    expect(status).toContain('Your words: 새로 추진할 목표를 정해봐')
-    expect((await $.tool.call({ tool: TOOL_ID, condition: 'something easier' })).deny).toContain('already refined once')
-
-    await $.classic.Stop(STOP)
-    expect(calls.lastPrompt).toContain('The person asked for: 새로 추진할 목표를 정해봐')
-  })
-
-  test('auto hands the choice to Claude: the slot is cleared and set_goal takes it', async ($, on) => {
-    engine(on, [], TRANSCRIPT, false)
-    const clock = mock.clock(on, { now: 1_000 })
-    const prompts: string[] = []
-    on('prompt.submit', (_, e) => {
-      prompts.push(e.text)
-      return { text: e.text }
-    })
-    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-    await $.tool.call({ tool: TOOL_ID, condition: 'old goal' })
-
-    const auto = await run($, 'auto 배포 마무리 위주로')
-    expect(auto.text).toContain('Cleared "old goal"')
-    await clock.advance(100)
-    expect(prompts[0]).toContain('choose this session\'s goal yourself')
-    expect(prompts[0]).toContain('Their hint: 배포 마무리 위주로')
-    expect(prompts[0]).toContain('The goal before it (now cleared): old goal')
-    expect(prompts[0]).toContain('without asking the person anything')
-    expect(prompts[0]).toContain('the end state of the whole plan')
-    expect(prompts[0]).toContain('.claude/goal-plan.md')
-    expect(prompts[0]).toContain('no sizes, budgets or choices')
-    expect(prompts[0]).not.toContain('can be finished in this session')
-
-    const set = await $.tool.call({ tool: TOOL_ID, condition: 'deploy verified', check: 'curl /health' })
-    expect(set.deny).toBeUndefined()
-    // A bare `set` is the same as `auto`.
-    expect((await run($, 'set')).text).toContain('Claude plans a new long-term goal')
-  })
-
-  test('replaces a goal, refuses an empty one and plan mode', async ($, on) => {
-    engine(on, [])
-    on('prompt.submit', (_, e) => ({ text: e.text }))
-    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-    await $.tool.call({ tool: TOOL_ID, condition: 'old goal' })
-
-    expect((await run($, 'set new goal')).text).toContain('Goal replaced: new goal\n(was: old goal)')
-    expect((await run($, 'set   ')).text).toContain('Claude plans a new long-term goal')
-    await $.classic.UserPromptSubmit({ prompt: 'plan it', permission_mode: 'plan' })
-    expect((await run($, 'set another')).text).toContain('Plan mode is active')
-  })
-})
+}
 
 describe("Claude Code's own /goal", () => {
-  const run = ($: Parameters<TestBody>[0], args: string) =>
-    $.command.run({ command: 'goal-mode', args, origin: { kind: 'composer' }, presentation: PRESENTATION })
-
   function withNative(on: On) {
-    const calls = engine(on, [], TRANSCRIPT, false)
+    const calls = engine(on, true, false)
     const clock = mock.clock(on, { now: 1_000 })
     const goals: string[] = []
-    on('command.list', () => ({ value: [{ name: 'goal', description: 'Set a goal', source: 'builtin' }] }) as never)
+    const prompts: string[] = []
     on('command.run', ($, e, next) => {
       if (e.command === 'goal') {
         goals.push(e.args ?? '')
@@ -361,10 +173,13 @@ describe("Claude Code's own /goal", () => {
       }
       return next(e)
     })
-    on('prompt.submit', (_, e) => ({ text: e.text }))
+    on('prompt.submit', (_, e) => {
+      prompts.push(e.text)
+      return { text: e.text }
+    })
     // Nothing beneath the plugin answers turn.start: a hook stands for the engine.
     on('turn.start', (_, e) => e as never)
-    return { calls, clock, goals }
+    return { calls, clock, goals, prompts }
   }
 
   test('set_goal hands the goal to /goal as the turn ends; no evaluator of its own runs', async ($, on) => {
@@ -420,29 +235,36 @@ describe("Claude Code's own /goal", () => {
     expect((await $.tool.call({ tool: TOOL_ID, condition: 'x'.repeat(490), check: 'y'.repeat(20) })).deny).toContain('at most 500')
   })
 
-  test('a goal an earlier version held moves to /goal on load; a loop goal stays', async ($, on) => {
+  test('a goal an earlier version held moves to /goal on load', async ($, on) => {
     const { clock, goals } = withNative(on)
-    // What the earlier version stored for this session's goal.
-    let seeded = false
-    on('state.get', (_, e, next) => {
-      const key = (e as { key?: string; ref?: { key?: string } }).key ?? (e as { ref?: { key?: string } }).ref?.key
-      if (key !== 'goal' || seeded) return next(e)
-      seeded = true
-      return key === 'goal'
-        ? ({ value: { value: { shape: 'goal-2', value: { condition: 'tests pass', check: 'pytest -q', source: 'model', setAt: 0, checks: 4, unmetThisTurn: 0, parseFailures: 0, recentReasons: [], status: 'active' } }, version: 1 } } as never)
-        : next(e)
-    })
+    seedHeldGoal(on)
     await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
     await clock.advance(100)
     expect(goals).toEqual(['tests pass (check: pytest -q)'])
   })
 
-  test('auto clears the running /goal before Claude picks the next', async ($, on) => {
-    const { clock, goals } = withNative(on)
+  test('without /goal, a goal an earlier version held is dropped', async ($, on) => {
+    const calls = engine(on, false)
+    seedHeldGoal(on)
     await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-    await run($, 'auto')
+    expect((await run($, '')).text).toContain('no /goal command')
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
+    expect(calls.complete).toBe(0)
+  })
+
+  test('auto clears the running /goal and hands the choice of the next to Claude', async ($, on) => {
+    const { clock, goals, prompts } = withNative(on)
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    expect((await run($, 'auto 배포 마무리 위주로')).text).toContain('Claude plans the long-term goal')
     await clock.advance(100)
     expect(goals).toEqual(['clear'])
+    expect(prompts[0]).toContain('choose this session\'s goal yourself')
+    expect(prompts[0]).toContain('Their hint: 배포 마무리 위주로')
+    expect(prompts[0]).toContain('without asking the person anything')
+    expect(prompts[0]).toContain('the end state of the whole plan')
+    expect(prompts[0]).toContain('.claude/goal-plan.md')
+    // A bare `set` is the same as `auto`.
+    expect((await run($, 'set')).text).toContain('Claude plans the long-term goal')
   })
 })
 
