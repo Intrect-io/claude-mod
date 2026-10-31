@@ -8,7 +8,7 @@ import type { HeartbeatState, LintState, ShipState, Toggles } from '../types'
 // Change a shape tag when that value's fields change: it declines what an
 // earlier version stored, which outlives a reload.
 
-export const DEFAULT_TOGGLES: Toggles = { guards: true, shipGate: true, reportLint: true }
+export const DEFAULT_TOGGLES: Toggles = { guards: true, shipGate: true, reportLint: true, repoSize: true }
 
 export const INITIAL_SHIP: ShipState = {
   mentioned: [],

@@ -5,7 +5,7 @@ import { DEFAULT_TOGGLES, INITIAL_LINT } from './state'
 import type { PromptHook, StopHook, ToolCallHook } from './state'
 
 const lintAtom = atom({ plugin: 'harness', key: 'lint' } as const, INITIAL_LINT, { shape: 'lint-1' })
-const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT_TOGGLES, { shape: 'toggles-1' })
+const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT_TOGGLES, { shape: 'toggles-2' })
 
 // Report lint (toggle, on by default): at most one nudge per turn when the
 // final message breaks the user's reporting rules (CLAUDE.md §1, §2). The turn
