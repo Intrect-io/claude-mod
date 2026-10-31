@@ -1,5 +1,6 @@
 {
-  "note": "Four live runs of /tier eval on prompts.jsonl (haiku classifier through ANTHROPIC_BASE_URL). Runs 1 and 4 hit a ~21 s per-call latency floor from the endpoint; run 1 also timed out 3 prompts at the 30 s eval bound, which score as misses. Compare a change against the range, not one run.",
+  "note": "Four live runs of /tier eval on prompts.jsonl (haiku classifier through ANTHROPIC_BASE_URL). Runs 1 and 4 hit a ~21 s per-call latency floor (likely the endpoint behind ANTHROPIC_BASE_URL, not traced); run 1 also timed out 3 prompts at the 30 s eval bound, which score as misses. Compare a change against the range, not one run.",
+  "gate": {"tierAccuracy": 0.708, "effortAccuracy": 0.583, "why": "lowest run without timeouts"},
   "prompts": 24,
   "classifierModel": "haiku",
   "runs": [

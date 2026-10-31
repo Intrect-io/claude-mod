@@ -113,13 +113,15 @@ claude -p --plugin-dir model-tier "/tier eval model-tier/eval/prompts.jsonl"
 - `eval/baseline.json` records four live runs on the committed prompt set, with per-prompt
   hits. Tier accuracy ranged 0.667 to 0.75 and effort accuracy 0.5 to 0.625, so the spread is
   0.083 (2 prompts) for tier and 0.125 (3 prompts) for effort.
-- Two of the four runs hit a ~21 s per-call latency floor from the endpoint, and one of those
-  lost 3 prompts to the 30 s bound. Look at `timeouts` before reading accuracy.
+- Two of the four runs hit a ~21 s per-call latency floor (likely the endpoint behind
+  `ANTHROPIC_BASE_URL`; not traced), and one of those lost 3 prompts to the 30 s bound.
+  Look at `timeouts` before reading accuracy.
 
 **Rule.** A change to a label, the label prompt or the classification call must not drop
-tier or effort accuracy below the baseline minus the run-to-run spread. Rerun the eval
-twice on the change and compare against `baseline.json`. When the prompt set changes,
-record a new baseline in the same PR.
+tier or effort accuracy below the baseline minus the run-to-run spread. Today that is tier
+0.708 and effort 0.583: the lowest baseline run without timeouts. Run the eval at least twice
+on the change, rerun any run that reports timeouts, and every remaining run must meet both
+numbers. When the prompt set changes, record a new baseline in the same PR.
 
 ## Behaviour to know
 

@@ -74,6 +74,7 @@ describe('/tier eval', () => {
           '',
           '{"prompt":"design y","tier":"opus","effort":"high","why":"design"}',
           '{"prompt":"prove z","tier":"fable","effort":"xhigh","why":"research"}',
+          '{"prompt":"add w","tier":"sonnet","effort":"high","why":"routine"}',
         ].join('\n'),
       ],
     ])
@@ -89,6 +90,7 @@ describe('/tier eval', () => {
       'rename x': ['trivial', 'recall-or-lookup'],
       'design y': ['complex', 'routine-reasoning'],
       'prove z': ['exceptionally-hard', 'hard-open-problem'],
+      'add w': ['standard', 'tricky-problem'],
     }
     on('model.classify', (_, e) => {
       now += 4000
@@ -100,18 +102,19 @@ describe('/tier eval', () => {
     const r = await $.command.run({ command: 'tier', args: 'eval Evals/prompts.jsonl', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
     const run = JSON.parse(files.get('/repo/Evals/last-run.json') ?? '{}') as EvalRun
 
-    expect(run.cases).toBe(3)
+    expect(run.cases).toBe(4)
     expect(run.tierAccuracy).toBe(1)
-    expect(run.effortAccuracy).toBe(0.667)
+    expect(run.effortAccuracy).toBe(0.75)
     expect(run.results.map(x => x.got)).toEqual([
       { tier: 'haiku', effort: 'low' },
       { tier: 'opus', effort: 'medium' },
       { tier: 'fable', effort: 'xhigh' },
+      { tier: 'sonnet', effort: 'high' },
     ])
     expect(run.timeouts).toEqual({ tier: 0, effort: 0 })
     expect(run.latencyMs).toEqual({ p50: 8000, p90: 8000, max: 8000 })
-    expect(run.overProductionTimeout).toEqual({ timeoutMs: 3000, count: 3 })
-    expect(r.text).toContain('tier accuracy 1, effort accuracy 0.667')
+    expect(run.overProductionTimeout).toEqual({ timeoutMs: 3000, count: 4 })
+    expect(r.text).toContain('tier accuracy 1, effort accuracy 0.75')
     expect(r.text).toContain('miss: design y: tier opus (want opus), effort medium (want high)')
   })
 
