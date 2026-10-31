@@ -11,7 +11,7 @@ import { DEFAULT_TOGGLES } from './state'
 
 type On = Parameters<Register>[0]
 
-const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT_TOGGLES, { shape: 'toggles-1' })
+const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT_TOGGLES, { shape: 'toggles-2' })
 
 export type AskQuestion = { question: string; options: ReadonlyArray<{ label: string }> }
 

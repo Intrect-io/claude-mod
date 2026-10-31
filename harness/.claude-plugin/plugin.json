@@ -1,6 +1,6 @@
 {
   "name": "harness",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Integrated harness: the user's Claude rules enforced at the tool call (git, worktree, delete, venv, port, Linear, memory and order guards; a merge-and-release gate; report lint), plus session tooling and workflow automation.",
   "author": {
     "name": "unohee"

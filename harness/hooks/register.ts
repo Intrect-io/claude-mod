@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, Timer } from 'claude-code'
+import type { EngineInterface, EventResult, Register, Timer } from 'claude-code'
 
 import type { Toggles } from '../types'
 import { registerAskDefault } from './ask-default'
@@ -11,6 +11,7 @@ import { guardsToolCall, loadGuardEnv } from './guards'
 import { heartbeatCommand, heartbeatPrompt, heartbeatTurnComplete, heartbeatTurnStart, TICK_MS, tick } from './heartbeat'
 import { seedFromTranscript } from './linear-guard'
 import { gcSignature, gcSummary, parseGcReport } from './memory-gc'
+import { cachedReport, devRepoRoot, measureRepo, repoSizeCommand, sizeSignature, sizeSummary, statusText } from './repo-size'
 import { lintPrompt, lintStop, lintToolCall } from './report-lint'
 import { segment } from './segment'
 import { issueIds, registerShipGate, shipPrompt, shipStop } from './ship-gate'
@@ -18,7 +19,7 @@ import { DEFAULT_TOGGLES, INITIAL_SHIP } from './state'
 
 const envAtom = atom({ plugin: 'harness', key: 'env' } as const, {}, { shape: 'env-1' })
 const shipAtom = atom({ plugin: 'harness', key: 'ship' } as const, INITIAL_SHIP, { shape: 'ship-2' })
-const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT_TOGGLES, { shape: 'toggles-1' })
+const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT_TOGGLES, { shape: 'toggles-2' })
 
 // harness: the user's CLAUDE.md and ~/.claude/rules enforced at the tool
 // call (guards, ship-gate, report-lint: each switchable, all on by default),
@@ -27,25 +28,90 @@ const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT
 
 // One ticker per loaded module; a reload starts the module over.
 let ticker: Timer | undefined
+// The repo-size status piece, set once the background measurement is in.
+let repoPiece: string | undefined
 
 const COMMAND = 'harness'
 const EXTRA_COMMANDS = [
   { name: 'repo-status', description: 'Branch, changes, last commit and my open PRs, gathered without a model turn' },
   { name: 'slim', description: "Save this session's context to ~/.claude/context/slim-context.md" },
+  { name: 'repo-size', description: 'Measure this repo against its size budget and list cleanup candidates (lists only, deletes nothing)' },
 ]
 const GC_SEEN_KEY = 'memoryGcSeen'
+const SIZE_SEEN_KEY = 'repoSizeSeen'
+
+type SessionStartResult = EventResult<'classic.SessionStart'>
+// Long enough that the session's first prompt is not competing with du.
+const MEASURE_DELAY_MS = 3_000
 const STORE_KEY = 'toggles'
 const FEATURES: Record<string, keyof Toggles> = {
   guards: 'guards',
   'ship-gate': 'shipGate',
   'report-lint': 'reportLint',
+  'repo-size': 'repoSize',
 }
 
 function showStatus($: EngineInterface, toggles: Toggles) {
   const off = (Object.keys(FEATURES) as Array<keyof typeof FEATURES>).filter(name => !toggles[FEATURES[name] as keyof Toggles])
   // All rules on is the normal state: no row. A rule switched off is worth one.
   // The engine prefixes the plugin's name.
-  $.ui.status(off.length === 0 ? undefined : `${off.join(', ')} off`)
+  const parts = [off.length === 0 ? undefined : `${off.join(', ')} off`, toggles.repoSize ? repoPiece : undefined].filter((part): part is string => part !== undefined)
+  $.ui.status(parts.length === 0 ? undefined : parts.join(' · '))
+}
+
+// The weekly memory scan: a toast every session; the model reads the counts
+// only when they changed since it last did.
+async function memoryGcStart($: EngineInterface, below: SessionStartResult): Promise<SessionStartResult> {
+  const home = (await read($, envAtom)).home ?? (await $.env.get('HOME'))
+  if (home === undefined) return below
+  let report
+  try {
+    report = parseGcReport(await $.fs.read(`${home}/.claude/memory-gc-report.json`))
+  } catch {
+    return below
+  }
+  const summary = report === undefined ? undefined : gcSummary(report)
+  if (report === undefined || summary === undefined) return below
+  $.ui.toast(summary)
+  const signature = gcSignature(report)
+  if ((await $.store.get(GC_SEEN_KEY)) === signature) return below
+  await $.store.set(GC_SEEN_KEY, signature)
+
+  return { ...below, additionalContext: [...(below.additionalContext ?? []), `${summary}\n상세: ${home}/.claude/memory-gc-report.md`] }
+}
+
+// repo-size: the last measurement's breakdown reaches the model only when it
+// changed since it last did (the fresh one runs in the background).
+async function repoSizeStart($: EngineInterface, below: SessionStartResult): Promise<SessionStartResult> {
+  if (!(await read($, togglesAtom)).repoSize) return below
+  const root = await devRepoRoot($, (await read($, envAtom)).home ?? (await $.env.get('HOME')))
+  const report = root === undefined ? undefined : await cachedReport($, root)
+  if (report === undefined || !report.over) return below
+  const seen = (await $.store.get(SIZE_SEEN_KEY)) as Record<string, string> | undefined
+  const signature = sizeSignature(report)
+  if (seen?.[report.root] === signature) return below
+  await $.store.set(SIZE_SEEN_KEY, { ...(seen ?? {}), [report.root]: signature })
+
+  return { ...below, additionalContext: [...(below.additionalContext ?? []), sizeSummary(report)] }
+}
+
+// Measures the session's repo off the session's path, then shows the verdict.
+function scheduleMeasure($: EngineInterface) {
+  $.clock.after(MEASURE_DELAY_MS, () => {
+    void (async () => {
+      const home = (await read($, envAtom)).home ?? (await $.env.get('HOME'))
+      const root = await devRepoRoot($, home)
+      if (root === undefined) return
+      const before = await cachedReport($, root)
+      const report = await measureRepo($, root, Date.now())
+      if (report === undefined) return
+      repoPiece = statusText(report)
+      showStatus($, await read($, togglesAtom))
+      if (report.over && (before === undefined || sizeSignature(before) !== sizeSignature(report))) {
+        $.ui.toast(`repo-size: ${report.root} ${statusText(report) ?? ''} — /repo-size lists cleanup candidates`)
+      }
+    })().catch(error => $.ui.log(`harness: repo-size measure failed: ${String(error).slice(0, 200)}`, { to: 'debug' }))
+  })
 }
 
 export const register: Register = (on, options) => {
@@ -69,10 +135,12 @@ export const register: Register = (on, options) => {
       linearRequested: ship.linearRequested || seen.requested,
       mentioned: [...new Set([...ship.mentioned, ...seen.mentioned])],
     }))
+    repoPiece = undefined
     showStatus($, toggles)
+    if (toggles.repoSize) scheduleMeasure($)
     await $.command.register({
       name: COMMAND,
-      description: 'Harness: /harness [status | on|off guards|ship-gate|report-lint | skip-codeql | heartbeat start [5m]|stop|status]',
+      description: 'Harness: /harness [status | on|off guards|ship-gate|report-lint|repo-size | skip-codeql | heartbeat start [5m]|stop|status]',
     })
     // A user command of the same name keeps its name; the rest still register.
     for (const spec of EXTRA_COMMANDS) {
@@ -120,27 +188,8 @@ export const register: Register = (on, options) => {
     return next({ ...e, text: `${verdict}\n\n${e.text}` })
   })
 
-  // The weekly memory scan: a toast every session; the model reads the counts
-  // only when they changed since it last did.
-  on('classic.SessionStart', async ($, e, next) => {
-    const below = await next(e)
-    const home = (await read($, envAtom)).home ?? (await $.env.get('HOME'))
-    if (home === undefined) return below
-    let report
-    try {
-      report = parseGcReport(await $.fs.read(`${home}/.claude/memory-gc-report.json`))
-    } catch {
-      return below
-    }
-    const summary = report === undefined ? undefined : gcSummary(report)
-    if (report === undefined || summary === undefined) return below
-    $.ui.toast(summary)
-    const signature = gcSignature(report)
-    if ((await $.store.get(GC_SEEN_KEY)) === signature) return below
-    await $.store.set(GC_SEEN_KEY, signature)
-
-    return { ...below, additionalContext: [...(below.additionalContext ?? []), `${summary}\n상세: ${home}/.claude/memory-gc-report.md`] }
-  })
+  // One matcher-less hook per event: the memory scan and repo-size as one chain.
+  on('classic.SessionStart', async ($, e, next) => memoryGcStart($, await repoSizeStart($, await next(e))))
 
   // The branch name is the user's own naming of the work: its issue IDs count as
   // mentioned, so /commit's Linear step may comment on them.
@@ -150,6 +199,12 @@ export const register: Register = (on, options) => {
     if (ids.length > 0) await update($, shipAtom, ship => ({ ...ship, mentioned: [...new Set([...ship.mentioned, ...ids])] }))
 
     return { result: report }
+  })
+
+  on('command.run', { command: 'repo-size' }, async $ => {
+    const env = await read($, envAtom)
+
+    return { text: await repoSizeCommand($, env.home ?? (await $.env.get('HOME')), Date.now()) }
   })
 
   on('command.run', { command: 'repo-status' }, async $ => ({ text: await repoStatus($, Date.now()) }))
@@ -195,7 +250,7 @@ export const register: Register = (on, options) => {
 
     return {
       text: [
-        `guards ${toggles.guards ? 'on' : 'off'} · ship-gate ${toggles.shipGate ? 'on' : 'off'} · report-lint ${toggles.reportLint ? 'on' : 'off'}`,
+        `guards ${toggles.guards ? 'on' : 'off'} · ship-gate ${toggles.shipGate ? 'on' : 'off'} · report-lint ${toggles.reportLint ? 'on' : 'off'} · repo-size ${toggles.repoSize ? 'on' : 'off'}`,
         `venv: ${env.venv ?? `missing (${env.venvMissing ?? 'unknown platform'})`}`,
         `ship-gate this session: open-PR check ${ship.prListed ? 'done' : 'not yet'}, CodeQL ${ship.codeqlRan ? 'ran' : ship.skipCodeql ? 'waived' : 'not yet'}, issues awaiting Done: ${ship.pending.filter(issue => !issue.done || !issue.commented).map(issue => issue.id).join(', ') || 'none'}`,
       ].join('\n'),

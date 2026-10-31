@@ -12,7 +12,7 @@ import { DEFAULT_TOGGLES, INITIAL_LINT, INITIAL_SHIP } from './state'
 import type { PromptHook, StopHook } from './state'
 
 const shipAtom = atom({ plugin: 'harness', key: 'ship' } as const, INITIAL_SHIP, { shape: 'ship-2' })
-const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT_TOGGLES, { shape: 'toggles-1' })
+const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT_TOGGLES, { shape: 'toggles-2' })
 const lintAtom = atom({ plugin: 'harness', key: 'lint' } as const, INITIAL_LINT, { shape: 'lint-1' })
 const envAtom = atom({ plugin: 'harness', key: 'env' } as const, {}, { shape: 'env-1' })
 

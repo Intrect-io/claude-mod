@@ -5,7 +5,7 @@ The user's own Claude harness as one mod (formerly `house-rules`). It covers thr
 - session tooling that used to be shell hooks and prose commands;
 - workflow automation for `/commit` and the heartbeat loop.
 
-Each rule feature can be switched with `/harness on|off guards|ship-gate|report-lint`. The choice is kept across sessions. `/harness status` shows the current state.
+Each rule feature can be switched with `/harness on|off guards|ship-gate|report-lint|repo-size`. The choice is kept across sessions. `/harness status` shows the current state.
 
 Design rule: a check that is deterministic and unambiguous **refuses**. A heuristic one only adds a **note** for the model, and is promoted once false positives have been measured.
 
@@ -47,6 +47,17 @@ Refuses or rewrites a single tool call.
 - When an AskUserQuestion auto-continues unanswered, the model is told to take each question's `(Recommended)` option.
 - If that option is irreversible, it takes the safe hold option instead.
 
+## repo-size (on)
+
+Keeps repos under `~/dev` within a size budget: 5 GB of the whole directory, `.git` and ignored files included. Measured on 2026-10-31, most overruns came from `worktrees/`, `trash/` and `testing/`, which the user's own rules produce. A few came from a `.git` full of loose objects.
+
+- **Measure:** a few seconds after the session starts, `du -k -d 1` and `git count-objects -v` run in the background. The result is cached per repo. Over budget, the status line shows `repo 7.2GB/5.0GB`, and a toast appears when the numbers changed. The next session start gives the model the breakdown (largest dirs, a `git gc` hint when loose objects outweigh packs), once per change.
+- **Refuses:**
+  - `git add` and `git commit -a` that would stage a file over 50 MB that is not LFS-tracked (`git check-attr filter`). Ignored files are not counted.
+  - `git worktree add` and `EnterWorktree` while the last measurement is over budget and worktrees of merged branches are left over. A branch counts as merged if `git branch --merged` lists it, or if its remote branch is `[gone]` (a squash merge).
+- **`/repo-size`:** measures now and lists cleanup candidates: leftover worktrees, `trash/` entries older than 30 days, and `git gc` when it would help. It deletes nothing. Emptying `trash/` needs the user's AskUserQuestion approval.
+- **Per-repo budget:** `<repo>/.claude/repo-size.json` holds `{ "budgetGB": 8, "ignore": ["db/", "models/"] }`. Use it where data is the work, so the warning does not become permanent noise.
+
 ## ship-gate (on)
 
 - After `gh pr merge`, issues the user named in this session that the PR references need a Done transition and an evidence comment before the turn ends. The Stop is blocked up to twice, then only a toast.
@@ -65,6 +76,7 @@ Nudges once per turn when the final message:
 - **Memory GC:** the weekly launchd scan's report is shown as a toast every session. The model reads the counts only when they changed since it last did. This replaced the `memory-gc-inject.sh` SessionStart hook.
 - **`/repo-status`:** KST time, branch, ahead/behind, last commit, change counts and my open PRs. No model turn.
 - **`/slim`:** writes `~/.claude/context/slim-context.md` from the branch, the files this session edited, the diff stat and the issues named, plus a short haiku summary. If the summary fails, only the facts are written.
+- **`/repo-size`:** this repo against its size budget, with cleanup candidates. See repo-size above.
 
 ## Workflow automation
 

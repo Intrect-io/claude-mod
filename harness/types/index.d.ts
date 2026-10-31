@@ -2,6 +2,7 @@ export type Toggles = {
   guards: boolean
   shipGate: boolean
   reportLint: boolean
+  repoSize: boolean
 }
 
 export type GuardEnv = {

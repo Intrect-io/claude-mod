@@ -3,12 +3,13 @@ import type { EngineInterface } from 'claude-code'
 
 import type { GuardEnv } from '../types'
 import { checkAgentWorktree, checkMemorySecret, checkSystemPython, checkTradingOrder, DEFAULT_ORDER_TOOLS, isVersionBump, versionBumpNote } from './extra-guards'
+import { cachedReport, checkWorktreeGrowth, devRepoRoot, isWorktreeAdd, largeStageRefusal, leftoverMerged, stagedTargets } from './repo-size'
 import { commandWords, expandHome, isInside, programOf, segments, stripProse, unquote } from './shell'
 import { DEFAULT_TOGGLES, INITIAL_LINT, INITIAL_SHIP } from './state'
 import type { ToolCallHook } from './state'
 
 const envAtom = atom({ plugin: 'harness', key: 'env' } as const, {}, { shape: 'env-1' })
-const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT_TOGGLES, { shape: 'toggles-1' })
+const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT_TOGGLES, { shape: 'toggles-2' })
 const lintAtom = atom({ plugin: 'harness', key: 'lint' } as const, INITIAL_LINT, { shape: 'lint-1' })
 const shipAtom = atom({ plugin: 'harness', key: 'ship' } as const, INITIAL_SHIP, { shape: 'ship-2' })
 // The venv note was given in this session: once is enough (it rode every
@@ -227,6 +228,10 @@ export async function guardsToolCall(
         checkLlmPort(stripProse(command)) ??
         checkSystemPython(command)
       if (refusal !== undefined) return { deny: refusal }
+      if (toggles.repoSize) {
+        const growth = await repoGrowthRefusal($, command, env.home)
+        if (growth !== undefined) return { deny: growth }
+      }
 
       const venv = venvRewrite(command, env)
       if (venv !== undefined && 'deny' in venv) return { deny: venv.deny }
@@ -257,7 +262,7 @@ export async function guardsToolCall(
     if (order !== undefined) return { deny: order }
 
     if (e.tool === 'EnterWorktree') {
-      const refusal = checkEnterWorktree(input)
+      const refusal = checkEnterWorktree(input) ?? (toggles.repoSize ? await worktreeGrowthRefusal($, env.home) : undefined)
       if (refusal !== undefined) return { deny: refusal }
     }
 
@@ -271,6 +276,25 @@ export async function guardsToolCall(
     }
 
     return next(e)
+}
+
+// repo-size: a command that would grow a repo under ~/dev for good.
+async function repoGrowthRefusal($: EngineInterface, command: string, home: string | undefined): Promise<string | undefined> {
+  if (isWorktreeAdd(command)) return worktreeGrowthRefusal($, home)
+  if (stagedTargets(command) === undefined) return undefined
+  if ((await devRepoRoot($, home)) === undefined) return undefined
+
+  return largeStageRefusal($, command, await $.session.cwd().catch(() => undefined))
+}
+
+// Judged from the last measurement, so the call is not held up by a fresh du.
+async function worktreeGrowthRefusal($: EngineInterface, home: string | undefined): Promise<string | undefined> {
+  const root = await devRepoRoot($, home)
+  if (root === undefined) return undefined
+  const report = await cachedReport($, root)
+  if (report === undefined || !report.over) return undefined
+
+  return checkWorktreeGrowth(report, await leftoverMerged($, root))
 }
 
 // Facts the guards need, read once per session.
