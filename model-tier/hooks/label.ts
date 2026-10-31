@@ -49,18 +49,16 @@ async function within<T>($: EngineInterface, labelled: Promise<T | undefined>, t
   }
 }
 
-function classify($: EngineInterface, text: string, model: string, timeoutMs: number, max: Tier): Promise<Labelled<Tier>> {
-  const labelled = $.model.classify(text.slice(0, CLASSIFY_CHARS), LABELS, { model }).then(label =>
+function classify($: EngineInterface, text: string, model: string, max: Tier): Promise<Tier | undefined> {
+  return $.model.classify(text.slice(0, CLASSIFY_CHARS), LABELS, { model }).then(label =>
     label === undefined || !(label in LABEL_TIER) ? undefined : capTier(LABEL_TIER[label as (typeof LABELS)[number]], max),
   )
-  return within($, labelled, timeoutMs)
 }
 
-function classifyEffort($: EngineInterface, text: string, model: string, timeoutMs: number): Promise<Labelled<Effort>> {
-  const labelled = $.model.classify(text.slice(0, CLASSIFY_CHARS), EFFORT_LABELS, { model }).then(found =>
+function classifyEffort($: EngineInterface, text: string, model: string): Promise<Effort | undefined> {
+  return $.model.classify(text.slice(0, CLASSIFY_CHARS), EFFORT_LABELS, { model }).then(found =>
     found !== undefined && found in LABEL_EFFORT ? LABEL_EFFORT[found as (typeof EFFORT_LABELS)[number]] : undefined,
   )
-  return within($, labelled, timeoutMs)
 }
 
 export type LabelOptions = {
@@ -78,6 +76,8 @@ export type PromptLabels = {
   effort?: Effort
   tierTimedOut: boolean
   effortTimedOut: boolean
+  /** Both calls' answers once they finish, timeout or not, and how long that took. */
+  settled: Promise<{ tier?: Tier; effort?: Effort; ms: number }>
 }
 
 /**
@@ -86,14 +86,23 @@ export type PromptLabels = {
  * routing, /tier eval) goes through here so the eval measures what ships.
  */
 export async function labelPrompt($: EngineInterface, text: string, o: LabelOptions): Promise<PromptLabels> {
+  // Wall time on purpose: this is the classifier's real latency, logged for tuning.
+  const startedAt = Date.now()
+  const tierCall = o.wantTier ? classify($, text, o.model, o.maxAuto).catch(() => undefined) : undefined
+  const effortCall = o.wantEffort ? classifyEffort($, text, o.model).catch(() => undefined) : undefined
+  const settled = Promise.all([tierCall, effortCall]).then(([tier, effort]) => ({ tier, effort, ms: Date.now() - startedAt }))
+  // No bound: the caller does not wait at all and takes the answer from `settled`.
+  const bounded = <T>(call: Promise<T | undefined>): Promise<Labelled<T>> =>
+    o.timeoutMs <= 0 ? Promise.resolve({ value: undefined, timedOut: true }) : within($, call, o.timeoutMs)
   const [tier, effort] = await Promise.all([
-    o.wantTier ? classify($, text, o.model, o.timeoutMs, o.maxAuto).catch(() => undefined) : undefined,
-    o.wantEffort ? classifyEffort($, text, o.model, o.timeoutMs).catch(() => undefined) : undefined,
+    tierCall === undefined ? undefined : bounded(tierCall),
+    effortCall === undefined ? undefined : bounded(effortCall),
   ])
   return {
     tier: tier?.value,
     effort: effort?.value,
     tierTimedOut: tier?.timedOut === true,
     effortTimedOut: effort?.timedOut === true,
+    settled,
   }
 }
