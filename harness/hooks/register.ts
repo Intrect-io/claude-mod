@@ -15,6 +15,7 @@ import { cachedReport, devRepoRoot, formatKb, measureRepo, repoSizeCommand, shri
 import type { SizeReport } from './repo-size'
 import { lintPrompt, lintStop, lintToolCall } from './report-lint'
 import { segment } from './segment'
+import { DAY_MS, sweepStatusline } from './statusline-gc'
 import { issueIds, registerShipGate, shipPrompt, shipStop } from './ship-gate'
 import { DEFAULT_TOGGLES, INITIAL_SHIP } from './state'
 
@@ -24,8 +25,8 @@ const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT
 
 // harness: the user's CLAUDE.md and ~/.claude/rules enforced at the tool
 // call (guards, ship-gate, report-lint: each switchable, all on by default),
-// plus session tooling (§6.5 grant check, memory-gc banner, /repo-status,
-// /slim) and workflow automation (commit_preflight, the heartbeat timer).
+// plus session tooling (§6.5 grant check, memory-gc banner, statusline sweep,
+// /repo-status, /slim) and workflow automation (commit_preflight, the heartbeat timer).
 
 // One ticker per loaded module; a reload starts the module over.
 let ticker: Timer | undefined
@@ -35,6 +36,7 @@ let repoPiece: string | undefined
 // and the periodic one that catches a long session's growth and cleanup.
 let measureTimer: Timer | undefined
 let measureTicker: Timer | undefined
+let sweepTimer: Timer | undefined
 
 const COMMAND = 'harness'
 const EXTRA_COMMANDS = [
@@ -51,6 +53,9 @@ const MEASURE_DELAY_MS = 3_000
 // After a command that may have freed space: soon, but after a burst of them.
 const REMEASURE_DELAY_MS = 5_000
 const MEASURE_EVERY_MS = 30 * 60_000
+// After the repo measurement, so the two never list the disk at once.
+const SWEEP_DELAY_MS = 10_000
+const SWEEP_AT_KEY = 'statuslineGcAt'
 const STORE_KEY = 'toggles'
 const FEATURES: Record<string, keyof Toggles> = {
   guards: 'guards',
@@ -120,6 +125,25 @@ function scheduleMeasure($: EngineInterface, delayMs = MEASURE_DELAY_MS) {
   })
 }
 
+// The statusline sweep: at most once a day per machine, in the background.
+function scheduleSweep($: EngineInterface) {
+  sweepTimer?.cancel()
+  sweepTimer = $.clock.after(SWEEP_DELAY_MS, () => {
+    sweepTimer = undefined
+    void (async () => {
+      const now = await $.clock.now()
+      const last = await $.store.get(SWEEP_AT_KEY)
+      if (typeof last === 'number' && now - last < DAY_MS) return
+      // Stored first: a run that fails part way waits for tomorrow, not the next session.
+      await $.store.set(SWEEP_AT_KEY, now)
+      const home = (await read($, envAtom)).home ?? (await $.env.get('HOME'))
+      if (home === undefined) return
+      const moved = await sweepStatusline($, home, now, await $.session.id())
+      $.ui.log(`harness: statusline sweep moved ${moved} folder(s) to ~/.claude/trash/statusline`, { to: 'debug' })
+    })().catch(error => $.ui.log(`harness: statusline sweep failed: ${String(error).slice(0, 200)}`, { to: 'debug' }))
+  })
+}
+
 // The status follows every measurement; a toast only when the verdict or the
 // size moved, including the way back under budget after a cleanup.
 function showMeasured($: EngineInterface, before: SizeReport | undefined, report: SizeReport) {
@@ -156,6 +180,7 @@ export const register: Register = (on, options) => {
     if (toggles.repoSize) scheduleMeasure($)
     measureTicker?.cancel()
     measureTicker = $.clock.every(MEASURE_EVERY_MS, () => scheduleMeasure($, 0))
+    scheduleSweep($)
     await $.command.register({
       name: COMMAND,
       description: 'Harness: /harness [status | on|off guards|ship-gate|report-lint|repo-size | skip-codeql | heartbeat start [5m]|stop|status]',

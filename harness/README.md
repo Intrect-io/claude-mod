@@ -74,6 +74,7 @@ Nudges once per turn when the final message:
 
 - **§6.5 grant check:** a message from another session (`session.receive`, origin peer) gets a verdict line on top. The sender is read from the envelope's `from-name` and checked against `~/.claude/orchestration-grant.json`: expiry and orchestrator name, with the allowed and forbidden lists shown. The name is the sender's own claim, so the verdict grants nothing beyond what §6.5 already allows.
 - **Memory GC:** the weekly launchd scan's report is shown as a toast every session. The model reads the counts only when they changed since it last did. This replaced the `memory-gc-inject.sh` SessionStart hook.
+- **Statusline sweep:** each mod empties its piece at session end, but the session's folder under `~/.claude/statusline/` stays. Once a day per machine, 10 seconds after a session starts, folders whose pieces are all empty and over a day old, or still filled and over 14 days old (a crashed session), move to `~/.claude/trash/statusline/`. The running session's folder never moves, and one run moves at most 200. The count goes to the debug log.
 - **`/repo-status`:** KST time, branch, ahead/behind, last commit, change counts and my open PRs. No model turn.
 - **`/slim`:** writes `~/.claude/context/slim-context.md` from the branch, the files this session edited, the diff stat and the issues named, plus a short haiku summary. If the summary fails, only the facts are written.
 - **`/repo-size`:** this repo against its size budget, with cleanup candidates. See repo-size above.
