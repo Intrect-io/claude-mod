@@ -2,44 +2,25 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Effort, Tier, TierState } from '../types'
+import { evalCommand } from './eval'
+import { capTier, labelPrompt, RANK } from './label'
 import { segment } from './segment'
+
+export { capTier }
 
 const PLUGIN = 'model-tier'
 const SET_TIER = `mcp__${PLUGIN}__set_tier`
 const TIERS: readonly Tier[] = ['haiku', 'sonnet', 'opus', 'fable']
-const RANK: Record<Tier, number> = { haiku: 0, sonnet: 1, opus: 2, fable: 3 }
 const isTierName = (v: unknown): v is Tier => typeof v === 'string' && (TIERS as readonly string[]).includes(v)
 // The highest tier anything but the person picks: the classifier, subagent
 // routing and the model's own set_tier. Fable has its own, tighter rate limit
 // on Claude Teams, so by default only /tier fable reaches it.
 export const DEFAULT_MAX_AUTO_TIER: Tier = 'opus'
 export const maxAutoTier = (v: unknown): Tier => (isTierName(v) ? v : DEFAULT_MAX_AUTO_TIER)
-export const capTier = (t: Tier, max: Tier): Tier => (RANK[t] > RANK[max] ? max : t)
-// The top label names a rare case outright: label names steer the classifier
-// (see EFFORT_LABELS), and fable is the scarcest, most rate-limited tier. The
-// label set stays the same under a lower `maxAutoTier`, so the other three
-// labels classify as before; only the tier it maps to is capped.
-const LABELS = ['trivial', 'standard', 'complex', 'exceptionally-hard'] as const
-const LABEL_TIER: Record<(typeof LABELS)[number], Tier> = {
-  trivial: 'haiku',
-  standard: 'sonnet',
-  complex: 'opus',
-  'exceptionally-hard': 'fable',
-}
 // How much thinking the prompt needs, as the classifier names it. `max` is never
 // proposed: only the model (set_tier) or the person (/tier effort) asks for it.
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 const EFFORT_RANK: Record<Effort, number> = { low: 0, medium: 1, high: 2, xhigh: 3, max: 4 }
-// Named for how hard the problem is to think through, not how long the answer
-// is: measured live, 'quick-answer' caught a hard design question that asked
-// for a three-line reply.
-const EFFORT_LABELS = ['recall-or-lookup', 'routine-reasoning', 'tricky-problem', 'hard-open-problem'] as const
-const LABEL_EFFORT: Record<(typeof EFFORT_LABELS)[number], Effort> = {
-  'recall-or-lookup': 'low',
-  'routine-reasoning': 'medium',
-  'tricky-problem': 'high',
-  'hard-open-problem': 'xhigh',
-}
 // The model class a prompt's tier means on the provider that has to answer.
 // Claude names carry each other ('claude-opus-5-5' is 'opus'); another
 // provider's model (cc-router's codex or its ollama fallback, when Claude
@@ -67,7 +48,6 @@ export const DEFAULT_PROVIDER_TIER_MODELS: Record<string, Partial<Record<Tier, s
 
 // Subagent types that carry no model of their own; others keep their definition's.
 const ROUTABLE_AGENTS = new Set(['general-purpose', 'claude'])
-const CLASSIFY_CHARS = 4000
 
 // Full model ids per tier. A request built here goes to the API as written:
 // unlike /model or --model, an alias ('sonnet') is not resolved, and a router
@@ -220,43 +200,6 @@ function show($: EngineInterface, s: TierState, enabled: boolean): Promise<void>
   return segment($, enabled ? `${s.tier}${s.effort ? `·${s.effort}` : ''}${pinned ? ' (pin)' : ''}` : '')
 }
 
-// A classifier's answer, or the timeout that beat it.
-type Labelled<T> = { value: T | undefined; timedOut: boolean }
-
-const TIMED_OUT = Symbol('timed out')
-
-/** The first of `labelled` and a `timeoutMs` sleep, so a slow classifier never holds the prompt. */
-async function within<T>($: EngineInterface, labelled: Promise<T | undefined>, timeoutMs: number): Promise<Labelled<T>> {
-  const stop = new AbortController()
-  // A sleep that fails or is aborted never wins the race: only a real timeout does.
-  const timeout = $.clock.sleep(timeoutMs, { signal: stop.signal }).then(
-    () => TIMED_OUT,
-    () => new Promise<typeof TIMED_OUT>(() => {}),
-  )
-  try {
-    const got = await Promise.race([labelled, timeout])
-    return got === TIMED_OUT ? { value: undefined, timedOut: true } : { value: got, timedOut: false }
-  } finally {
-    stop.abort()
-  }
-}
-
-/** Labels `text` with a tier, capped at `max`. */
-function classify($: EngineInterface, text: string, model: string, timeoutMs: number, max: Tier): Promise<Labelled<Tier>> {
-  const labelled = $.model.classify(text.slice(0, CLASSIFY_CHARS), LABELS, { model }).then(label =>
-    label === undefined || !(label in LABEL_TIER) ? undefined : capTier(LABEL_TIER[label as (typeof LABELS)[number]], max),
-  )
-  return within($, labelled, timeoutMs)
-}
-
-/** The effort a prompt needs; undefined for a label outside the set. */
-function classifyEffort($: EngineInterface, text: string, model: string, timeoutMs: number): Promise<Labelled<Effort>> {
-  const labelled = $.model.classify(text.slice(0, CLASSIFY_CHARS), EFFORT_LABELS, { model }).then(found =>
-    found !== undefined && found in LABEL_EFFORT ? LABEL_EFFORT[found as (typeof EFFORT_LABELS)[number]] : undefined,
-  )
-  return within($, labelled, timeoutMs)
-}
-
 const LOG_MAX_LINES = 500
 
 /**
@@ -326,7 +269,7 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: 'tier',
-      description: 'Pin the model tier (fable|opus|sonnet|haiku) or effort, or return to auto routing',
+      description: 'Pin the model tier (fable|opus|sonnet|haiku) or effort, return to auto routing, or eval the classifier on a prompt set',
     })
 
     // A fresh session starts on whatever /model is set to.
@@ -350,7 +293,12 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'tier' }, async ($, e) => {
-    const arg = e.args.trim().toLowerCase()
+    const raw = e.args.trim()
+    // Only the path keeps its case.
+    if (/^eval(\s|$)/i.test(raw)) {
+      return { text: await evalCommand($, raw.slice('eval'.length).trim(), { model: classifierModel, productionTimeoutMs: classifierTimeoutMs }) }
+    }
+    const arg = raw.toLowerCase()
     if (arg === '') {
       const s = await read($, state)
       return { text: `tier: ${label(s)}` }
@@ -372,7 +320,7 @@ export const register: Register = (on, options) => {
       void show($, s, enabled)
       return { text: `Auto routing on; tier stays ${s.tier} until the next prompt.` }
     }
-    if (!isTierName(arg)) return { text: 'Usage: /tier [auto|fable|opus|sonnet|haiku] | /tier effort [auto|low|medium|high|xhigh|max]' }
+    if (!isTierName(arg)) return { text: 'Usage: /tier [auto|fable|opus|sonnet|haiku] | /tier effort [auto|low|medium|high|xhigh|max] | /tier eval [path.jsonl]' }
     const s = await update($, state, (v): TierState => ({ ...v, tier: arg, source: 'pinned', pendingDown: undefined, pendingCount: 0 }))
     void show($, s, enabled)
     return { text: `Pinned to ${arg}. /tier auto to release.` }
@@ -384,17 +332,14 @@ export const register: Register = (on, options) => {
     let s = current
     const wantTier = current.source !== 'pinned'
     const wantEffort = routeEffort && current.effortSource !== 'pinned'
-    const [tierLabel, effortLabel] = await Promise.all([
-      wantTier ? classify($, e.text, classifierModel, classifierTimeoutMs, maxAuto).catch(() => undefined) : undefined,
-      wantEffort ? classifyEffort($, e.text, classifierModel, classifierTimeoutMs).catch(() => undefined) : undefined,
-    ])
-    const proposed = tierLabel?.value
-    const effort = effortLabel?.value
+    const labels = await labelPrompt($, e.text, { model: classifierModel, timeoutMs: classifierTimeoutMs, maxAuto, wantTier, wantEffort })
+    const proposed = labels.tier
+    const effort = labels.effort
     if (proposed) s = await update($, state, v => decide(v, proposed, decideOptions))
     if (effort) s = await update($, state, v => decideEffort(v, effort, decideOptions))
     const kept = { tier: s.tier, effort: s.effort }
-    if (tierLabel?.timedOut) await logTimeout($, { classifier: 'tier', ranMs: classifierTimeoutMs, kept })
-    if (effortLabel?.timedOut) await logTimeout($, { classifier: 'effort', ranMs: classifierTimeoutMs, kept })
+    if (labels.tierTimedOut) await logTimeout($, { classifier: 'tier', ranMs: classifierTimeoutMs, kept })
+    if (labels.effortTimedOut) await logTimeout($, { classifier: 'effort', ranMs: classifierTimeoutMs, kept })
     void show($, s, enabled)
     // The note asks the model to review the pick. Measured with inkblot on
     // 2026-10-29: 0 of 6 set_tier calls when the pick stood. So it speaks only
@@ -403,8 +348,8 @@ export const register: Register = (on, options) => {
     // downgrade waiting for more turns, or the haiku context guard).
     const pick = `${s.tier}·${s.effort ?? ''}`
     const uncertain =
-      tierLabel?.timedOut === true ||
-      effortLabel?.timedOut === true ||
+      labels.tierTimedOut ||
+      labels.effortTimedOut ||
       (proposed !== undefined && proposed !== s.tier) ||
       (effort !== undefined && effort !== s.effort)
     if (!noteDue(s.notedPick, pick, uncertain)) return next(e)
@@ -493,9 +438,8 @@ export const register: Register = (on, options) => {
 
   on('agent.spawn', async ($, e, next) => {
     if (!enabled || e.fork || e.model !== undefined || !ROUTABLE_AGENTS.has(e.subagentType)) return next(e)
-    const labelled = await classify($, e.prompt, classifierModel, classifierTimeoutMs, maxAuto).catch(() => undefined)
-    const tier = labelled?.value
-    if (labelled?.timedOut) {
+    const { tier, tierTimedOut } = await labelPrompt($, e.prompt, { model: classifierModel, timeoutMs: classifierTimeoutMs, maxAuto, wantTier: true, wantEffort: false })
+    if (tierTimedOut) {
       const s = await read($, state)
       await logTimeout($, { classifier: 'subagent', ranMs: classifierTimeoutMs, kept: { tier: s.tier, effort: s.effort } })
     }
