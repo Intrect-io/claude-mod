@@ -47,10 +47,18 @@ only by `/tier fable` unless `maxAutoTier` allows it.
   prefix outside the prompt cache. Before the session has sent anything there
   is no cached prefix, so the first verdict applies at once.
 - **Classifier timeout.** If the classifier takes longer than
-  `classifierTimeoutMs`, the current tier stays and the prompt is not held.
-  Each timeout appends one JSON line to `~/.claude/model-tier.log`
-  (`{"ts", "event": "classifier-timeout", "classifier": "tier"|"effort"|"subagent", "ranMs", "kept": {"tier", "effort"}}`,
-  the last 500 lines kept). These lines are the data for tuning the bound.
+  `classifierTimeoutMs`, the prompt goes on with the current tier. The label
+  is not dropped: when it arrives and no newer prompt came in, it decides the
+  rest of the turn (the steps after the first tool call), unless the tier was
+  pinned meanwhile. After a late answer the classifier counts as slow, and
+  prompts stop waiting for it at all until an answer comes in under the
+  bound. Measured on 2026-11-01, whole sessions ran at about 21 s per call,
+  so waiting 3 s there only delayed every prompt.
+  The log `~/.claude/model-tier.log` keeps the last 500 lines:
+  `{"ts", "event": "classifier-timeout", "classifier": "tier"|"effort"|"subagent", "ranMs", "kept": {"tier", "effort"}}`
+  when a prompt waited and the bound passed, and
+  `{"ts", "event": "classifier-late", "ms", "applied", "waited"}` when a late
+  label arrived (`ms` is its real latency). These lines are the data for tuning the bound.
 - **Context guards.** Above `maxTokensForHaiku` prompt tokens the session never
   drops to haiku; above `maxTokensForDowngrade` it never steps down at all.
   Loaded into a running session, the mod reads the live context size first.

@@ -4,6 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Effort, Tier, TierState } from '../types'
 import { evalCommand } from './eval'
 import { capTier, labelPrompt, RANK } from './label'
+import type { PromptLabels } from './label'
 import { segment } from './segment'
 
 export { capTier }
@@ -208,7 +209,12 @@ const LOG_MAX_LINES = 500
  * effort the turn kept. This is the data for tuning `classifierTimeoutMs`
  * (measured once: a design prompt stayed on haiku·low after a timeout).
  */
-async function logTimeout($: EngineInterface, entry: { classifier: 'tier' | 'effort' | 'subagent'; ranMs: number; kept: { tier: Tier; effort?: Effort } }): Promise<void> {
+type LogEntry =
+  | { event: 'classifier-timeout'; classifier: 'tier' | 'effort' | 'subagent'; ranMs: number; kept: { tier: Tier; effort?: Effort } }
+  // A label that came after the prompt went on: `ms` is the classifier's real latency.
+  | { event: 'classifier-late'; ms: number; applied: boolean; waited: boolean }
+
+async function logEvent($: EngineInterface, entry: LogEntry): Promise<void> {
   try {
     const home = await $.env.get('HOME')
     if (home === undefined) return
@@ -220,11 +226,41 @@ async function logTimeout($: EngineInterface, entry: { classifier: 'tier' | 'eff
       // First line.
     }
     const lines = text.split('\n').filter(line => line !== '')
-    lines.push(JSON.stringify({ ts: new Date(await $.clock.now()).toISOString(), event: 'classifier-timeout', ...entry, kept: { tier: entry.kept.tier, effort: entry.kept.effort ?? null } }))
+    const fields = entry.event === 'classifier-timeout' ? { ...entry, kept: { tier: entry.kept.tier, effort: entry.kept.effort ?? null } } : entry
+    lines.push(JSON.stringify({ ts: new Date(await $.clock.now()).toISOString(), ...fields }))
     await $.fs.write(path, `${lines.slice(-LOG_MAX_LINES).join('\n')}\n`)
   } catch {
     // A log line is never worth failing a prompt over.
   }
+}
+
+// The latest prompt's number: a late label applies only while its prompt is
+// still the latest. A reload starts both over (fast, nothing pending).
+let promptSeq = 0
+// The last classifier answer came later than the bound.
+let classifierSlow = false
+
+type LateOptions = { decideOptions: DecideOptions; timeoutMs: number; enabled: boolean }
+
+/**
+ * A label that missed the bound still decides the rest of the turn: turn.step
+ * reads the state before every request, so the steps after the first tool call
+ * run on it. A newer prompt, or a pin made meanwhile, wins over it.
+ */
+async function applyLate($: EngineInterface, labels: PromptLabels, seq: number, waited: boolean, o: LateOptions): Promise<void> {
+  const got = await labels.settled
+  // Missing a bound it waited for makes it late by definition; otherwise the
+  // answer's real latency says whether the classifier is back under the bound.
+  classifierSlow = waited || got.ms > o.timeoutMs
+  const current = seq === promptSeq
+  const tier = labels.tierTimedOut ? got.tier : undefined
+  const effort = labels.effortTimedOut ? got.effort : undefined
+  if (current && (tier !== undefined || effort !== undefined)) {
+    let s = await update($, state, v => (tier !== undefined && v.source !== 'pinned' ? decide(v, tier, o.decideOptions) : v))
+    s = await update($, state, v => (effort !== undefined && v.effortSource !== 'pinned' ? decideEffort(v, effort, o.decideOptions) : v))
+    void show($, s, o.enabled)
+  }
+  await logEvent($, { event: 'classifier-late', ms: got.ms, applied: current, waited })
 }
 
 export const register: Register = (on, options) => {
@@ -332,14 +368,21 @@ export const register: Register = (on, options) => {
     let s = current
     const wantTier = current.source !== 'pinned'
     const wantEffort = routeEffort && current.effortSource !== 'pinned'
-    const labels = await labelPrompt($, e.text, { model: classifierModel, timeoutMs: classifierTimeoutMs, maxAuto, wantTier, wantEffort })
+    const seq = ++promptSeq
+    // While the classifier is slower than the bound (measured: whole sessions
+    // at ~21 s a call), waiting only delays the prompt; the label still lands
+    // late, for the rest of the turn.
+    const waited = !classifierSlow
+    const labels = await labelPrompt($, e.text, { model: classifierModel, timeoutMs: waited ? classifierTimeoutMs : 0, maxAuto, wantTier, wantEffort })
+    if (labels.tierTimedOut || labels.effortTimedOut) void applyLate($, labels, seq, waited, { decideOptions, timeoutMs: classifierTimeoutMs, enabled }).catch(() => undefined)
+    else classifierSlow = false
     const proposed = labels.tier
     const effort = labels.effort
     if (proposed) s = await update($, state, v => decide(v, proposed, decideOptions))
     if (effort) s = await update($, state, v => decideEffort(v, effort, decideOptions))
     const kept = { tier: s.tier, effort: s.effort }
-    if (labels.tierTimedOut) await logTimeout($, { classifier: 'tier', ranMs: classifierTimeoutMs, kept })
-    if (labels.effortTimedOut) await logTimeout($, { classifier: 'effort', ranMs: classifierTimeoutMs, kept })
+    if (waited && labels.tierTimedOut) await logEvent($, { event: 'classifier-timeout', classifier: 'tier', ranMs: classifierTimeoutMs, kept })
+    if (waited && labels.effortTimedOut) await logEvent($, { event: 'classifier-timeout', classifier: 'effort', ranMs: classifierTimeoutMs, kept })
     void show($, s, enabled)
     // The note asks the model to review the pick. Measured with inkblot on
     // 2026-10-29: 0 of 6 set_tier calls when the pick stood. So it speaks only
@@ -441,7 +484,7 @@ export const register: Register = (on, options) => {
     const { tier, tierTimedOut } = await labelPrompt($, e.prompt, { model: classifierModel, timeoutMs: classifierTimeoutMs, maxAuto, wantTier: true, wantEffort: false })
     if (tierTimedOut) {
       const s = await read($, state)
-      await logTimeout($, { classifier: 'subagent', ranMs: classifierTimeoutMs, kept: { tier: s.tier, effort: s.effort } })
+      await logEvent($, { event: 'classifier-timeout', classifier: 'subagent', ranMs: classifierTimeoutMs, kept: { tier: s.tier, effort: s.effort } })
     }
     return next(tier ? { ...e, model: models[tier] } : e)
   }).catch(($, e, next) => next(e))

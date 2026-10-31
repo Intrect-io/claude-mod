@@ -492,6 +492,110 @@ describe('the plugin', () => {
     expect((files.get(LOG) ?? '').trim().split('\n')).toHaveLength(2)
   })
 
+  describe('a label that misses the bound', () => {
+    function lateWorld(on: Parameters<Parameters<typeof test>[1]>[1]) {
+      const clock = mock.clock(on, { now: 1_000 })
+      on('ui.status', () => ({ value: undefined }))
+      on('session.model', () => ({ value: 'claude-sonnet-5-5' }))
+      on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1000000 }, rateLimits: [] } }))
+      on('tool.register', () => ({ value: { tool: 'mcp__model-tier__set_tier' } }))
+      on('command.register', () => ({ value: { command: 'tier' } }))
+      on('session.start', (_, e) => ({ cwd: e.cwd }))
+      on('session.id', () => ({ value: 'live' }))
+      on('prompt.submit', (_, e) => ({ text: e.text }))
+      mock.env(on, { HOME: '/h' })
+      const files = new Map<string, string>()
+      on('fs.read', (_, e) => {
+        const text = files.get(e.path)
+        return text === undefined ? { deny: 'ENOENT' } : { value: text }
+      })
+      on('fs.write', (_, e) => {
+        files.set(e.path, e.text)
+        return { value: undefined }
+      })
+      // Each classify call parks until the test answers it; `ready` answers at once.
+      const parked: Array<(label: string) => void> = []
+      let ready: string | undefined
+      on('model.classify', (_, e) => {
+        const tierCall = (e.labels as readonly string[]).includes('complex')
+        if (ready !== undefined) return { value: tierCall ? ready : 'routine-reasoning' }
+        return new Promise(resolve => parked.push(label => resolve({ value: tierCall ? label : 'routine-reasoning' })))
+      })
+      const sent: string[] = []
+      on('turn.step', async function* (_, e) {
+        sent.push(e.model)
+        return answered(e)
+      })
+      const late = () =>
+        (files.get('/h/.claude/model-tier.log') ?? '')
+          .trim()
+          .split('\n')
+          .filter(line => line !== '')
+          .map(line => JSON.parse(line) as Record<string, unknown>)
+          .filter(line => line.event === 'classifier-late')
+      // The late label crosses the engine (state, fs) after the hook returned.
+      const settle = async () => {
+        for (let i = 0; i < 20; i++) await new Promise(resolve => setTimeout(resolve, 1))
+      }
+      return { clock, parked, sent, late, settle, setReady: (label: string | undefined) => (ready = label) }
+    }
+
+    test('it still decides the rest of the turn once it arrives', async ($, on) => {
+      const w = lateWorld(on)
+      await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+      const submitted = $.prompt.submit({ text: 'Redesign the cache layer across these services', wait: false, origin: { kind: 'composer' } })
+      await w.clock.advance(3_000)
+      await submitted
+      await drain($.turn.step({ ...STEP, model: 'claude-sonnet-5-5' }))
+      expect(w.sent).toEqual(['claude-sonnet-5-5'])
+
+      for (const answer of w.parked.splice(0)) answer('complex')
+      await w.settle()
+      await drain($.turn.step({ ...STEP, model: 'claude-sonnet-5-5' }))
+      expect(w.sent).toEqual(['claude-sonnet-5-5', 'claude-opus-5-5'])
+      expect(w.late()).toMatchObject([{ event: 'classifier-late', applied: true, waited: true }])
+    })
+
+    test('while the classifier is slow the prompt does not wait; an answer in time ends that', async ($, on) => {
+      const w = lateWorld(on)
+      await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+      const first = $.prompt.submit({ text: 'Redesign the cache layer across these services', wait: false, origin: { kind: 'composer' } })
+      await w.clock.advance(3_000)
+      await first
+      for (const answer of w.parked.splice(0)) answer('complex')
+      await w.settle()
+
+      // Slow now: the next prompt goes on with no clock advance at all.
+      w.setReady('trivial')
+      await $.prompt.submit({ text: 'what time is it', wait: false, origin: { kind: 'composer' } })
+      await w.settle()
+      expect(w.late().map(line => line.waited)).toEqual([true, false])
+
+      // That answer came in time, so the third prompt waits for its label again.
+      await $.prompt.submit({ text: 'rename this variable', wait: false, origin: { kind: 'composer' } })
+      await w.settle()
+      expect(w.late()).toHaveLength(2)
+    })
+
+    test('a newer prompt wins over a late label for an older one', async ($, on) => {
+      const w = lateWorld(on)
+      await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+      const first = $.prompt.submit({ text: 'Redesign the cache layer across these services', wait: false, origin: { kind: 'composer' } })
+      await w.clock.advance(3_000)
+      await first
+      const older = w.parked.splice(0)
+
+      w.setReady('trivial')
+      await $.prompt.submit({ text: 'what time is it', wait: false, origin: { kind: 'composer' } })
+      await w.settle()
+      for (const answer of older) answer('exceptionally-hard')
+      await w.settle()
+      await drain($.turn.step({ ...STEP, model: 'claude-sonnet-5-5' }))
+      expect(w.sent).not.toContain('claude-opus-5-5')
+      expect(w.late().find(line => line.waited === true)).toMatchObject({ applied: false })
+    })
+  })
+
   test('the turn note appears only when it changes: first turn, a new pick, a held downgrade or a timeout', async ($, on) => {
     const clock = mock.clock(on, { now: 1_000 })
     on('ui.status', () => ({ value: undefined }))
