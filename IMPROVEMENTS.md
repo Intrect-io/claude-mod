@@ -30,6 +30,8 @@ P2: cost, upkeep or polish.
 
 ### goal-mode: the plugin's own evaluator path is now mostly dead code that still has to be kept
 
+- **Status:** resolved in #20 (goal-mode 0.7.0). `/goal` is the only session-goal path, the `nativeGoal` option and the fallback evaluator are gone, and `evaluate` judges only the loop's queued goals.
+
 - **Evidence.**
   - With `/goal` present, `useNative` sends every goal there (`goal-mode/hooks/register.tsx:336`). Only the loop's queue goals still reach `evaluate` (`goal-mode/hooks/register.tsx:1082`).
   - The pause rules, the intent check and refine-once (0.4.0) apply only where `/goal` is absent.
@@ -48,6 +50,8 @@ P2: cost, upkeep or polish.
 
 ### statusline pieces: never cleared, never collected
 
+- **Status (2026-11-01):** the sweep landed in harness 0.3.2 (#19). Once a day it moves stale folders to `~/.claude/trash/statusline/`: all-empty ones after 1 day, ones that still hold text after 14 days.
+
 - **Status:** resolved for new pieces: each mod clears its status line piece at `session.end`, by the ending session's id, so `/clear` cannot orphan it. The same "session.end" test in each mod proves it. Not done: sweeping folders left by older sessions. The hub that was to run it is gone (see the plan's decisions).
 - **Evidence.** `*/hooks/segment.ts` (`let last` at line 10) writes `~/.claude/statusline/<session>/<mod>.txt`. Nothing clears it at `session.end` (`fleet/hooks/register.ts:309` ends without `segment($, '')`). Measured: 12 session folders already, most for sessions that have ended.
 - **Fix.**
@@ -62,6 +66,8 @@ P2: cost, upkeep or polish.
 
 ### model-tier: two classifier calls per prompt
 
+- **Status:** resolved in #22 (model-tier 0.6.0), by a different fix than proposed below. A probe showed one combined call is slower (p50 1881 ms against 1455 ms), and the eval found whole sessions at about 21 s per call. So a late label now decides the rest of the turn, and a slow classifier stops holding prompts. `classifier-late` log lines record the real latency for tuning.
+
 - **Evidence.**
   - `model-tier/hooks/register.ts:277` runs `classify` and `classifyEffort` in parallel on every prompt. Measured: 0.9–1.9 s each on haiku, and the slower one gates the prompt.
   - With `classifierTimeoutMs` 3000 (`model-tier/hooks/register.ts:197`), a timeout keeps the old tier. Measured once: a design prompt stayed `haiku·low` after a trivial one.
@@ -71,6 +77,8 @@ P2: cost, upkeep or polish.
   - Log timeouts to `~/.claude/model-tier.log` so the 3 s bound can be tuned from data.
 
 ### model-tier: label names steer the classifier; nothing checks a rename
+
+- **Status:** resolved in #21. `/tier eval` runs the production `labelPrompt` over `model-tier/eval/prompts.jsonl`, and `baseline.json` holds 4 runs. Open: effort is wrong in a systematic way on mechanical edits (5 of 9 `low` prompts come back `medium`), and the README gate number (effort 0.583) is tighter than the measured spread (0.125).
 
 - **Evidence.** `model-tier/hooks/register.ts:26`. Measured: the label `quick-answer` sent a hard design question ("세 줄 이내로") to `low`. The renamed `tricky-problem` labels sent it to `high`. And `exceptionally-hard` routed a novel BFT-protocol design prompt to fable, which answered after 8 min 7 s.
 - **Fix.** Add a small eval: 20 labelled prompts in `model-tier/eval/prompts.jsonl`, run by `claude plugin eval` (or `bun model-tier/eval/run.ts`) against haiku. Fail when tier or effort accuracy drops below the last run, so a label rename is measured before it ships.
