@@ -66,6 +66,7 @@ showing the session's configured model: this mod rewrites requests, not the sett
 - `/tier fable|opus|sonnet|haiku`: pin a tier. The classifier and `set_tier` leave it alone.
 - `/tier auto`: return to automatic routing
 - `/tier effort low|medium|high|xhigh|max`: pin the effort. `/tier effort auto` releases it.
+- `/tier eval [path]`: run the classifier eval (see [Classifier eval](#classifier-eval))
 
 ## Options (`userConfig`)
 
@@ -87,6 +88,40 @@ claude plugin validate model-tier
 claude plugin test model-tier
 claude --plugin-dir ./model-tier
 ```
+
+## Classifier eval
+
+Label names steer the classifier: renaming one effort label moved a hard design
+prompt from `low` to `high`. The eval measures a label or classifier change
+before it ships.
+
+```sh
+claude -p --plugin-dir model-tier "/tier eval model-tier/eval/prompts.jsonl"
+```
+
+- `eval/prompts.jsonl` holds one `{"prompt", "tier", "effort", "why"}` per line:
+  the expected tier and effort, by the label meanings in `hooks/label.ts`, and why.
+  Borderline prompts are kept on purpose, and their `why` names which way they lean.
+- `/tier eval [path]` labels each prompt one at a time with `labelPrompt`, the same
+  function the prompt hook and subagent routing call. It uses the configured
+  `classifierModel` and a 30 s timeout, so a slow answer is still scored.
+- The tier is scored uncapped (`maxAutoTier` is routing policy applied after the label),
+  so `exceptionally-hard` reads as `fable`.
+- The run is written to `last-run.json` beside the prompt set. It holds per-prompt results,
+  tier and effort accuracy, timeouts, latency p50/p90/max, and how many prompts took longer
+  than `classifierTimeoutMs` (those keep the old pick in a session).
+- `eval/baseline.json` records four live runs on the committed prompt set, with per-prompt
+  hits. Tier accuracy ranged 0.667 to 0.75 and effort accuracy 0.5 to 0.625, so the spread is
+  0.083 (2 prompts) for tier and 0.125 (3 prompts) for effort.
+- Two of the four runs hit a ~21 s per-call latency floor (likely the endpoint behind
+  `ANTHROPIC_BASE_URL`; not traced), and one of those lost 3 prompts to the 30 s bound.
+  Look at `timeouts` before reading accuracy.
+
+**Rule.** A change to a label, the label prompt or the classification call must not drop
+tier or effort accuracy below the baseline minus the run-to-run spread. Today that is tier
+0.708 and effort 0.583: the lowest baseline run without timeouts. Run the eval at least twice
+on the change, rerun any run that reports timeouts, and every remaining run must meet both
+numbers. When the prompt set changes, record a new baseline in the same PR.
 
 ## Behaviour to know
 

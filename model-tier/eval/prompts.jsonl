@@ -1,0 +1,24 @@
+{"prompt": "git stash pop이랑 git stash apply 차이가 뭐야?", "tier": "haiku", "effort": "low", "why": "Lookup of a git fact."}
+{"prompt": "In README.md only, rename every `classifierTimeoutMs` mention to `classifierBudgetMs`.", "tier": "haiku", "effort": "low", "why": "Mechanical edit in one file."}
+{"prompt": "마지막 커밋 메시지 오타만 고쳐줘: 'fix(harnes)' -> 'fix(harness)'. amend로.", "tier": "haiku", "effort": "low", "why": "Git chore, one command."}
+{"prompt": "What's the Nyquist frequency for 48 kHz audio?", "tier": "haiku", "effort": "low", "why": "Trivia."}
+{"prompt": "requirements-dev.txt에 pytest-xdist 추가하고 venv에 설치해줘", "tier": "haiku", "effort": "low", "why": "Two mechanical steps."}
+{"prompt": "Format this as 2-space indented JSON: {\"a\":1,\"b\":{\"c\":[1,2,3]}}", "tier": "haiku", "effort": "low", "why": "Formatting."}
+{"prompt": "README Options 표에 routeEffort 행이 빠졌어. 다른 행 형식 그대로 추가해줘.", "tier": "haiku", "effort": "low", "why": "Borderline haiku/sonnet: a doc edit that copies an existing row format."}
+{"prompt": "ModuleNotFoundError: No module named 'mlx' 이거 왜 나?", "tier": "haiku", "effort": "low", "why": "Borderline: an error message, but the answer is the known venv rule, not debugging."}
+{"prompt": "thanks, looks good", "tier": "haiku", "effort": "low", "why": "Acknowledgement."}
+{"prompt": "Add a --dry-run flag to scripts/reload-sessions.sh that prints which sessions it would reload instead of reloading them.", "tier": "sonnet", "effort": "medium", "why": "Routine implementation in one script."}
+{"prompt": "load_audio 함수에 대해 pytest fixture로 임시 wav 만들어서 테스트 3개 추가해줘 (mono, stereo, 빈 파일).", "tier": "sonnet", "effort": "medium", "why": "Routine test writing."}
+{"prompt": "Write a Python function si_sdr(ref, est) over numpy arrays with a docstring and a zero-mean step.", "tier": "sonnet", "effort": "medium", "why": "Known formula, routine code."}
+{"prompt": "harness repo-size 테스트에 정확히 5 GB 경계값 케이스 하나 추가해줘.", "tier": "sonnet", "effort": "medium", "why": "Routine test addition next to existing ones."}
+{"prompt": "Convert this argparse CLI in train.py to typer, keeping every flag name and default.", "tier": "sonnet", "effort": "medium", "why": "Routine mechanical-ish port with some care."}
+{"prompt": "Port the Moog ladder filter from the musicdsp snippet to Rust for nih-plug, with 2x oversampling.", "tier": "sonnet", "effort": "medium", "why": "Borderline sonnet/opus and medium/high: a port of known code, but oversampling adds design choices."}
+{"prompt": "Explain why a trapezoidal-integrated SVF stays stable at high cutoff where a naive Chamberlin SVF blows up.", "tier": "sonnet", "effort": "high", "why": "Borderline: no code, but the explanation needs a careful derivation."}
+{"prompt": "Our STFT denoiser has a metallic ringing artifact only on 44.1 kHz input, not 48 kHz. Find the cause.", "tier": "opus", "effort": "high", "why": "Debugging with an unknown cause."}
+{"prompt": "학습 중 loss가 3 epoch 이후 NaN이 돼. mixed precision 켜져 있고 grad clipping은 1.0이야. 원인 찾아서 고쳐줘.", "tier": "opus", "effort": "high", "why": "Debugging across training config, precision and data."}
+{"prompt": "goal-mode와 auto-claude가 같은 .claude/goals.md를 동시에 쓰는 경합이 있어. 공유 자체를 없애는 쪽으로 설계 바꿔줘.", "tier": "opus", "effort": "high", "why": "Concurrency design across two mods."}
+{"prompt": "Make the order executor's retries idempotent across process restarts; it touches the broker client, the order store and the scheduler.", "tier": "opus", "effort": "high", "why": "Multi-file refactor with correctness stakes."}
+{"prompt": "Short answer please: should model-tier classify every prompt, or only when the topic changes? Three lines max.", "tier": "opus", "effort": "high", "why": "The measured trap: a design question asking for a short reply. Depth, not length."}
+{"prompt": "Design the wire protocol between the plugin host and a remote fleet-hub over Tailscale: auth, backpressure, reconnect and replay semantics.", "tier": "opus", "effort": "xhigh", "why": "Open protocol design with several interacting concerns; borderline high/xhigh."}
+{"prompt": "Opus failed twice at this: invent a vocoder training loss that removes phase artifacts without a discriminator. Survey what exists, propose one, and derive its gradient.", "tier": "fable", "effort": "xhigh", "why": "Novel research where opus already failed."}
+{"prompt": "Prove our sticky downgrade rule (step down after N consecutive lower verdicts, upgrade at once) can never oscillate forever under any verdict sequence, or give a counterexample, and redesign it across tier, effort and subagent routing if it can.", "tier": "fable", "effort": "xhigh", "why": "Proof plus redesign across several routing systems."}
