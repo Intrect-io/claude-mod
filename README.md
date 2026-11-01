@@ -6,7 +6,7 @@ Claude Code mods (plugins with a hooks module), served as a local folder marketp
 | --- | --- | --- |
 | [goal-mode](goal-mode/) | 0.7.0 | Session goals, handed to Claude Code's own `/goal`: set by you (`/goal-mode set <condition> [--check <cmd>]`) or by Claude itself (nudged on outcome requests and approved plans); its own evaluator judges only the loop's queued goals |
 | [harness](harness/) | 0.3.2 | The integrated harness: the user's Claude rules enforced at the tool call, session tooling and workflow automation (formerly house-rules) |
-| [auto-claude](auto-claude/) | 0.2.9 | Unattended run of a repository on top of goal-mode's loop: plans the long-term goal and milestones, ships each (push, PR, CI, merge when green), replans until the final check passes |
+| [auto-claude](auto-claude/) | 0.3.0 | Unattended run of a repository on top of goal-mode's loop: plans the long-term goal and milestones, ships each (push, PR, CI, merge when green, then deploy where `.claude/auto-deploy.json` opts in), replans until the final check passes |
 | [model-tier](model-tier/) | 0.6.0 | Routes each main-loop turn to fable, opus, sonnet or haiku and a reasoning effort by task complexity, with a `set_tier` tool the model calls to correct either |
 
 ## Install
@@ -19,7 +19,7 @@ claude plugin install model-tier@claude-mod
 claude plugin install auto-claude@claude-mod   # needs goal-mode
 ```
 
-For development, add a local clone instead (`claude plugin marketplace add /path/to/claude-mod`): installed plugins are then read from that folder directly, and after an edit `/reload-plugins` in a session picks it up. `scripts/reload-sessions.sh --apply [--host <ssh host>]` sends it to every idle session in tmux, here or on another machine. No reinstall or version bump is needed.
+For development, add a local clone instead (`claude plugin marketplace add /path/to/claude-mod`): installed plugins are then read from that folder directly, and after an edit `/reload-plugins` in a session picks it up. `scripts/reload-sessions.sh --apply [--host <ssh host>]` sends it to every idle session in tmux, here or on another machine, but never to the session running the script. No reinstall or version bump is needed. `scripts/deploy.sh` does the whole deploy: it fast-forwards the checkout here and on vela, updates every installed mod, and reloads idle sessions. auto-claude runs it after each merge in this repository (`.claude/auto-deploy.json`).
 
 ## Develop
 
