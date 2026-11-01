@@ -62,6 +62,9 @@ export type AutoRecord = {
   merges: number
   held: number
   queueEmpty: boolean
+  // .claude/auto-deploy.json as it was when the run started; unset: no deploys.
+  deploy?: { command: string; codeql: string[]; timeoutMs: number }
+  deploys?: number
   note?: string
 }
 

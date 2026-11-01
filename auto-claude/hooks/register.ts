@@ -3,6 +3,8 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 import type { AutoRecord, ShipItem } from '../types'
 import { fixLine, kickoffText, parseQueue, planNudgeText, POLICY, READY_TOOL, replanText, validatePlan } from './plan'
 import { segment } from './segment'
+import { codeqlSuite, countSarif, DEPLOY_FILE, parseDeploy } from './deploy'
+import type { DeploySpec } from './deploy'
 import { capReached, diagnose, gateCredit, inFlight, MAX_RED, mergeable, parseChecks, prNumber, readLog, summary } from './ship'
 import type { Caps } from './ship'
 
@@ -318,9 +320,18 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
     for (const path of new Set([item.worktree, r.worktrees[item.headRef]].filter((p): p is string => p !== undefined))) {
       await run($, ['git', '-C', r.root, 'worktree', 'remove', path], r.root)
     }
-    const next = { ...r, merges: r.merges + 1 }
-    await tell($, next, `merged${item.pr !== undefined ? ` PR #${item.pr}` : ` into ${r.defaultBranch}`}: ${item.goal.slice(0, 80)}`)
-    return { r: next, item: update({ state: 'merged', note: undefined }) }
+    let next: AutoRecord = { ...r, merges: r.merges + 1 }
+    const landed = item.pr !== undefined ? `PR #${item.pr}` : `into ${r.defaultBranch}`
+    await tell($, next, `merged ${landed}: ${item.goal.slice(0, 80)}`)
+    const merged = update({ state: 'merged', note: undefined })
+    if (r.deploy !== undefined) {
+      const failed = await deployMerged($, next, r.deploy)
+      // What is live may now differ from what was merged: no more merges on top of it.
+      if (failed !== undefined) return { r: await stopRun($, next, `the deploy after ${landed} failed: ${failed}`), item: merged }
+      next = { ...next, deploys: (next.deploys ?? 0) + 1 }
+      await tell($, next, `deployed after ${landed}`)
+    }
+    return { r: next, item: merged }
   }
 
   const red = item.red + 1
@@ -334,6 +345,44 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
   const queue = (await readText($, FILES(r.root).queue)) ?? ''
   await $.fs.write(FILES(r.root).queue, `${queue}${queue === '' || queue.endsWith('\n') ? '' : '\n'}${line}\n`)
   return { r: { ...r, fixes: { ...r.fixes, [condition]: item.headRef } }, item: update({ state: 'fixing', red, note: failure }) }
+}
+
+// Deploys what the default branch now holds, from a fresh detached checkout of
+// it. Returns why it failed, or undefined.
+async function deployMerged($: EngineInterface, r: AutoRecord, spec: DeploySpec): Promise<string | undefined> {
+  const dir = `${r.root}/worktrees/auto-deploy`
+  await run($, ['git', '-C', r.root, 'worktree', 'remove', '--force', dir], r.root)
+  await run($, ['git', '-C', r.root, 'fetch', '-q', r.remote], r.root)
+  const made = await run($, ['git', '-C', r.root, 'worktree', 'add', '--detach', dir, `${r.remote}/${r.defaultBranch}`], r.root)
+  if (made.exitCode !== 0) return `no checkout of ${r.remote}/${r.defaultBranch}: ${out(made)}`
+  try {
+    for (const language of spec.codeql) {
+      const blocked = await codeqlGate($, r, dir, language)
+      if (blocked !== undefined) return blocked
+    }
+    const ran = await run($, ['bash', '-lc', spec.command], dir, spec.timeoutMs)
+    return ran.exitCode === 0 ? undefined : `\`${spec.command}\` exited ${ran.exitCode}: ${out(ran)}`
+  } finally {
+    await run($, ['git', '-C', r.root, 'worktree', 'remove', '--force', dir], r.root)
+  }
+}
+
+// CodeQL before a deploy (CLAUDE.md §5): any error-level result blocks it.
+// The database and SARIF stay outside the repository, in $TMPDIR.
+async function codeqlGate($: EngineInterface, r: AutoRecord, dir: string, language: string): Promise<string | undefined> {
+  const tmp = ((await $.env.get('TMPDIR')) ?? '/tmp').replace(/\/$/, '')
+  const name = `${r.root.split('/').pop() ?? 'repo'}-${language}`
+  const db = `${tmp}/auto-claude-codeql-${name}`
+  const sarif = `${tmp}/auto-claude-codeql-${name}.sarif`
+  const created = await run($, ['codeql', 'database', 'create', db, `--language=${language}`, '--source-root', dir, '--overwrite'], dir, 600_000)
+  if (created.exitCode !== 0) return `CodeQL could not build a ${language} database: ${out(created)}`
+  const analyzed = await run($, ['codeql', 'database', 'analyze', db, codeqlSuite(language), '--format=sarif-latest', `--output=${sarif}`], dir, 600_000)
+  if (analyzed.exitCode !== 0) return `CodeQL ${language} analysis failed: ${out(analyzed)}`
+  const counted = countSarif((await readText($, sarif)) ?? '')
+  if (counted === undefined) return `CodeQL wrote no readable SARIF at ${sarif}`
+  if (counted.errors > 0) return `CodeQL found ${counted.errors} error-level result(s) in ${language} (${counted.top.join('; ')}); SARIF at ${sarif}`
+  if (counted.warnings > 0) await tell($, r, `CodeQL ${language}: ${counted.warnings} warning(s), no errors; SARIF at ${sarif}`)
+  return undefined
 }
 
 async function finalCheck($: EngineInterface, r: AutoRecord, caps: Caps): Promise<AutoRecord> {
@@ -520,6 +569,11 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string): P
   const defaultBranch = head.startsWith(`${remote}/`) ? head.slice(remote.length + 1) : 'main'
   const mode = ciMode === 'github' || ciMode === 'local' ? ciMode : (await run($, ['gh', 'repo', 'view', '--json', 'name'], root, 30_000)).exitCode === 0 ? 'github' : 'local'
 
+  // Read once: what this run deploys cannot change while it runs.
+  const deployText = await readText($, `${root}/${DEPLOY_FILE}`)
+  const deploy = deployText === undefined ? undefined : parseDeploy(deployText)
+  if (deploy !== undefined && 'error' in deploy) return `Not started: ${deploy.error}.`
+
   const f = FILES(root)
   await ensureLines($, f.exclude, EXCLUDES, '# auto-claude')
   const stop = await clearStop($, root)
@@ -551,17 +605,19 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string): P
     merges: 0,
     held: 0,
     queueEmpty: false,
+    ...(deploy === undefined ? {} : { deploy, deploys: 0 }),
   }
   await $.fs.write(f.gate, '0\n')
   activeRoot = root
   await writeRecord($, r)
-  const text = kickoffText(hint, `${remote}/${defaultBranch}`)
+  const text = `${kickoffText(hint, `${remote}/${defaultBranch}`)}${deploy === undefined ? '' : `\n- auto-claude deploys after each merge (${DEPLOY_FILE}). Plan no deploy milestone and never deploy yourself.`}`
   $.clock.after(100, () => {
     $.prompt.submit({ text }).catch(() => $.ui.toast('auto-claude: the planning prompt was not submitted; send any message to start.'))
   })
 
   const moved = where.used === where.cwd ? '' : ` (the session's directory ${where.cwd} no longer exists; used ${where.used})`
-  return `auto-claude on in ${root}${moved} (${mode} CI, merges into ${defaultBranch}). Claude plans the run now.${clearedNote(stop)}`
+  const deploys = deploy === undefined ? '' : `, deploys after each merge with \`${deploy.command}\`${deploy.codeql.length > 0 ? ` after a CodeQL scan (${deploy.codeql.join(', ')})` : ''}`
+  return `auto-claude on in ${root}${moved} (${mode} CI, merges into ${defaultBranch}${deploys}). Claude plans the run now.${clearedNote(stop)}`
 }
 
 async function stallLine($: EngineInterface, r: AutoRecord): Promise<string | undefined> {
@@ -586,6 +642,7 @@ async function statusText($: EngineInterface): Promise<string> {
   const queue = parseQueue((await readText($, FILES(r.root).queue)) ?? '')
   const lines = [
     `auto-claude ${r.on ? 'on' : 'off'} · phase ${r.phase} · round ${r.round} · ${r.ciMode} CI into ${r.defaultBranch}`,
+    r.deploy !== undefined ? `deploys after each merge: \`${r.deploy.command}\`${r.deploy.codeql.length > 0 ? ` (CodeQL ${r.deploy.codeql.join(', ')} first)` : ''} · ${r.deploys ?? 0} so far` : undefined,
     `queue: ${queue.filter(i => i.mark === 'x').length} done, ${queue.filter(i => i.mark === '!').length} blocked, ${queue.filter(i => i.mark === ' ').length} pending · ${summary(r.merges, r.held, r.ships)}`,
     ...r.ships.filter(s => s.state !== 'merged').map(s => `- ${s.state}${s.pr !== undefined ? ` PR #${s.pr}` : ''}: ${s.goal.slice(0, 70)}${s.note ? ` (${s.note.slice(0, 80)})` : ''}`),
     r.note !== undefined ? `note: ${r.note}` : undefined,

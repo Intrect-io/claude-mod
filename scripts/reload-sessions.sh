@@ -44,12 +44,24 @@ pane_for() {
   done
 }
 
+# The session running this script (an auto-claude deploy, say) is never sent a
+# reload: its turn is still running the script.
+declare -A ancestor
+p=$$
+while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+  ancestor[$p]=1
+  p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+done
+
 reloaded=0
 skipped=0
 for f in "$HOME"/.claude/sessions/[0-9]*.json; do
   [ -e "$f" ] || continue
   pid=$(basename "$f" .json)
   kill -0 "$pid" 2>/dev/null || continue
+  if [ -n "${ancestor[$pid]:-}" ]; then
+    echo "skip  session $pid: runs this script"; skipped=$((skipped + 1)); continue
+  fi
   read -r name status < <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("name") or d.get("sessionId","?"), d.get("status","?"))' "$f")
   pane=$(pane_for "$pid")
   if [ -z "$pane" ]; then
