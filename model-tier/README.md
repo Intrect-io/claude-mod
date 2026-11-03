@@ -44,8 +44,17 @@ only by `/tier fable` unless `maxAutoTier` allows it.
   asks for one keeps the current tier.
 - **Switching.** A `turn.step` hook rewrites the `model` of every main-loop request.
   Subagent steps are untouched.
-- **Subagents.** `general-purpose` / `claude` spawns with no explicit model get a
-  model from the same classifier. Agent types that define their own model keep it.
+- **Subagents.** A spawn with no explicit model whose type is in `routableAgents`
+  (default `general-purpose,claude,Explore`) gets a model from the same classifier.
+  Other types keep their definition's model, or the parent's. Subagents start with a
+  fresh context, so routing one rewrites no cached prefix. Forks share the parent's
+  prefix and are never routed.
+  - Explore was added after a live probe on 2026-11-04 (Claude Code 2.1.317, a probe mod
+    logging `agent.spawn` and `turn.step`). An Explore spawn arrived with `model: null`,
+    and its steps ran on the parent's `claude-opus-5-5`. Over the 14 days before, Explore
+    made 1,816 opus requests. It is read-only search, so a `trivial` label sends it to haiku.
+  - To drop a type, set `routableAgents` without it, e.g. `general-purpose,claude` to keep
+    Explore on the parent's model. An empty value routes no subagent.
 - **Sticky tiers.** Upgrades apply at once. Downgrades need `downgradeAfterTurns`
   consecutive lower verdicts, because every switch re-bills the conversation
   prefix outside the prompt cache. Before the session has sent anything there
@@ -98,6 +107,7 @@ showing the session's configured model: this mod rewrites requests, not the sett
 | `classifierTimeoutMs` | `3000` | keep the current tier and effort when classifying takes longer |
 | `routeEffort` | `true` | also classify and send a reasoning effort per turn |
 | `followUpChars` | `40` | a prompt this short or shorter may raise the pick, never lower it |
+| `routableAgents` | `general-purpose,claude,Explore` | subagent types routed by the classifier when spawned without a model |
 | `maxAutoTier` | `opus` | highest tier the classifier, subagent routing and `set_tier` may pick; `fable` lifts the cap |
 
 ## Development
