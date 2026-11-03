@@ -97,6 +97,15 @@ P2: cost, upkeep or polish.
   - Done: `canTierChange` in `model-tier/hooks/register.ts` (pinned, or at `maxAutoTier` past the ceiling: classify effort only).
   - Open, CC-Router: let short, non-streaming, tool-less requests (the classifier's) skip the throttle wait or go to the front, and log each throttle wait. Then re-run `/tier eval` and the two scripts.
 
+### model-tier: a short follow-up stepped a session down mid-task
+
+- **Status:** resolved in model-tier 0.9.0 (`followUpChars`, default 40). The tests named "short follow-up" cover it.
+- **Evidence.**
+  - The classifier sees only the prompt's own text, so "continue", "다음 단계 진행해" or "릴리즈해" comes back `trivial` / `recall-or-lookup`.
+  - Under the 200k context ceiling, two such prompts in a row completed a downgrade to haiku·low in the middle of the work.
+  - 14 days of transcripts (2026-11-03): 51% of 2,668 real prompts were 40 characters or fewer, and 31% were 20 or fewer. Most of the 40 sampled continued the work in progress.
+- **Fix.** A short prompt in a session that has sent requests may raise the tier or effort but never lowers them. It leaves a pending downgrade as it is. The rule sits in `decide`/`decideEffort`, so a late label obeys it too. The first prompt of a session still applies at once.
+
 ### Tried and dropped: a haiku digest of large Bash output (2026-11-03)
 
 - **Idea.** A large Bash result goes to haiku first, and opus gets only the relevant lines, verbatim, plus a spill file holding the full output.

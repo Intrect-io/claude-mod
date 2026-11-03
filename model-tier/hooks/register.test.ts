@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { AgentSpawnInput, HookStream, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import type { TierState } from '../types'
-import { canTierChange, capTier, decide, decideEffort, INITIAL, isTier, maxAutoTier, modelFor, providerOf, providerTierModels, tierModels } from './register'
+import { canTierChange, capTier, decide, decideEffort, INITIAL, isFollowUp, isTier, maxAutoTier, modelFor, providerOf, providerTierModels, tierModels } from './register'
 
 const OPTS = { downgradeAfterTurns: 2, maxTokensForHaiku: 150000, maxTokensForDowngrade: 200000 }
 const at = (over: Partial<TierState>): TierState => ({ ...INITIAL, ...over })
@@ -96,6 +96,31 @@ describe('decide', () => {
   test('isTier reads resolved ids', () => {
     expect(isTier('claude-opus-5-5[1m]', 'opus')).toBe(true)
     expect(isTier('claude-haiku-5-5', 'sonnet')).toBe(false)
+  })
+})
+
+describe('short follow-up', () => {
+  test('a short follow-up never lowers the tier nor touches a pending downgrade; a higher verdict still applies', () => {
+    const sent = at({ tier: 'opus', lastInputTokens: 5000 })
+    expect(isFollowUp('  continue ', 40)).toBe(true)
+    expect(isFollowUp('Redesign the cache layer across these three services', 40)).toBe(false)
+    expect(decide(decide(sent, 'haiku', OPTS, true), 'haiku', OPTS, true)).toEqual(sent)
+    // A downgrade under way neither advances nor resets.
+    const pending = decide(sent, 'sonnet', OPTS)
+    expect(decide(pending, 'opus', OPTS, true)).toEqual(pending)
+    expect(decide(decide(pending, 'sonnet', OPTS, true), 'sonnet', OPTS).tier).toBe('sonnet')
+    // Up still goes at once.
+    expect(decide(at({ tier: 'sonnet', lastInputTokens: 5000 }), 'opus', OPTS, true).tier).toBe('opus')
+  })
+
+  test('a short follow-up never lowers the effort; the first prompt of a session still applies at once', () => {
+    const sent = at({ effort: 'xhigh', lastInputTokens: 5000 })
+    expect(decideEffort(decideEffort(sent, 'low', OPTS, true), 'low', OPTS, true)).toEqual(sent)
+    expect(decideEffort(at({ effort: 'medium', lastInputTokens: 5000 }), 'high', OPTS, true).effort).toBe('high')
+    // Nothing sent yet: there is no work in progress to protect.
+    expect(decide(at({ tier: 'opus' }), 'haiku', OPTS, true).tier).toBe('haiku')
+    expect(decideEffort(at({ effort: 'high' }), 'low', OPTS, true).effort).toBe('low')
+    expect(decideEffort(at({ lastInputTokens: 5000 }), 'low', OPTS, true).effort).toBe('low')
   })
 })
 
@@ -621,6 +646,49 @@ describe('the plugin', () => {
       expect(w.late()).toHaveLength(2)
     })
 
+    test('a short follow-up in time keeps the pick; the same verdict on a long prompt steps down', async ($, on) => {
+      const w = lateWorld(on)
+      w.setReady('complex')
+      await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+      const ask = (text: string) => $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
+      await ask('Redesign the cache layer across these three services')
+      await drain($.turn.step({ ...STEP, model: 'claude-sonnet-5-5' }))
+
+      w.setReady('trivial')
+      await ask('continue')
+      await ask('다음 단계 진행해')
+      await drain($.turn.step({ ...STEP, index: 1, model: 'claude-sonnet-5-5' }))
+      await ask('What is the Nyquist frequency for 48 kHz audio, exactly?')
+      await ask('And what is it for 44.1 kHz audio, the CD sample rate?')
+      await drain($.turn.step({ ...STEP, index: 2, model: 'claude-sonnet-5-5' }))
+
+      expect(w.sent).toEqual(['claude-opus-5-5', 'claude-opus-5-5', 'claude-haiku-5-5'])
+    })
+
+    test('a late label for a short follow-up obeys the same rule', async ($, on) => {
+      const w = lateWorld(on)
+      w.setReady('standard')
+      await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+      await $.prompt.submit({ text: 'Implement the retry policy for the uploader service', wait: false, origin: { kind: 'composer' } })
+      await drain($.turn.step({ ...STEP, model: 'claude-sonnet-5-5' }))
+
+      // Two follow-ups whose trivial labels arrive late: without the rule the
+      // second would complete the downgrade to haiku.
+      w.setReady(undefined)
+      const first = $.prompt.submit({ text: 'continue', wait: false, origin: { kind: 'composer' } })
+      await w.clock.advance(3_000)
+      await first
+      for (const answer of w.parked.splice(0)) answer('trivial')
+      await w.settle()
+      await $.prompt.submit({ text: 'continue', wait: false, origin: { kind: 'composer' } })
+      for (const answer of w.parked.splice(0)) answer('trivial')
+      await w.settle()
+      await drain($.turn.step({ ...STEP, index: 1, model: 'claude-sonnet-5-5' }))
+
+      expect(w.late()).toMatchObject([{ applied: true }, { applied: true }])
+      expect(w.sent).toEqual(['claude-sonnet-5-5', 'claude-sonnet-5-5'])
+    })
+
     test('a newer prompt wins over a late label for an older one', async ($, on) => {
       const w = lateWorld(on)
       await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -674,9 +742,9 @@ describe('the plugin', () => {
     expect(await noted('Redesign the cache layer')).toBe(true) // first turn: opus
     expect(await noted('and the queue layer too')).toBe(false) // same pick
     label = 'trivial'
-    expect(await noted('what time is it')).toBe(true) // haiku proposed, held: opus stays
-    expect(await noted('and the date')).toBe(true) // the downgrade lands: haiku
-    expect(await noted('and the weekday')).toBe(false) // same pick
+    expect(await noted('what time is it in Seoul right now, roughly?')).toBe(true) // haiku proposed, held: opus stays
+    expect(await noted('and what is the date there today, in ISO form?')).toBe(true) // the downgrade lands: haiku
+    expect(await noted('and which weekday is that date in Seoul, please?')).toBe(false) // same pick
     slow = true
     expect(await noted('and the year')).toBe(true) // the classifier timed out
   })

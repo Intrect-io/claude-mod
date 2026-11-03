@@ -38,6 +38,8 @@ export type LogEntry =
       from: { tier: Tier; effort: Effort | null }
       verdict: { tier: Tier | null; effort: Effort | null }
       wantTier: boolean
+      /** A prompt of at most `followUpChars` characters: it could raise the pick, not lower it. */
+      followUp?: boolean
       waited: boolean
       timedOut: boolean
       ms: number | null

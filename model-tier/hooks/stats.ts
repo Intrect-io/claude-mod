@@ -12,6 +12,8 @@ export type Stats = {
   prompts: number
   /** Of those, how many skipped the tier classification (no verdict could change the tier). */
   tierSkipped: number
+  /** Of those, short follow-ups (they may raise the pick, never lower it). */
+  followUps: number
   /** The pick each classified prompt ran on, by tier and by effort. */
   tiers: Record<string, number>
   efforts: Record<string, number>
@@ -43,6 +45,7 @@ export function summarizeLog(lines: readonly LogLine[], sinceMs: number): Stats 
     since: new Date(sinceMs).toISOString(),
     prompts: 0,
     tierSkipped: 0,
+    followUps: 0,
     tiers: {},
     efforts: {},
     tierChanges: 0,
@@ -62,6 +65,7 @@ export function summarizeLog(lines: readonly LogLine[], sinceMs: number): Stats 
       case 'prompt':
         s.prompts++
         if (!line.wantTier) s.tierSkipped++
+        if (line.followUp === true) s.followUps++
         bump(s.tiers, line.tier)
         bump(s.efforts, line.effort ?? 'session')
         if (line.tier !== line.from.tier) s.tierChanges++
@@ -116,7 +120,7 @@ export function formatStats(s: Stats, days: number): string {
     )
   return [
     `model-tier stats, last ${days} day${days === 1 ? '' : 's'} (since ${s.since}):`,
-    `prompts classified: ${s.prompts}; tier classification skipped on ${s.tierSkipped}${share(s.tierSkipped, s.prompts)} (no verdict could change the tier)`,
+    `prompts classified: ${s.prompts}; tier classification skipped on ${s.tierSkipped}${share(s.tierSkipped, s.prompts)} (no verdict could change the tier); ${s.followUps} short follow-up${s.followUps === 1 ? '' : 's'}${share(s.followUps, s.prompts)}`,
     `picks: tier ${counts(s.tiers)}; effort ${counts(s.efforts)}`,
     `tier changed after ${s.tierChanges} prompt${s.tierChanges === 1 ? '' : 's'}; ${s.switches} model switch${s.switches === 1 ? '' : 'es'} on the main loop, ${tokens(s.switchTokens)} prompt tokens written again`,
     `classifier: ${s.latency.answers} answers timed, p50 ${s.latency.p50} ms, p90 ${s.latency.p90} ms; late ${s.late}, ${s.timedOut} call${s.timedOut === 1 ? '' : 's'} past the bound`,

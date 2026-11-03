@@ -1,6 +1,6 @@
 {
   "name": "model-tier",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Routes each main-loop turn to fable, opus, sonnet or haiku and a reasoning effort by task complexity, with a set_tier tool the model calls to correct either",
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -51,6 +51,12 @@
       "title": "Highest automatic tier",
       "description": "The highest tier the classifier, subagent routing and the model's set_tier may pick (fable|opus|sonnet|haiku). Fable has its own rate limit on Claude Teams, so it is reserved for /tier fable by default",
       "default": "opus"
+    },
+    "followUpChars": {
+      "type": "number",
+      "title": "Follow-up length (chars)",
+      "description": "A prompt this short or shorter (\"continue\", \"다음 단계 진행해\") goes on with the work in progress: it may raise the tier or effort, never lower them",
+      "default": 40
     },
     "routeEffort": {
       "type": "boolean",

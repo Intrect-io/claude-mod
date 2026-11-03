@@ -59,6 +59,15 @@ only by `/tier fable` unless `maxAutoTier` allows it.
   bound. Measured on 2026-11-01, whole sessions ran at about 21 s per call,
   so waiting 3 s there only delayed every prompt.
   Each timeout and each late label is a line in the log (see [Log and `/tier stats`](#log-and-tier-stats)); those lines are the data for tuning the bound.
+- **Short follow-ups.** In a session that has sent requests, a prompt of at most
+  `followUpChars` characters (default 40) may raise the tier or effort but never lowers
+  either, and it neither advances nor resets a pending downgrade. A late label for it
+  obeys the same rule. The classifier sees only the prompt's own text, so "continue" or
+  "다음 단계 진행해" comes back trivial, and two of them in a row used to step a session
+  down to haiku·low in the middle of the work. Measured 2026-11-03 over 14 days of
+  transcripts: 51% of 2,668 real prompts were 40 characters or fewer (31% were 20 or
+  fewer), and most of them continued the work in progress. The first prompt of a session
+  still applies at once. `/tier stats` counts these prompts (`followUp` in the `prompt` line).
 - **Context guards.** Above `maxTokensForHaiku` prompt tokens the session never
   drops to haiku; above `maxTokensForDowngrade` it never steps down at all.
   Loaded into a running session, the mod reads the live context size first.
@@ -88,6 +97,7 @@ showing the session's configured model: this mod rewrites requests, not the sett
 | `classifierModel` | `haiku` | model used to label prompts |
 | `classifierTimeoutMs` | `3000` | keep the current tier and effort when classifying takes longer |
 | `routeEffort` | `true` | also classify and send a reasoning effort per turn |
+| `followUpChars` | `40` | a prompt this short or shorter may raise the pick, never lower it |
 | `maxAutoTier` | `opus` | highest tier the classifier, subagent routing and `set_tier` may pick; `fable` lifts the cap |
 
 ## Development
@@ -105,7 +115,7 @@ claude --plugin-dir ./model-tier
 
 | `event` | written when | other fields |
 | --- | --- | --- |
-| `prompt` | a main-loop prompt was classified (`prompt.submit`) | `tier`, `effort` (the pick after it), `from: {tier, effort}` (before), `verdict: {tier, effort}` (what came in time; `null` otherwise), `wantTier` (false: tier classification skipped), `waited`, `timedOut`, `ms` (classifier latency when in time, else `null`), `tokens` (the last request's prompt tokens) |
+| `prompt` | a main-loop prompt was classified (`prompt.submit`) | `tier`, `effort` (the pick after it), `from: {tier, effort}` (before), `verdict: {tier, effort}` (what came in time; `null` otherwise), `wantTier` (false: tier classification skipped), `followUp` (a short follow-up: it could only raise the pick), `waited`, `timedOut`, `ms` (classifier latency when in time, else `null`), `tokens` (the last request's prompt tokens) |
 | `spawn` | a subagent spawn was routed (`agent.spawn`) | `agent` (its type), `tier` (`null`: it kept the parent's model), `timedOut`, `ms` |
 | `switch` | a main-loop request was answered by another model than the one before, so its prefix was written again | `from`, `to` (model ids), `tokens` (that request's prompt tokens) |
 | `turn` | a main-loop turn finished (`turn.complete`) | `models: {<model id>: {requests, promptTokens, cacheWriteTokens, outputTokens}}` |
