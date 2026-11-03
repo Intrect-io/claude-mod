@@ -118,12 +118,13 @@ claude --plugin-dir ./model-tier
 - Past 3 MiB the file moves to `model-tier.log.1`, replacing the older one. The two files together hold the last 3 to 6 MiB, which is at least 5000 lines. Each stays under the 4 MiB that `$.fs.read` accepts.
 - Two sessions that cross the bound in the same instant can both rotate, and then the older file is lost.
 - Where the shell cannot run, the mod falls back to rewriting the file with the last 5000 lines. Lines from concurrent sessions can be lost there.
+- A session still running 0.7.0 or earlier rewrites the file with only its last 500 lines whenever it logs a timeout or a late label. This lasts until that session reloads.
 
 **Reading.** `/tier stats [days]` reads both files and reports the last `days` days (default 7):
 - prompts classified, and how many skipped the tier classification;
 - picks by tier and by effort (`session`: the session's own effort);
 - prompts whose tier changed, and model switches on the main loop with the prompt tokens they wrote again;
-- classifier latency p50/p90 (prompts and spawns answered in time, plus late labels), with late and timed-out counts;
+- classifier latency p50/p90 (prompts and spawns answered in time, plus late labels), with the count of late labels and of classifier calls past the bound (`classifier-timeout` lines);
 - routed spawns by tier (`kept`: no label in time);
 - main-loop requests and tokens per model.
 

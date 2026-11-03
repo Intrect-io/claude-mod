@@ -24,6 +24,7 @@ export type Stats = {
   /** Classifier answers with a known latency: prompts and spawns in time, and late labels. */
   latency: { answers: number; p50: number; p90: number }
   late: number
+  /** Classifier calls that missed the bound while a prompt or spawn waited (`classifier-timeout` lines). */
   timedOut: number
   /** Routed spawns by the tier they got; `kept` is a spawn the classifier did not label in time. */
   spawns: Record<string, number>
@@ -64,13 +65,14 @@ export function summarizeLog(lines: readonly LogLine[], sinceMs: number): Stats 
         bump(s.tiers, line.tier)
         bump(s.efforts, line.effort ?? 'session')
         if (line.tier !== line.from.tier) s.tierChanges++
-        if (line.timedOut) s.timedOut++
         if (typeof line.ms === 'number') ms.push(line.ms)
         break
       case 'spawn':
         bump(s.spawns, line.tier ?? 'kept')
-        if (line.timedOut) s.timedOut++
         if (typeof line.ms === 'number') ms.push(line.ms)
+        break
+      case 'classifier-timeout':
+        s.timedOut++
         break
       case 'classifier-late':
         s.late++
@@ -117,7 +119,7 @@ export function formatStats(s: Stats, days: number): string {
     `prompts classified: ${s.prompts}; tier classification skipped on ${s.tierSkipped}${share(s.tierSkipped, s.prompts)} (no verdict could change the tier)`,
     `picks: tier ${counts(s.tiers)}; effort ${counts(s.efforts)}`,
     `tier changed after ${s.tierChanges} prompt${s.tierChanges === 1 ? '' : 's'}; ${s.switches} model switch${s.switches === 1 ? '' : 'es'} on the main loop, ${tokens(s.switchTokens)} prompt tokens written again`,
-    `classifier: ${s.latency.answers} answers timed, p50 ${s.latency.p50} ms, p90 ${s.latency.p90} ms; late ${s.late}, timed out ${s.timedOut}`,
+    `classifier: ${s.latency.answers} answers timed, p50 ${s.latency.p50} ms, p90 ${s.latency.p90} ms; late ${s.late}, ${s.timedOut} call${s.timedOut === 1 ? '' : 's'} past the bound`,
     `subagent spawns routed: ${counts(s.spawns)}`,
     `main loop by model (${requests} requests):`,
     ...(models.length > 0 ? models : ['  none logged']),

@@ -98,7 +98,7 @@ describe('/tier stats', () => {
     expect({ switches: s.switches, switchTokens: s.switchTokens }).toEqual({ switches: 1, switchTokens: 50000 })
     // In-time prompts 1000 and 2000, the in-time spawn 3000, the late label 4000.
     expect(s.latency).toEqual({ answers: 4, p50: 2000, p90: 4000 })
-    expect({ late: s.late, timedOut: s.timedOut }).toEqual({ late: 1, timedOut: 2 })
+    expect({ late: s.late, timedOut: s.timedOut }).toEqual({ late: 1, timedOut: 1 })
     expect(s.spawns).toEqual({ haiku: 1, kept: 1 })
     expect(s.models).toEqual({
       'claude-opus-5-5': { requests: 3, promptTokens: 1200000, cacheWriteTokens: 1000, outputTokens: 350 },
@@ -118,7 +118,7 @@ describe('/tier stats', () => {
     expect(week.text).toContain('prompts classified: 3; tier classification skipped on 1 (33%)')
     expect(week.text).toContain('picks: tier sonnet 2, opus 1')
     expect(week.text).toContain('1 model switch on the main loop, 50k prompt tokens written again')
-    expect(week.text).toContain('p50 2000 ms, p90 4000 ms; late 1, timed out 2')
+    expect(week.text).toContain('p50 2000 ms, p90 4000 ms; late 1, 1 call past the bound')
     expect(week.text).toContain('subagent spawns routed: haiku 1, kept 1')
     expect(week.text).toContain('claude-opus-5-5: 3 requests (50%), 1.2M prompt tokens')
 
