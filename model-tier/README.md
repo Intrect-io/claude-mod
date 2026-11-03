@@ -58,11 +58,7 @@ only by `/tier fable` unless `maxAutoTier` allows it.
   prompts stop waiting for it at all until an answer comes in under the
   bound. Measured on 2026-11-01, whole sessions ran at about 21 s per call,
   so waiting 3 s there only delayed every prompt.
-  The log `~/.claude/model-tier.log` keeps the last 500 lines:
-  `{"ts", "event": "classifier-timeout", "classifier": "tier"|"effort"|"subagent", "ranMs", "kept": {"tier", "effort"}}`
-  when a prompt waited and the bound passed, and
-  `{"ts", "event": "classifier-late", "ms", "applied", "waited", "wantTier"}` when a late
-  label arrived (`ms` is its real latency; `wantTier` false means only effort was asked). These lines are the data for tuning the bound.
+  Each timeout and each late label is a line in the log (see [Log and `/tier stats`](#log-and-tier-stats)); those lines are the data for tuning the bound.
 - **Context guards.** Above `maxTokensForHaiku` prompt tokens the session never
   drops to haiku; above `maxTokensForDowngrade` it never steps down at all.
   Loaded into a running session, the mod reads the live context size first.
@@ -78,6 +74,7 @@ showing the session's configured model: this mod rewrites requests, not the sett
 - `/tier fable|opus|sonnet|haiku`: pin a tier. The classifier and `set_tier` leave it alone.
 - `/tier auto`: return to automatic routing
 - `/tier effort low|medium|high|xhigh|max`: pin the effort. `/tier effort auto` releases it.
+- `/tier stats [days]`: summarize the log over the last `days` days (default 7); see [Log and `/tier stats`](#log-and-tier-stats)
 - `/tier eval [path]`: run the classifier eval (see [Classifier eval](#classifier-eval))
 
 ## Options (`userConfig`)
@@ -100,6 +97,36 @@ claude plugin validate model-tier
 claude plugin test model-tier
 claude --plugin-dir ./model-tier
 ```
+
+## Log and `/tier stats`
+
+`~/.claude/model-tier.log` holds one JSON line per event from every session on the machine, each with
+`ts` (ISO time) and `event`:
+
+| `event` | written when | other fields |
+| --- | --- | --- |
+| `prompt` | a main-loop prompt was classified (`prompt.submit`) | `tier`, `effort` (the pick after it), `from: {tier, effort}` (before), `verdict: {tier, effort}` (what came in time; `null` otherwise), `wantTier` (false: tier classification skipped), `waited`, `timedOut`, `ms` (classifier latency when in time, else `null`), `tokens` (the last request's prompt tokens) |
+| `spawn` | a subagent spawn was routed (`agent.spawn`) | `agent` (its type), `tier` (`null`: it kept the parent's model), `timedOut`, `ms` |
+| `switch` | a main-loop request was answered by another model than the one before, so its prefix was written again | `from`, `to` (model ids), `tokens` (that request's prompt tokens) |
+| `turn` | a main-loop turn finished (`turn.complete`) | `models: {<model id>: {requests, promptTokens, cacheWriteTokens, outputTokens}}` |
+| `classifier-timeout` | a prompt waited for a label and the bound passed | `classifier` (`tier`, `effort` or `subagent`), `ranMs`, `kept: {tier, effort}` |
+| `classifier-late` | a label arrived after its prompt went on | `ms` (real latency), `applied`, `waited`, `wantTier` |
+
+`/tier eval` goes through the same `labelPrompt` but writes no line: only the prompt and spawn hooks log.
+
+**Writing.** `$.fs` can only rewrite a whole file. When two sessions read and rewrite it at the same time, one of them loses its line. So each line is appended by the shell (`sh -c 'cat >> …'`), as one small write. Measured: 8 concurrent writers × 200 lines gave 1600 whole lines.
+- Past 3 MiB the file moves to `model-tier.log.1`, replacing the older one. The two files together hold the last 3 to 6 MiB, which is at least 5000 lines. Each stays under the 4 MiB that `$.fs.read` accepts.
+- Two sessions that cross the bound in the same instant can both rotate, and then the older file is lost.
+- Where the shell cannot run, the mod falls back to rewriting the file with the last 5000 lines. Lines from concurrent sessions can be lost there.
+- A session still running 0.7.0 or earlier rewrites the file with only its last 500 lines whenever it logs a timeout or a late label. This lasts until that session reloads.
+
+**Reading.** `/tier stats [days]` reads both files and reports the last `days` days (default 7):
+- prompts classified, and how many skipped the tier classification;
+- picks by tier and by effort (`session`: the session's own effort);
+- prompts whose tier changed, and model switches on the main loop with the prompt tokens they wrote again;
+- classifier latency p50/p90 (prompts and spawns answered in time, plus late labels), with the count of late labels and of classifier calls past the bound (`classifier-timeout` lines);
+- routed spawns by tier (`kept`: no label in time);
+- main-loop requests and tokens per model.
 
 ## Classifier eval
 
