@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { AgentSpawnInput, HookStream, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import type { TierState } from '../types'
-import { capTier, decide, decideEffort, INITIAL, isTier, maxAutoTier, modelFor, providerOf, providerTierModels, tierModels } from './register'
+import { canTierChange, capTier, decide, decideEffort, INITIAL, isTier, maxAutoTier, modelFor, providerOf, providerTierModels, tierModels } from './register'
 
 const OPTS = { downgradeAfterTurns: 2, maxTokensForHaiku: 150000, maxTokensForDowngrade: 200000 }
 const at = (over: Partial<TierState>): TierState => ({ ...INITIAL, ...over })
@@ -112,6 +112,19 @@ describe('maxAutoTier', () => {
     expect(capTier('haiku', 'opus')).toBe('haiku')
     expect(capTier('fable', 'fable')).toBe('fable')
     expect(capTier('opus', 'sonnet')).toBe('sonnet')
+  })
+})
+
+describe('canTierChange', () => {
+  test('false when pinned, or at the auto cap past the downgrade ceiling; true otherwise', () => {
+    expect(canTierChange(at({ source: 'pinned' }), OPTS, 'opus')).toBe(false)
+    expect(canTierChange(at({ tier: 'opus', lastInputTokens: 400000 }), OPTS, 'opus')).toBe(false)
+    // Below the ceiling a downgrade is still possible.
+    expect(canTierChange(at({ tier: 'opus', lastInputTokens: 150000 }), OPTS, 'opus')).toBe(true)
+    // Below the cap an upgrade is still possible, however large the context.
+    expect(canTierChange(at({ tier: 'sonnet', lastInputTokens: 400000 }), OPTS, 'opus')).toBe(true)
+    // fable reachable: opus can still go up.
+    expect(canTierChange(at({ tier: 'opus', lastInputTokens: 400000 }), OPTS, 'fable')).toBe(true)
   })
 })
 
@@ -256,6 +269,33 @@ describe('the plugin', () => {
     await drain($.turn.step(STEP))
 
     expect(sent).toEqual(['claude-opus-5-5'])
+  })
+
+  test('on opus past the downgrade ceiling only the effort is classified', async ($, on) => {
+    on('ui.status', () => ({ value: undefined }))
+    on('tool.register', () => ({ value: { tool: 'mcp__model-tier__set_tier' } }))
+    on('command.register', () => ({ value: { command: 'tier' } }))
+    on('session.model', () => ({ value: 'claude-opus-5-5' }))
+    on('session.usage', () => ({
+      value: { startedAt: 0, context: { tokens: 600000, window: 1000000 }, rateLimits: [] },
+    }))
+    on('session.start', (_, e) => ({ cwd: e.cwd }))
+    const asked: string[][] = []
+    on('model.classify', (_, e) => {
+      asked.push([...e.labels])
+      return { value: e.labels.includes('trivial') ? 'trivial' : 'routine-reasoning' }
+    })
+    on('clock.sleep', () => new Promise(() => {}))
+    on('prompt.submit', (_, e) => ({ text: e.text }))
+    on('turn.step', async function* (_, e) {
+      return answered(e)
+    })
+
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    await $.prompt.submit({ text: 'thanks', wait: false, origin: { kind: 'composer' } })
+
+    expect(asked.some(labels => labels.includes('trivial'))).toBe(false)
+    expect(asked.some(labels => labels.includes('routine-reasoning'))).toBe(true)
   })
 
   test('a slow classifier keeps the current tier', async ($, on) => {

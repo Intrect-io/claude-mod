@@ -16,6 +16,10 @@ only by `/tier fable` unless `maxAutoTier` allows it.
     verdict runs on opus. Only `/tier fable` reaches it: a session started on fable with `/model`
     steps down at the first classifier verdict.
   - A refused fable request falls back to the session's model, as any tier does.
+  - Skipped when no verdict could change the tier: pinned, or already at `maxAutoTier`
+    with the context past `maxTokensForDowngrade` (`canTierChange`). Measured 2026-11-03:
+    the average main-loop context was ~400k tokens, so this saves one classifier call on
+    most turns. The effort classification still runs.
 - **Effort (on prompt submit, in parallel).** A second classification labels how
   hard the problem is to think through: `recall-or-lookup` / `routine-reasoning` /
   `tricky-problem` / `hard-open-problem`, mapped to effort low / medium / high / xhigh.
@@ -57,8 +61,8 @@ only by `/tier fable` unless `maxAutoTier` allows it.
   The log `~/.claude/model-tier.log` keeps the last 500 lines:
   `{"ts", "event": "classifier-timeout", "classifier": "tier"|"effort"|"subagent", "ranMs", "kept": {"tier", "effort"}}`
   when a prompt waited and the bound passed, and
-  `{"ts", "event": "classifier-late", "ms", "applied", "waited"}` when a late
-  label arrived (`ms` is its real latency). These lines are the data for tuning the bound.
+  `{"ts", "event": "classifier-late", "ms", "applied", "waited", "wantTier"}` when a late
+  label arrived (`ms` is its real latency; `wantTier` false means only effort was asked). These lines are the data for tuning the bound.
 - **Context guards.** Above `maxTokensForHaiku` prompt tokens the session never
   drops to haiku; above `maxTokensForDowngrade` it never steps down at all.
   Loaded into a running session, the mod reads the live context size first.
