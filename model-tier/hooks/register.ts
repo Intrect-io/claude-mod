@@ -5,6 +5,9 @@ import type { Effort, Tier, TierState } from '../types'
 import { evalCommand } from './eval'
 import { capTier, labelPrompt, RANK } from './label'
 import type { PromptLabels } from './label'
+import { appendLog } from './log'
+import type { ModelTotals } from './log'
+import { statsCommand } from './stats'
 import { segment } from './segment'
 
 export { capTier }
@@ -213,38 +216,11 @@ function show($: EngineInterface, s: TierState, enabled: boolean): Promise<void>
   return segment($, enabled ? `${s.tier}${s.effort ? `·${s.effort}` : ''}${pinned ? ' (pin)' : ''}` : '')
 }
 
-const LOG_MAX_LINES = 500
-
-/**
- * One JSON line per classifier timeout in ~/.claude/model-tier.log: which
- * classifier, how long it ran before it was given up on, and the tier and
- * effort the turn kept. This is the data for tuning `classifierTimeoutMs`
- * (measured once: a design prompt stayed on haiku·low after a timeout).
- */
-type LogEntry =
-  | { event: 'classifier-timeout'; classifier: 'tier' | 'effort' | 'subagent'; ranMs: number; kept: { tier: Tier; effort?: Effort } }
-  // A label that came after the prompt went on: `ms` is the classifier's real latency.
-  | { event: 'classifier-late'; ms: number; applied: boolean; waited: boolean; wantTier: boolean }
-
-async function logEvent($: EngineInterface, entry: LogEntry): Promise<void> {
-  try {
-    const home = await $.env.get('HOME')
-    if (home === undefined) return
-    const path = `${home}/.claude/model-tier.log`
-    let text = ''
-    try {
-      text = await $.fs.read(path)
-    } catch {
-      // First line.
-    }
-    const lines = text.split('\n').filter(line => line !== '')
-    const fields = entry.event === 'classifier-timeout' ? { ...entry, kept: { tier: entry.kept.tier, effort: entry.kept.effort ?? null } } : entry
-    lines.push(JSON.stringify({ ts: new Date(await $.clock.now()).toISOString(), ...fields }))
-    await $.fs.write(path, `${lines.slice(-LOG_MAX_LINES).join('\n')}\n`)
-  } catch {
-    // A log line is never worth failing a prompt over.
-  }
-}
+// The model that answered the session's last main-loop request: a request on
+// another one writes the prefix again (a `switch` log line).
+let lastAnswered: string | undefined
+// Main-loop requests and tokens per model, by turn, until the turn completes.
+const turnUsage = new Map<string, Record<string, ModelTotals>>()
 
 // The latest prompt's number: a late label applies only while its prompt is
 // still the latest. A reload starts both over (fast, nothing pending).
@@ -272,7 +248,7 @@ async function applyLate($: EngineInterface, labels: PromptLabels, seq: number, 
     s = await update($, state, v => (effort !== undefined && v.effortSource !== 'pinned' ? decideEffort(v, effort, o.decideOptions) : v))
     void show($, s, o.enabled)
   }
-  await logEvent($, { event: 'classifier-late', ms: got.ms, applied: current, waited, wantTier: o.wantTier })
+  await appendLog($, { event: 'classifier-late', ms: got.ms, applied: current, waited, wantTier: o.wantTier })
 }
 
 export const register: Register = (on, options) => {
@@ -292,6 +268,7 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    lastAnswered = undefined
 
     await $.tool.register({
       name: 'set_tier',
@@ -317,7 +294,7 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: 'tier',
-      description: 'Pin the model tier (fable|opus|sonnet|haiku) or effort, return to auto routing, or eval the classifier on a prompt set',
+      description: 'Pin the model tier (fable|opus|sonnet|haiku) or effort, return to auto routing, summarize the log (stats), or eval the classifier on a prompt set',
     })
 
     // A fresh session starts on whatever /model is set to.
@@ -346,6 +323,7 @@ export const register: Register = (on, options) => {
     if (/^eval(\s|$)/i.test(raw)) {
       return { text: await evalCommand($, raw.slice('eval'.length).trim(), { model: classifierModel, productionTimeoutMs: classifierTimeoutMs }) }
     }
+    if (/^stats(\s|$)/i.test(raw)) return { text: await statsCommand($, raw.slice('stats'.length).trim()) }
     const arg = raw.toLowerCase()
     if (arg === '') {
       const s = await read($, state)
@@ -368,7 +346,7 @@ export const register: Register = (on, options) => {
       void show($, s, enabled)
       return { text: `Auto routing on; tier stays ${s.tier} until the next prompt.` }
     }
-    if (!isTierName(arg)) return { text: 'Usage: /tier [auto|fable|opus|sonnet|haiku] | /tier effort [auto|low|medium|high|xhigh|max] | /tier eval [path.jsonl]' }
+    if (!isTierName(arg)) return { text: 'Usage: /tier [auto|fable|opus|sonnet|haiku] | /tier effort [auto|low|medium|high|xhigh|max] | /tier stats [days] | /tier eval [path.jsonl]' }
     const s = await update($, state, (v): TierState => ({ ...v, tier: arg, source: 'pinned', pendingDown: undefined, pendingCount: 0 }))
     void show($, s, enabled)
     return { text: `Pinned to ${arg}. /tier auto to release.` }
@@ -392,9 +370,26 @@ export const register: Register = (on, options) => {
     const effort = labels.effort
     if (proposed) s = await update($, state, v => decide(v, proposed, decideOptions))
     if (effort) s = await update($, state, v => decideEffort(v, effort, decideOptions))
-    const kept = { tier: s.tier, effort: s.effort }
-    if (waited && labels.tierTimedOut) await logEvent($, { event: 'classifier-timeout', classifier: 'tier', ranMs: classifierTimeoutMs, kept })
-    if (waited && labels.effortTimedOut) await logEvent($, { event: 'classifier-timeout', classifier: 'effort', ranMs: classifierTimeoutMs, kept })
+    const kept = { tier: s.tier, effort: s.effort ?? null }
+    if (waited && labels.tierTimedOut) await appendLog($, { event: 'classifier-timeout', classifier: 'tier', ranMs: classifierTimeoutMs, kept })
+    if (waited && labels.effortTimedOut) await appendLog($, { event: 'classifier-timeout', classifier: 'effort', ranMs: classifierTimeoutMs, kept })
+    if (wantTier || wantEffort) {
+      const timedOut = labels.tierTimedOut || labels.effortTimedOut
+      // In time, both answers are in and `settled` holds their latency.
+      const ms = timedOut ? null : (await labels.settled).ms
+      void appendLog($, {
+        event: 'prompt',
+        tier: s.tier,
+        effort: s.effort ?? null,
+        from: { tier: current.tier, effort: current.effort ?? null },
+        verdict: { tier: proposed ?? null, effort: effort ?? null },
+        wantTier,
+        waited,
+        timedOut,
+        ms,
+        tokens: current.lastInputTokens,
+      })
+    }
     void show($, s, enabled)
     // The note asks the model to review the pick. Measured with inkblot on
     // 2026-10-29: 0 of 6 set_tier calls when the pick stood. So it speaks only
@@ -487,17 +482,38 @@ export const register: Register = (on, options) => {
         $.ui.toast(`model-tier: answered on ${u.model} (${provider})${target !== undefined ? `; ${s.tier} goes as ${target} there now` : '; the tier stays whatever this provider answers'}`)
       }
       await update($, state, v => ({ ...v, lastInputTokens: tokens, lastProvider: provider }))
+      if (lastAnswered !== undefined && lastAnswered !== u.model) void appendLog($, { event: 'switch', from: lastAnswered, to: u.model, tokens })
+      lastAnswered = u.model
+      const byModel = turnUsage.get(e.turnId) ?? {}
+      const t = (byModel[u.model] ??= { requests: 0, promptTokens: 0, cacheWriteTokens: 0, outputTokens: 0 })
+      t.requests++
+      t.promptTokens += tokens
+      t.cacheWriteTokens += u.cache_creation_input_tokens
+      t.outputTokens += u.output_tokens
+      turnUsage.set(e.turnId, byModel)
     }
     return result
   })
 
+  // One line per finished main-loop turn: what each model answered in it.
+  on('turn.complete', async ($, e, next) => {
+    const done = await next(e)
+    if (e.agentId === undefined) {
+      const models = turnUsage.get(e.turnId)
+      turnUsage.delete(e.turnId)
+      if (models !== undefined) void appendLog($, { event: 'turn', models })
+    }
+    return done
+  })
+
   on('agent.spawn', async ($, e, next) => {
     if (!enabled || e.fork || e.model !== undefined || !ROUTABLE_AGENTS.has(e.subagentType)) return next(e)
-    const { tier, tierTimedOut } = await labelPrompt($, e.prompt, { model: classifierModel, timeoutMs: classifierTimeoutMs, maxAuto, wantTier: true, wantEffort: false })
+    const { tier, tierTimedOut, settled } = await labelPrompt($, e.prompt, { model: classifierModel, timeoutMs: classifierTimeoutMs, maxAuto, wantTier: true, wantEffort: false })
     if (tierTimedOut) {
       const s = await read($, state)
-      await logEvent($, { event: 'classifier-timeout', classifier: 'subagent', ranMs: classifierTimeoutMs, kept: { tier: s.tier, effort: s.effort } })
+      await appendLog($, { event: 'classifier-timeout', classifier: 'subagent', ranMs: classifierTimeoutMs, kept: { tier: s.tier, effort: s.effort ?? null } })
     }
+    void appendLog($, { event: 'spawn', agent: e.subagentType, tier: tier ?? null, timedOut: tierTimedOut, ms: tierTimedOut ? null : (await settled).ms })
     return next(tier ? { ...e, model: models[tier] } : e)
   }).catch(($, e, next) => next(e))
 }

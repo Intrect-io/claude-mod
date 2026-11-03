@@ -519,17 +519,21 @@ describe('the plugin', () => {
     const submitted = $.prompt.submit({ text: 'Redesign the cache layer across these services', wait: false, origin: { kind: 'composer' } })
     await clock.advance(3_000)
     await submitted
-    const lines = (files.get(LOG) ?? '').trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
-    expect(lines.map(l => l.classifier).sort()).toEqual(['effort', 'tier'])
-    for (const line of lines) {
+    const logged = () => (files.get(LOG) ?? '').trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+    const timeouts = () => logged().filter(l => l.event === 'classifier-timeout')
+    expect(timeouts().map(l => l.classifier).sort()).toEqual(['effort', 'tier'])
+    for (const line of timeouts()) {
       expect(line).toMatchObject({ event: 'classifier-timeout', ranMs: 3000, kept: { tier: 'sonnet', effort: null } })
       expect(typeof line.ts).toBe('string')
     }
+    expect(logged().filter(l => l.event === 'prompt')).toMatchObject([{ timedOut: true, ms: null }])
 
-    // An answer in time writes nothing.
+    // An answer in time writes no timeout line, only its prompt line.
     slow = false
     await $.prompt.submit({ text: 'what time is it', wait: false, origin: { kind: 'composer' } })
-    expect((files.get(LOG) ?? '').trim().split('\n')).toHaveLength(2)
+    await new Promise(resolve => setTimeout(resolve, 5))
+    expect(timeouts()).toHaveLength(2)
+    expect(logged().filter(l => l.event === 'prompt')).toHaveLength(2)
   })
 
   describe('a label that misses the bound', () => {

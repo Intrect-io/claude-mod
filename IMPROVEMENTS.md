@@ -86,6 +86,7 @@ P2: cost, upkeep or polish.
 ### model-tier: routing saved 1.6%; the classifier answers in ~21 s
 
 - **Status (2026-11-03):** partly fixed in model-tier 0.7.0. The tier classifier is skipped when no verdict could change the tier (`canTierChange`). Open: the latency fix belongs in CC-Router (below).
+- **Status (2026-11-04):** CC-Router's short-request bypass is deployed (unohee/CC-Router #20). The one-hour live test after it measured 336 classifications at p50 1151 ms / p90 2447 ms, with 0 over 15 s (`testing/live_classifier_261103_v1/`). model-tier 0.8.0 adds `/tier stats` for this day-to-day check, in place of the transcript scripts. The mod's log now has a line for every classified prompt, routed spawn, main-loop model switch and finished turn.
 - **Evidence.** Measured over 14 days of transcripts (`testing/tier_effect_261103_v1.py`, `testing/billing_mix_261103_v1.py`).
   - Main loop: 87.6% of 54,323 requests ran on opus. Only 37 of 351 sessions used more than one model. Against an all-opus counterfactual, routing saved 1.6%.
   - Most turns cannot step down: the average context is ~400k tokens against `maxTokensForDowngrade` 200k. That ceiling is right. A switch rewrites the whole prefix, at 2x with the 1h cache TTL now on. Do not raise it.
