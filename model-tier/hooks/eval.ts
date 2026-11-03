@@ -1,7 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { Effort, Tier } from '../types'
-import { labelPrompt } from './label'
+import { EFFORT_LABELS, LABELS, labelPrompt } from './label'
 
 const TIERS: readonly string[] = ['haiku', 'sonnet', 'opus', 'fable']
 const EFFORTS: readonly string[] = ['low', 'medium', 'high', 'xhigh']
@@ -27,6 +27,8 @@ export type EvalRun = {
   ranAt: string
   file: string
   classifierModel: string
+  /** The label sets this run measured: a run on other labels says nothing about these. */
+  labels: { tier: string[]; effort: string[] }
   timeoutMs: number
   cases: number
   tierAccuracy: number
@@ -83,6 +85,7 @@ export async function runEval($: EngineInterface, cases: EvalCase[], o: { model:
     ranAt: new Date(await $.clock.now()).toISOString(),
     file: o.file,
     classifierModel: o.model,
+    labels: { tier: [...LABELS], effort: [...EFFORT_LABELS] },
     timeoutMs: EVAL_TIMEOUT_MS,
     cases: results.length,
     tierAccuracy: ratio(results.filter(r => r.tierOk).length, results.length),

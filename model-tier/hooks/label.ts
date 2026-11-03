@@ -9,7 +9,7 @@ export const capTier = (t: Tier, max: Tier): Tier => (RANK[t] > RANK[max] ? max 
 // (see EFFORT_LABELS), and fable is the scarcest, most rate-limited tier. The
 // label set stays the same under a lower `maxAutoTier`, so the other three
 // labels classify as before; only the tier it maps to is capped.
-const LABELS = ['trivial', 'standard', 'complex', 'exceptionally-hard'] as const
+export const LABELS = ['trivial', 'standard', 'complex', 'exceptionally-hard'] as const
 const LABEL_TIER: Record<(typeof LABELS)[number], Tier> = {
   trivial: 'haiku',
   standard: 'sonnet',
@@ -18,10 +18,16 @@ const LABEL_TIER: Record<(typeof LABELS)[number], Tier> = {
 }
 // Named for how hard the problem is to think through, not how long the answer
 // is: measured live, 'quick-answer' caught a hard design question that asked
-// for a three-line reply.
-const EFFORT_LABELS = ['recall-or-lookup', 'routine-reasoning', 'tricky-problem', 'hard-open-problem'] as const
+// for a three-line reply. The low label was 'recall-or-lookup' until
+// 2026-11-04: a mechanical edit, a chore or a "thanks" is neither, so 6 of
+// the eval's 9 low prompts came back medium in 14 of 14 runs (effort mean
+// 0.613). Probed side by side on haiku (3 repeats, 24 prompts):
+// 'nothing-to-figure-out' 0.833 with no more under-effort answers than
+// before; 'no-thinking-needed' 0.76-0.79 but sent a short-reply design
+// question to low; 'chore-or-lookup' 0.708, routine implementations to low.
+export const EFFORT_LABELS = ['nothing-to-figure-out', 'routine-reasoning', 'tricky-problem', 'hard-open-problem'] as const
 const LABEL_EFFORT: Record<(typeof EFFORT_LABELS)[number], Effort> = {
-  'recall-or-lookup': 'low',
+  'nothing-to-figure-out': 'low',
   'routine-reasoning': 'medium',
   'tricky-problem': 'high',
   'hard-open-problem': 'xhigh',

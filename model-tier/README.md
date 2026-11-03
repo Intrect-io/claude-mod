@@ -21,13 +21,16 @@ only by `/tier fable` unless `maxAutoTier` allows it.
     the average main-loop context was ~400k tokens, so this saves one classifier call on
     most turns. The effort classification still runs.
 - **Effort (on prompt submit, in parallel).** A second classification labels how
-  hard the problem is to think through: `recall-or-lookup` / `routine-reasoning` /
+  hard the problem is to think through: `nothing-to-figure-out` / `routine-reasoning` /
   `tricky-problem` / `hard-open-problem`, mapped to effort low / medium / high / xhigh.
   The classifier never proposes `max`.
   - The `turn.step` hook sends each main-loop request with that effort.
   - A model that takes no effort is sent none.
   - Effort follows the same sticky rule as tiers: up at once, down after `downgradeAfterTurns` lower verdicts.
   - The labels are named for depth rather than answer length. A "three-line answer" design question first came out `low` under a label called `quick-answer`.
+  - The low label was `recall-or-lookup` until 0.11.0. A mechanical edit, a chore or a "thanks" is neither a recall nor a lookup, so 6 of the eval's 9 `low` prompts came back `medium` in all 14 live runs of 2026-11-03.
+    A side-by-side probe on haiku compared 8 label sets over 24 prompts with 2–3 repeats. `nothing-to-figure-out` scored best: 0.833, with no more answers below the expected effort than before.
+    Only that label changed, so the change does not overfit the 24-prompt set.
 - **Self-correction.** The mod registers a `set_tier` tool
   (`mcp__model-tier__set_tier`) that takes `tier`, `effort` or both. A turn
   note tells the model the pick (`runs on opus (auto) with high effort (auto)`) and
@@ -169,18 +172,26 @@ claude -p --plugin-dir model-tier "/tier eval model-tier/eval/prompts.jsonl"
 - The run is written to `last-run.json` beside the prompt set. It holds per-prompt results,
   tier and effort accuracy, timeouts, latency p50/p90/max, and how many prompts took longer
   than `classifierTimeoutMs` (those keep the old pick in a session).
-- `eval/baseline.json` records four live runs on the committed prompt set, with per-prompt
-  hits. Tier accuracy ranged 0.667 to 0.75 and effort accuracy 0.5 to 0.625, so the spread is
-  0.083 (2 prompts) for tier and 0.125 (3 prompts) for effort.
-- Two of the four runs hit a ~21 s per-call latency floor (likely the endpoint behind
-  `ANTHROPIC_BASE_URL`; not traced), and one of those lost 3 prompts to the 30 s bound.
-  Look at `timeouts` before reading accuracy.
+- Each run records the label sets it measured (`labels: {tier, effort}`, from `LABELS` and
+  `EFFORT_LABELS` in `hooks/label.ts`). A run on other labels says nothing about the shipped ones.
+- `eval/baseline.json` holds every recorded run, each with its labels. On the current labels
+  (0.11.0, 2026-11-04) there are four live runs:
+  - Tier accuracy ranged 0.708 to 0.792 (mean 0.76).
+  - Effort accuracy ranged 0.792 to 0.917 (mean 0.875).
+  - There were no timeouts; latency p50 was 1.3 to 1.7 s.
 
-**Rule.** A change to a label, the label prompt or the classification call must not drop
-tier or effort accuracy below the baseline minus the run-to-run spread. Today that is tier
-0.708 and effort 0.583: the lowest baseline run without timeouts. Run the eval at least twice
-on the change, rerun any run that reports timeouts, and every remaining run must meet both
-numbers. When the prompt set changes, record a new baseline in the same PR.
+  Per-prompt hits are in `perPrompt`.
+- `previous` keeps the old labels for comparison:
+  - their 4 committed runs;
+  - a summary of 14 live runs from 2026-11-03: effort 0.542 to 0.667 (mean 0.613), tier 0.708 to 0.792 (mean 0.75).
+- Earlier runs hit a ~21 s per-call latency floor. It was traced to CC-Router's throttle and fixed there on 2026-11-03. Look at `timeouts` before reading accuracy.
+
+**Rule.** A change to a label, the label prompt or the classification call must not drop tier or effort accuracy below the gate in `baseline.json`.
+- Today the gate is tier 0.708 and effort 0.792: the lowest run on the current labels without timeouts.
+- The run-to-run spread is 0.084 for tier and 0.125 for effort. A single run a little below the gate is therefore weak evidence, so compare the mean of the runs as well.
+- Run the eval at least three times on the change, and rerun any run that reports timeouts.
+- Every remaining run must meet both numbers, and its recorded `labels` must match the code.
+- When the prompt set changes, record a new baseline in the same PR.
 
 ## Behaviour to know
 

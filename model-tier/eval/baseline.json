@@ -1,8 +1,26 @@
 {
-  "note": "Four live runs of /tier eval on prompts.jsonl (haiku classifier through ANTHROPIC_BASE_URL). Runs 1 and 4 hit a ~21 s per-call latency floor (likely the endpoint behind ANTHROPIC_BASE_URL, not traced); run 1 also timed out 3 prompts at the 30 s eval bound, which score as misses. Compare a change against the range, not one run.",
-  "gate": {"tierAccuracy": 0.708, "effortAccuracy": 0.583, "why": "lowest run without timeouts"},
+  "note": "Live /tier eval runs on prompts.jsonl (haiku classifier through ANTHROPIC_BASE_URL). Each run names the label sets it measured; only runs on the current labels (label.ts LABELS and EFFORT_LABELS) count toward the gate. Compare a change against the range, not one run.",
+  "gate": {
+    "tierAccuracy": 0.708,
+    "effortAccuracy": 0.792,
+    "why": "lowest run on the current labels without timeouts"
+  },
   "prompts": 24,
   "classifierModel": "haiku",
+  "labels": {
+    "tier": [
+      "trivial",
+      "standard",
+      "complex",
+      "exceptionally-hard"
+    ],
+    "effort": [
+      "nothing-to-figure-out",
+      "routine-reasoning",
+      "tricky-problem",
+      "hard-open-problem"
+    ]
+  },
   "runs": [
     {
       "ranAt": "2026-10-31T15:49:20.143Z",
@@ -20,6 +38,20 @@
       "overProductionTimeout": {
         "timeoutMs": 3000,
         "count": 24
+      },
+      "labels": {
+        "tier": [
+          "trivial",
+          "standard",
+          "complex",
+          "exceptionally-hard"
+        ],
+        "effort": [
+          "recall-or-lookup",
+          "routine-reasoning",
+          "tricky-problem",
+          "hard-open-problem"
+        ]
       }
     },
     {
@@ -38,6 +70,20 @@
       "overProductionTimeout": {
         "timeoutMs": 3000,
         "count": 1
+      },
+      "labels": {
+        "tier": [
+          "trivial",
+          "standard",
+          "complex",
+          "exceptionally-hard"
+        ],
+        "effort": [
+          "recall-or-lookup",
+          "routine-reasoning",
+          "tricky-problem",
+          "hard-open-problem"
+        ]
       }
     },
     {
@@ -56,6 +102,20 @@
       "overProductionTimeout": {
         "timeoutMs": 3000,
         "count": 0
+      },
+      "labels": {
+        "tier": [
+          "trivial",
+          "standard",
+          "complex",
+          "exceptionally-hard"
+        ],
+        "effort": [
+          "recall-or-lookup",
+          "routine-reasoning",
+          "tricky-problem",
+          "hard-open-problem"
+        ]
       }
     },
     {
@@ -74,20 +134,164 @@
       "overProductionTimeout": {
         "timeoutMs": 3000,
         "count": 24
+      },
+      "labels": {
+        "tier": [
+          "trivial",
+          "standard",
+          "complex",
+          "exceptionally-hard"
+        ],
+        "effort": [
+          "recall-or-lookup",
+          "routine-reasoning",
+          "tricky-problem",
+          "hard-open-problem"
+        ]
+      }
+    },
+    {
+      "ranAt": "2026-11-03T16:57:17.015Z",
+      "tierAccuracy": 0.708,
+      "effortAccuracy": 0.917,
+      "timeouts": {
+        "tier": 0,
+        "effort": 0
+      },
+      "latencyMs": {
+        "p50": 1671,
+        "p90": 2978,
+        "max": 4346
+      },
+      "overProductionTimeout": {
+        "timeoutMs": 3000,
+        "count": 2
+      },
+      "labels": {
+        "tier": [
+          "trivial",
+          "standard",
+          "complex",
+          "exceptionally-hard"
+        ],
+        "effort": [
+          "nothing-to-figure-out",
+          "routine-reasoning",
+          "tricky-problem",
+          "hard-open-problem"
+        ]
+      }
+    },
+    {
+      "ranAt": "2026-11-03T16:57:55.234Z",
+      "tierAccuracy": 0.75,
+      "effortAccuracy": 0.792,
+      "timeouts": {
+        "tier": 0,
+        "effort": 0
+      },
+      "latencyMs": {
+        "p50": 1272,
+        "p90": 2165,
+        "max": 2730
+      },
+      "overProductionTimeout": {
+        "timeoutMs": 3000,
+        "count": 0
+      },
+      "labels": {
+        "tier": [
+          "trivial",
+          "standard",
+          "complex",
+          "exceptionally-hard"
+        ],
+        "effort": [
+          "nothing-to-figure-out",
+          "routine-reasoning",
+          "tricky-problem",
+          "hard-open-problem"
+        ]
+      }
+    },
+    {
+      "ranAt": "2026-11-03T16:58:44.343Z",
+      "tierAccuracy": 0.792,
+      "effortAccuracy": 0.917,
+      "timeouts": {
+        "tier": 0,
+        "effort": 0
+      },
+      "latencyMs": {
+        "p50": 1405,
+        "p90": 3496,
+        "max": 4601
+      },
+      "overProductionTimeout": {
+        "timeoutMs": 3000,
+        "count": 4
+      },
+      "labels": {
+        "tier": [
+          "trivial",
+          "standard",
+          "complex",
+          "exceptionally-hard"
+        ],
+        "effort": [
+          "nothing-to-figure-out",
+          "routine-reasoning",
+          "tricky-problem",
+          "hard-open-problem"
+        ]
+      }
+    },
+    {
+      "ranAt": "2026-11-03T16:59:34.284Z",
+      "tierAccuracy": 0.792,
+      "effortAccuracy": 0.875,
+      "timeouts": {
+        "tier": 0,
+        "effort": 0
+      },
+      "latencyMs": {
+        "p50": 1573,
+        "p90": 2488,
+        "max": 3245
+      },
+      "overProductionTimeout": {
+        "timeoutMs": 3000,
+        "count": 1
+      },
+      "labels": {
+        "tier": [
+          "trivial",
+          "standard",
+          "complex",
+          "exceptionally-hard"
+        ],
+        "effort": [
+          "nothing-to-figure-out",
+          "routine-reasoning",
+          "tricky-problem",
+          "hard-open-problem"
+        ]
       }
     }
   ],
   "range": {
     "tierAccuracy": [
-      0.667,
-      0.75
+      0.708,
+      0.792
     ],
     "effortAccuracy": [
-      0.5,
-      0.625
+      0.792,
+      0.917
     ],
-    "tierSpread": 0.083,
-    "effortSpread": 0.125
+    "tierSpread": 0.084,
+    "effortSpread": 0.125,
+    "tierMean": 0.76,
+    "effortMean": 0.875
   },
   "perPrompt": [
     {
@@ -118,7 +322,7 @@
         "effort": "low"
       },
       "tierHits": 4,
-      "effortHits": 0,
+      "effortHits": 4,
       "gotTier": [
         "haiku",
         "haiku",
@@ -126,10 +330,10 @@
         "haiku"
       ],
       "gotEffort": [
-        "medium",
-        "medium",
-        "medium",
-        "medium"
+        "low",
+        "low",
+        "low",
+        "low"
       ]
     },
     {
@@ -139,7 +343,7 @@
         "effort": "low"
       },
       "tierHits": 4,
-      "effortHits": 0,
+      "effortHits": 4,
       "gotTier": [
         "haiku",
         "haiku",
@@ -147,10 +351,10 @@
         "haiku"
       ],
       "gotEffort": [
-        "medium",
-        "medium",
-        "medium",
-        "medium"
+        "low",
+        "low",
+        "low",
+        "low"
       ]
     },
     {
@@ -181,7 +385,7 @@
         "effort": "low"
       },
       "tierHits": 4,
-      "effortHits": 0,
+      "effortHits": 4,
       "gotTier": [
         "haiku",
         "haiku",
@@ -189,10 +393,10 @@
         "haiku"
       ],
       "gotEffort": [
-        "medium",
-        "medium",
-        "medium",
-        "medium"
+        "low",
+        "low",
+        "low",
+        "low"
       ]
     },
     {
@@ -202,7 +406,7 @@
         "effort": "low"
       },
       "tierHits": 4,
-      "effortHits": 0,
+      "effortHits": 4,
       "gotTier": [
         "haiku",
         "haiku",
@@ -210,10 +414,10 @@
         "haiku"
       ],
       "gotEffort": [
-        "medium",
-        "medium",
-        "medium",
-        "medium"
+        "low",
+        "low",
+        "low",
+        "low"
       ]
     },
     {
@@ -223,7 +427,7 @@
         "effort": "low"
       },
       "tierHits": 4,
-      "effortHits": 0,
+      "effortHits": 4,
       "gotTier": [
         "haiku",
         "haiku",
@@ -231,10 +435,10 @@
         "haiku"
       ],
       "gotEffort": [
-        "medium",
-        "medium",
-        "medium",
-        "medium"
+        "low",
+        "low",
+        "low",
+        "low"
       ]
     },
     {
@@ -243,17 +447,17 @@
         "tier": "haiku",
         "effort": "low"
       },
-      "tierHits": 3,
+      "tierHits": 4,
       "effortHits": 3,
       "gotTier": [
-        null,
+        "haiku",
         "haiku",
         "haiku",
         "haiku"
       ],
       "gotEffort": [
-        null,
         "low",
+        "medium",
         "low",
         "low"
       ]
@@ -264,19 +468,19 @@
         "tier": "haiku",
         "effort": "low"
       },
-      "tierHits": 3,
-      "effortHits": 0,
+      "tierHits": 4,
+      "effortHits": 4,
       "gotTier": [
-        null,
+        "haiku",
         "haiku",
         "haiku",
         "haiku"
       ],
       "gotEffort": [
-        null,
-        "medium",
-        "medium",
-        "medium"
+        "low",
+        "low",
+        "low",
+        "low"
       ]
     },
     {
@@ -391,18 +595,18 @@
         "effort": "medium"
       },
       "tierHits": 0,
-      "effortHits": 0,
+      "effortHits": 3,
       "gotTier": [
-        null,
+        "opus",
         "opus",
         "opus",
         "opus"
       ],
       "gotEffort": [
-        null,
+        "medium",
         "high",
-        "high",
-        "high"
+        "medium",
+        "medium"
       ]
     },
     {
@@ -411,17 +615,17 @@
         "tier": "sonnet",
         "effort": "high"
       },
-      "tierHits": 0,
-      "effortHits": 2,
+      "tierHits": 1,
+      "effortHits": 4,
       "gotTier": [
         "opus",
         "opus",
-        "opus",
+        "sonnet",
         "opus"
       ],
       "gotEffort": [
-        "medium",
-        "medium",
+        "high",
+        "high",
         "high",
         "high"
       ]
@@ -453,17 +657,17 @@
         "tier": "opus",
         "effort": "high"
       },
-      "tierHits": 1,
-      "effortHits": 4,
+      "tierHits": 3,
+      "effortHits": 3,
       "gotTier": [
         "sonnet",
-        "sonnet",
-        "sonnet",
+        "opus",
+        "opus",
         "opus"
       ],
       "gotEffort": [
         "high",
-        "high",
+        "medium",
         "high",
         "high"
       ]
@@ -475,7 +679,7 @@
         "effort": "high"
       },
       "tierHits": 4,
-      "effortHits": 4,
+      "effortHits": 3,
       "gotTier": [
         "opus",
         "opus",
@@ -486,7 +690,7 @@
         "high",
         "high",
         "high",
-        "high"
+        "medium"
       ]
     },
     {
@@ -520,7 +724,7 @@
       "effortHits": 0,
       "gotTier": [
         "haiku",
-        "haiku",
+        "sonnet",
         "haiku",
         "haiku"
       ],
@@ -538,7 +742,7 @@
         "effort": "xhigh"
       },
       "tierHits": 4,
-      "effortHits": 3,
+      "effortHits": 4,
       "gotTier": [
         "opus",
         "opus",
@@ -546,7 +750,7 @@
         "opus"
       ],
       "gotEffort": [
-        "high",
+        "xhigh",
         "xhigh",
         "xhigh",
         "xhigh"
@@ -558,13 +762,13 @@
         "tier": "fable",
         "effort": "xhigh"
       },
-      "tierHits": 2,
+      "tierHits": 1,
       "effortHits": 4,
       "gotTier": [
-        "fable",
         "opus",
-        "fable",
-        "opus"
+        "opus",
+        "opus",
+        "fable"
       ],
       "gotEffort": [
         "xhigh",
@@ -594,5 +798,559 @@
         "high"
       ]
     }
-  ]
+  ],
+  "previous": {
+    "labels": {
+      "tier": [
+        "trivial",
+        "standard",
+        "complex",
+        "exceptionally-hard"
+      ],
+      "effort": [
+        "recall-or-lookup",
+        "routine-reasoning",
+        "tricky-problem",
+        "hard-open-problem"
+      ]
+    },
+    "why": "The low effort label recall-or-lookup sent mechanical edits, chores and acknowledgements to medium: 6 of the 9 low prompts in 14 of 14 live runs.",
+    "liveRuns2026-11-03": {
+      "runs": 14,
+      "source": "testing/live_classifier_261103_v1/run_*.json in the Mac checkout (testing/ is not tracked)",
+      "tierAccuracy": [
+        0.708,
+        0.792
+      ],
+      "effortAccuracy": [
+        0.542,
+        0.667
+      ],
+      "tierMean": 0.75,
+      "effortMean": 0.613
+    },
+    "range": {
+      "tierAccuracy": [
+        0.667,
+        0.75
+      ],
+      "effortAccuracy": [
+        0.5,
+        0.625
+      ],
+      "tierSpread": 0.083,
+      "effortSpread": 0.125
+    },
+    "gate": {
+      "tierAccuracy": 0.708,
+      "effortAccuracy": 0.583,
+      "why": "lowest run without timeouts"
+    },
+    "perPrompt": [
+      {
+        "prompt": "git stash pop이랑 git stash apply 차이가 뭐야?",
+        "want": {
+          "tier": "haiku",
+          "effort": "low"
+        },
+        "tierHits": 4,
+        "effortHits": 4,
+        "gotTier": [
+          "haiku",
+          "haiku",
+          "haiku",
+          "haiku"
+        ],
+        "gotEffort": [
+          "low",
+          "low",
+          "low",
+          "low"
+        ]
+      },
+      {
+        "prompt": "In README.md only, rename every `classifierTimeoutMs` mention to `classifierBudgetMs`.",
+        "want": {
+          "tier": "haiku",
+          "effort": "low"
+        },
+        "tierHits": 4,
+        "effortHits": 0,
+        "gotTier": [
+          "haiku",
+          "haiku",
+          "haiku",
+          "haiku"
+        ],
+        "gotEffort": [
+          "medium",
+          "medium",
+          "medium",
+          "medium"
+        ]
+      },
+      {
+        "prompt": "마지막 커밋 메시지 오타만 고쳐줘: 'fix(harnes)' -> 'fix(harness)'. amend로.",
+        "want": {
+          "tier": "haiku",
+          "effort": "low"
+        },
+        "tierHits": 4,
+        "effortHits": 0,
+        "gotTier": [
+          "haiku",
+          "haiku",
+          "haiku",
+          "haiku"
+        ],
+        "gotEffort": [
+          "medium",
+          "medium",
+          "medium",
+          "medium"
+        ]
+      },
+      {
+        "prompt": "What's the Nyquist frequency for 48 kHz audio?",
+        "want": {
+          "tier": "haiku",
+          "effort": "low"
+        },
+        "tierHits": 4,
+        "effortHits": 4,
+        "gotTier": [
+          "haiku",
+          "haiku",
+          "haiku",
+          "haiku"
+        ],
+        "gotEffort": [
+          "low",
+          "low",
+          "low",
+          "low"
+        ]
+      },
+      {
+        "prompt": "requirements-dev.txt에 pytest-xdist 추가하고 venv에 설치해줘",
+        "want": {
+          "tier": "haiku",
+          "effort": "low"
+        },
+        "tierHits": 4,
+        "effortHits": 0,
+        "gotTier": [
+          "haiku",
+          "haiku",
+          "haiku",
+          "haiku"
+        ],
+        "gotEffort": [
+          "medium",
+          "medium",
+          "medium",
+          "medium"
+        ]
+      },
+      {
+        "prompt": "Format this as 2-space indented JSON: {\"a\":1,\"b\":{\"c\":[1,2,3]}}",
+        "want": {
+          "tier": "haiku",
+          "effort": "low"
+        },
+        "tierHits": 4,
+        "effortHits": 0,
+        "gotTier": [
+          "haiku",
+          "haiku",
+          "haiku",
+          "haiku"
+        ],
+        "gotEffort": [
+          "medium",
+          "medium",
+          "medium",
+          "medium"
+        ]
+      },
+      {
+        "prompt": "README Options 표에 routeEffort 행이 빠졌어. 다른 행 형식 그대로 추가해줘.",
+        "want": {
+          "tier": "haiku",
+          "effort": "low"
+        },
+        "tierHits": 4,
+        "effortHits": 0,
+        "gotTier": [
+          "haiku",
+          "haiku",
+          "haiku",
+          "haiku"
+        ],
+        "gotEffort": [
+          "medium",
+          "medium",
+          "medium",
+          "medium"
+        ]
+      },
+      {
+        "prompt": "ModuleNotFoundError: No module named 'mlx' 이거 왜 나?",
+        "want": {
+          "tier": "haiku",
+          "effort": "low"
+        },
+        "tierHits": 3,
+        "effortHits": 3,
+        "gotTier": [
+          null,
+          "haiku",
+          "haiku",
+          "haiku"
+        ],
+        "gotEffort": [
+          null,
+          "low",
+          "low",
+          "low"
+        ]
+      },
+      {
+        "prompt": "thanks, looks good",
+        "want": {
+          "tier": "haiku",
+          "effort": "low"
+        },
+        "tierHits": 3,
+        "effortHits": 0,
+        "gotTier": [
+          null,
+          "haiku",
+          "haiku",
+          "haiku"
+        ],
+        "gotEffort": [
+          null,
+          "medium",
+          "medium",
+          "medium"
+        ]
+      },
+      {
+        "prompt": "Add a --dry-run flag to scripts/reload-sessions.sh that prints which sessions it would reload instead of reloading them.",
+        "want": {
+          "tier": "sonnet",
+          "effort": "medium"
+        },
+        "tierHits": 4,
+        "effortHits": 4,
+        "gotTier": [
+          "sonnet",
+          "sonnet",
+          "sonnet",
+          "sonnet"
+        ],
+        "gotEffort": [
+          "medium",
+          "medium",
+          "medium",
+          "medium"
+        ]
+      },
+      {
+        "prompt": "load_audio 함수에 대해 pytest fixture로 임시 wav 만들어서 테스트 3개 추가해줘 (mono, stereo, 빈 파일).",
+        "want": {
+          "tier": "sonnet",
+          "effort": "medium"
+        },
+        "tierHits": 4,
+        "effortHits": 4,
+        "gotTier": [
+          "sonnet",
+          "sonnet",
+          "sonnet",
+          "sonnet"
+        ],
+        "gotEffort": [
+          "medium",
+          "medium",
+          "medium",
+          "medium"
+        ]
+      },
+      {
+        "prompt": "Write a Python function si_sdr(ref, est) over numpy arrays with a docstring and a zero-mean step.",
+        "want": {
+          "tier": "sonnet",
+          "effort": "medium"
+        },
+        "tierHits": 4,
+        "effortHits": 4,
+        "gotTier": [
+          "sonnet",
+          "sonnet",
+          "sonnet",
+          "sonnet"
+        ],
+        "gotEffort": [
+          "medium",
+          "medium",
+          "medium",
+          "medium"
+        ]
+      },
+      {
+        "prompt": "harness repo-size 테스트에 정확히 5 GB 경계값 케이스 하나 추가해줘.",
+        "want": {
+          "tier": "sonnet",
+          "effort": "medium"
+        },
+        "tierHits": 0,
+        "effortHits": 4,
+        "gotTier": [
+          "haiku",
+          "haiku",
+          "haiku",
+          "haiku"
+        ],
+        "gotEffort": [
+          "medium",
+          "medium",
+          "medium",
+          "medium"
+        ]
+      },
+      {
+        "prompt": "Convert this argparse CLI in train.py to typer, keeping every flag name and default.",
+        "want": {
+          "tier": "sonnet",
+          "effort": "medium"
+        },
+        "tierHits": 4,
+        "effortHits": 4,
+        "gotTier": [
+          "sonnet",
+          "sonnet",
+          "sonnet",
+          "sonnet"
+        ],
+        "gotEffort": [
+          "medium",
+          "medium",
+          "medium",
+          "medium"
+        ]
+      },
+      {
+        "prompt": "Port the Moog ladder filter from the musicdsp snippet to Rust for nih-plug, with 2x oversampling.",
+        "want": {
+          "tier": "sonnet",
+          "effort": "medium"
+        },
+        "tierHits": 0,
+        "effortHits": 0,
+        "gotTier": [
+          null,
+          "opus",
+          "opus",
+          "opus"
+        ],
+        "gotEffort": [
+          null,
+          "high",
+          "high",
+          "high"
+        ]
+      },
+      {
+        "prompt": "Explain why a trapezoidal-integrated SVF stays stable at high cutoff where a naive Chamberlin SVF blows up.",
+        "want": {
+          "tier": "sonnet",
+          "effort": "high"
+        },
+        "tierHits": 0,
+        "effortHits": 2,
+        "gotTier": [
+          "opus",
+          "opus",
+          "opus",
+          "opus"
+        ],
+        "gotEffort": [
+          "medium",
+          "medium",
+          "high",
+          "high"
+        ]
+      },
+      {
+        "prompt": "Our STFT denoiser has a metallic ringing artifact only on 44.1 kHz input, not 48 kHz. Find the cause.",
+        "want": {
+          "tier": "opus",
+          "effort": "high"
+        },
+        "tierHits": 4,
+        "effortHits": 4,
+        "gotTier": [
+          "opus",
+          "opus",
+          "opus",
+          "opus"
+        ],
+        "gotEffort": [
+          "high",
+          "high",
+          "high",
+          "high"
+        ]
+      },
+      {
+        "prompt": "학습 중 loss가 3 epoch 이후 NaN이 돼. mixed precision 켜져 있고 grad clipping은 1.0이야. 원인 찾아서 고쳐줘.",
+        "want": {
+          "tier": "opus",
+          "effort": "high"
+        },
+        "tierHits": 1,
+        "effortHits": 4,
+        "gotTier": [
+          "sonnet",
+          "sonnet",
+          "sonnet",
+          "opus"
+        ],
+        "gotEffort": [
+          "high",
+          "high",
+          "high",
+          "high"
+        ]
+      },
+      {
+        "prompt": "goal-mode와 auto-claude가 같은 .claude/goals.md를 동시에 쓰는 경합이 있어. 공유 자체를 없애는 쪽으로 설계 바꿔줘.",
+        "want": {
+          "tier": "opus",
+          "effort": "high"
+        },
+        "tierHits": 4,
+        "effortHits": 4,
+        "gotTier": [
+          "opus",
+          "opus",
+          "opus",
+          "opus"
+        ],
+        "gotEffort": [
+          "high",
+          "high",
+          "high",
+          "high"
+        ]
+      },
+      {
+        "prompt": "Make the order executor's retries idempotent across process restarts; it touches the broker client, the order store and the scheduler.",
+        "want": {
+          "tier": "opus",
+          "effort": "high"
+        },
+        "tierHits": 4,
+        "effortHits": 4,
+        "gotTier": [
+          "opus",
+          "opus",
+          "opus",
+          "opus"
+        ],
+        "gotEffort": [
+          "high",
+          "high",
+          "high",
+          "high"
+        ]
+      },
+      {
+        "prompt": "Short answer please: should model-tier classify every prompt, or only when the topic changes? Three lines max.",
+        "want": {
+          "tier": "opus",
+          "effort": "high"
+        },
+        "tierHits": 0,
+        "effortHits": 0,
+        "gotTier": [
+          "haiku",
+          "haiku",
+          "haiku",
+          "haiku"
+        ],
+        "gotEffort": [
+          "medium",
+          "medium",
+          "medium",
+          "medium"
+        ]
+      },
+      {
+        "prompt": "Design the wire protocol between the plugin host and a remote fleet-hub over Tailscale: auth, backpressure, reconnect and replay semantics.",
+        "want": {
+          "tier": "opus",
+          "effort": "xhigh"
+        },
+        "tierHits": 4,
+        "effortHits": 3,
+        "gotTier": [
+          "opus",
+          "opus",
+          "opus",
+          "opus"
+        ],
+        "gotEffort": [
+          "high",
+          "xhigh",
+          "xhigh",
+          "xhigh"
+        ]
+      },
+      {
+        "prompt": "Opus failed twice at this: invent a vocoder training loss that removes phase artifacts without a discriminator. Survey what exists, propose one, and derive its gradient.",
+        "want": {
+          "tier": "fable",
+          "effort": "xhigh"
+        },
+        "tierHits": 2,
+        "effortHits": 4,
+        "gotTier": [
+          "fable",
+          "opus",
+          "fable",
+          "opus"
+        ],
+        "gotEffort": [
+          "xhigh",
+          "xhigh",
+          "xhigh",
+          "xhigh"
+        ]
+      },
+      {
+        "prompt": "Prove our sticky downgrade rule (step down after N consecutive lower verdicts, upgrade at once) can never oscillate forever under any verdict sequence, or give a counterexample, and redesign it across tier, effort and subagent routing if it can.",
+        "want": {
+          "tier": "fable",
+          "effort": "xhigh"
+        },
+        "tierHits": 0,
+        "effortHits": 0,
+        "gotTier": [
+          "opus",
+          "opus",
+          "opus",
+          "opus"
+        ],
+        "gotEffort": [
+          "high",
+          "high",
+          "high",
+          "high"
+        ]
+      }
+    ]
+  }
 }
