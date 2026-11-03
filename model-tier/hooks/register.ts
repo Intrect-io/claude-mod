@@ -130,6 +130,18 @@ export function decide(s: TierState, proposed: Tier, o: DecideOptions): TierStat
 }
 
 /**
+ * Whether any tier verdict could change the main loop's tier now. False when the
+ * person pinned it, or when it already sits at the highest automatic tier and the
+ * context is past `maxTokensForDowngrade`: no label can raise it (capped) or lower
+ * it (the ceiling). Measured 2026-11-03: the average main-loop context was ~400k
+ * tokens, so this holds on most turns, and classifying there only spends quota.
+ */
+export function canTierChange(s: TierState, o: DecideOptions, maxAuto: Tier): boolean {
+  if (s.source === 'pinned') return false
+  return !(RANK[s.tier] >= RANK[maxAuto] && s.lastInputTokens > o.maxTokensForDowngrade)
+}
+
+/**
  * Folds one effort verdict into the state, the way `decide` folds a tier:
  * more effort at once, less only after `downgradeAfterTurns` lower verdicts in
  * a row (a request's thinking setting is part of what the prompt cache keys on).
@@ -212,7 +224,7 @@ const LOG_MAX_LINES = 500
 type LogEntry =
   | { event: 'classifier-timeout'; classifier: 'tier' | 'effort' | 'subagent'; ranMs: number; kept: { tier: Tier; effort?: Effort } }
   // A label that came after the prompt went on: `ms` is the classifier's real latency.
-  | { event: 'classifier-late'; ms: number; applied: boolean; waited: boolean }
+  | { event: 'classifier-late'; ms: number; applied: boolean; waited: boolean; wantTier: boolean }
 
 async function logEvent($: EngineInterface, entry: LogEntry): Promise<void> {
   try {
@@ -240,7 +252,7 @@ let promptSeq = 0
 // The last classifier answer came later than the bound.
 let classifierSlow = false
 
-type LateOptions = { decideOptions: DecideOptions; timeoutMs: number; enabled: boolean }
+type LateOptions = { decideOptions: DecideOptions; timeoutMs: number; enabled: boolean; wantTier: boolean }
 
 /**
  * A label that missed the bound still decides the rest of the turn: turn.step
@@ -260,7 +272,7 @@ async function applyLate($: EngineInterface, labels: PromptLabels, seq: number, 
     s = await update($, state, v => (effort !== undefined && v.effortSource !== 'pinned' ? decideEffort(v, effort, o.decideOptions) : v))
     void show($, s, o.enabled)
   }
-  await logEvent($, { event: 'classifier-late', ms: got.ms, applied: current, waited })
+  await logEvent($, { event: 'classifier-late', ms: got.ms, applied: current, waited, wantTier: o.wantTier })
 }
 
 export const register: Register = (on, options) => {
@@ -366,7 +378,7 @@ export const register: Register = (on, options) => {
     if (!enabled || e.isMeta || e.command !== undefined || e.text.trim() === '') return next(e)
     const current = await read($, state)
     let s = current
-    const wantTier = current.source !== 'pinned'
+    const wantTier = canTierChange(current, decideOptions, maxAuto)
     const wantEffort = routeEffort && current.effortSource !== 'pinned'
     const seq = ++promptSeq
     // While the classifier is slower than the bound (measured: whole sessions
@@ -374,7 +386,7 @@ export const register: Register = (on, options) => {
     // late, for the rest of the turn.
     const waited = !classifierSlow
     const labels = await labelPrompt($, e.text, { model: classifierModel, timeoutMs: waited ? classifierTimeoutMs : 0, maxAuto, wantTier, wantEffort })
-    if (labels.tierTimedOut || labels.effortTimedOut) void applyLate($, labels, seq, waited, { decideOptions, timeoutMs: classifierTimeoutMs, enabled }).catch(() => undefined)
+    if (labels.tierTimedOut || labels.effortTimedOut) void applyLate($, labels, seq, waited, { decideOptions, timeoutMs: classifierTimeoutMs, enabled, wantTier }).catch(() => undefined)
     else classifierSlow = false
     const proposed = labels.tier
     const effort = labels.effort

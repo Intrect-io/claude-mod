@@ -83,3 +83,25 @@ P2: cost, upkeep or polish.
 - **Evidence.** `model-tier/hooks/register.ts:26`. Measured: the label `quick-answer` sent a hard design question ("세 줄 이내로") to `low`. The renamed `tricky-problem` labels sent it to `high`. And `exceptionally-hard` routed a novel BFT-protocol design prompt to fable, which answered after 8 min 7 s.
 - **Fix.** Add a small eval: 20 labelled prompts in `model-tier/eval/prompts.jsonl`, run by `claude plugin eval` (or `bun model-tier/eval/run.ts`) against haiku. Fail when tier or effort accuracy drops below the last run, so a label rename is measured before it ships.
 
+### model-tier: routing saved 1.6%; the classifier answers in ~21 s
+
+- **Status (2026-11-03):** partly fixed in model-tier 0.7.0. The tier classifier is skipped when no verdict could change the tier (`canTierChange`). Open: the latency fix belongs in CC-Router (below).
+- **Evidence.** Measured over 14 days of transcripts (`testing/tier_effect_261103_v1.py`, `testing/billing_mix_261103_v1.py`).
+  - Main loop: 87.6% of 54,323 requests ran on opus. Only 37 of 351 sessions used more than one model. Against an all-opus counterfactual, routing saved 1.6%.
+  - Most turns cannot step down: the average context is ~400k tokens against `maxTokensForDowngrade` 200k. That ceiling is right. A switch rewrites the whole prefix, at 2x with the 1h cache TTL now on. Do not raise it.
+  - `~/.claude/model-tier.log`, last 400 lines: 269 `classifier-late` and 131 `classifier-timeout`, p50 21.5 s and p90 22.2 s. The tight cluster is a wait, not model latency.
+  - CC-Router on ubuntu-mini has its throttle on (`~/.cc-router/config.json`: 4 in flight per account, 250 ms spacing). `src/proxy/throttle.ts` waits up to `maxWaitMs` 20000, then lets the request through (fail-open).
+  - The slow classifier also defeats subagent routing. Subagents cost ~$2.7k, and general-purpose was half of it: 76% of its requests ran on opus, because a timed-out spawn keeps the parent's model.
+- **Fix.**
+  - Done: `canTierChange` in `model-tier/hooks/register.ts` (pinned, or at `maxAutoTier` past the ceiling: classify effort only).
+  - Open, CC-Router: let short, non-streaming, tool-less requests (the classifier's) skip the throttle wait or go to the front, and log each throttle wait. Then re-run `/tier eval` and the two scripts.
+
+### Tried and dropped: a haiku digest of large Bash output (2026-11-03)
+
+- **Idea.** A large Bash result goes to haiku first, and opus gets only the relevant lines, verbatim, plus a spill file holding the full output.
+- **Why dropped.** It failed its gate in an offline replay of 100 real large results (`testing/digest_replay_261103_v1/`).
+  - RULES v1: coverage 0.78 of the identifiers that the next action used, compression 0.55.
+  - RULES v2, more conservative: coverage 0.99, but compression 0.98, because 93 of the 100 came back `NEED_FULL`.
+  - Research agrees: compressing tool output as it arrives raised billed cost by 6.8% in a Claude Code study (arXiv 2607.12161).
+- **What mattered instead.** Tool-output size is not a proxy for cost. 49% of main/opus spend was cache writes, and 88% of those came from 5-minute TTL expiry after idle gaps. `ENABLE_PROMPT_CACHING_1H=1` is now set on the Mac and vela.
+- **Where the code is.** In `trash/digest_261103/`, with the replay in `testing/digest_replay_261103_v1/`. Its `digest-lib.ts` holds the v2 RULES.
