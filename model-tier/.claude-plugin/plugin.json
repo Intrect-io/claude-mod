@@ -1,6 +1,6 @@
 {
   "name": "model-tier",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Routes each main-loop turn to fable, opus, sonnet or haiku and a reasoning effort by task complexity, with a set_tier tool the model calls to correct either",
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -57,6 +57,12 @@
       "title": "Follow-up length (chars)",
       "description": "A prompt this short or shorter (\"continue\", \"다음 단계 진행해\") goes on with the work in progress: it may raise the tier or effort, never lower them",
       "default": 40
+    },
+    "routableAgents": {
+      "type": "string",
+      "title": "Routed subagent types",
+      "description": "Comma-separated subagent types whose spawns with no explicit model get a tier from the classifier. A type left out keeps its definition's model or the parent's. Empty routes none",
+      "default": "general-purpose,claude,Explore"
     },
     "routeEffort": {
       "type": "boolean",

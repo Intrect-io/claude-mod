@@ -51,7 +51,15 @@ export const DEFAULT_PROVIDER_TIER_MODELS: Record<string, Partial<Record<Tier, s
 }
 
 // Subagent types that carry no model of their own; others keep their definition's.
-const ROUTABLE_AGENTS = new Set(['general-purpose', 'claude'])
+// Explore joined after a live probe (2026-11-04, Claude Code 2.1.317): its spawn
+// reached agent.spawn with no model and its steps ran on the parent's opus.
+export const DEFAULT_ROUTABLE_AGENTS = 'general-purpose,claude,Explore'
+
+/** The `routableAgents` list (`a,b,c`) as a set; an unset value takes the default, an empty one routes none. */
+export function routableAgents(spec: unknown): Set<string> {
+  const text = typeof spec === 'string' ? spec : DEFAULT_ROUTABLE_AGENTS
+  return new Set(text.split(',').map(t => t.trim()).filter(t => t !== ''))
+}
 
 // Full model ids per tier. A request built here goes to the API as written:
 // unlike /model or --model, an alias ('sonnet') is not resolved, and a router
@@ -280,6 +288,7 @@ export const register: Register = (on, options) => {
   const providers = providerTierModels(options.providerTierModels)
   const routeEffort = options.routeEffort !== false
   const maxAuto = maxAutoTier(options.maxAutoTier)
+  const routable = routableAgents(options.routableAgents)
   const followUpChars = Number(options.followUpChars ?? DEFAULT_FOLLOW_UP_CHARS)
   const autoTiers = TIERS.filter(t => RANK[t] <= RANK[maxAuto])
 
@@ -527,7 +536,7 @@ export const register: Register = (on, options) => {
   })
 
   on('agent.spawn', async ($, e, next) => {
-    if (!enabled || e.fork || e.model !== undefined || !ROUTABLE_AGENTS.has(e.subagentType)) return next(e)
+    if (!enabled || e.fork || e.model !== undefined || !routable.has(e.subagentType)) return next(e)
     const { tier, tierTimedOut, settled } = await labelPrompt($, e.prompt, { model: classifierModel, timeoutMs: classifierTimeoutMs, maxAuto, wantTier: true, wantEffort: false })
     if (tierTimedOut) {
       const s = await read($, state)

@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { AgentSpawnInput, HookStream, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import type { TierState } from '../types'
-import { canTierChange, capTier, decide, decideEffort, INITIAL, isFollowUp, isTier, maxAutoTier, modelFor, providerOf, providerTierModels, tierModels } from './register'
+import { canTierChange, capTier, decide, decideEffort, INITIAL, isFollowUp, isTier, maxAutoTier, modelFor, providerOf, providerTierModels, routableAgents, tierModels } from './register'
 
 const OPTS = { downgradeAfterTurns: 2, maxTokensForHaiku: 150000, maxTokensForDowngrade: 200000 }
 const at = (over: Partial<TierState>): TierState => ({ ...INITIAL, ...over })
@@ -368,7 +368,7 @@ describe('the plugin', () => {
     expect(model).toBe('claude-opus-5-5')
   })
 
-  test('a typed subagent keeps its own model', async ($, on) => {
+  test('a subagent type outside routableAgents keeps its own model', async ($, on) => {
     on('model.classify', () => ({ value: 'trivial' }))
     let model: string | undefined = 'unset'
     on('agent.spawn', (_, e) => {
@@ -376,9 +376,44 @@ describe('the plugin', () => {
       return { model: e.model ?? e.parentModel }
     })
 
-    await $.agent.spawn({ ...SPAWN, subagentType: 'Explore' })
+    await $.agent.spawn({ ...SPAWN, subagentType: 'code-reviewer' })
 
     expect(model).toBeUndefined()
+  })
+
+  test('routableAgents: an Explore spawn with no model is routed by default', async ($, on) => {
+    on('model.classify', () => ({ value: 'trivial' }))
+    on('clock.sleep', () => new Promise(() => {}))
+    let model: string | undefined
+    on('agent.spawn', (_, e) => {
+      model = e.model
+      return { model: e.model ?? e.parentModel }
+    })
+
+    await $.agent.spawn({ ...SPAWN, subagentType: 'Explore' })
+
+    expect(model).toBe('claude-haiku-5-5')
+  })
+
+  test('routableAgents: a configured list replaces the default, so a type dropped from it keeps the parent model', { options: { routableAgents: 'general-purpose' } }, async ($, on) => {
+    on('model.classify', () => ({ value: 'trivial' }))
+    on('clock.sleep', () => new Promise(() => {}))
+    const models: Array<string | undefined> = []
+    on('agent.spawn', (_, e) => {
+      models.push(e.model)
+      return { model: e.model ?? e.parentModel }
+    })
+
+    await $.agent.spawn({ ...SPAWN, subagentType: 'Explore' })
+    await $.agent.spawn(SPAWN)
+
+    expect(models).toEqual([undefined, 'claude-haiku-5-5'])
+  })
+
+  test('routableAgents parses a comma list; unset takes the default and empty routes none', () => {
+    expect([...routableAgents(undefined)]).toEqual(['general-purpose', 'claude', 'Explore'])
+    expect([...routableAgents(' general-purpose , Plan ,')]).toEqual(['general-purpose', 'Plan'])
+    expect(routableAgents('').size).toBe(0)
   })
 
   test('a subagent step is left alone', async ($, on) => {
