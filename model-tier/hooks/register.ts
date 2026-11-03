@@ -100,15 +100,30 @@ export type DecideOptions = {
   maxTokensForDowngrade: number
 }
 
+export const DEFAULT_FOLLOW_UP_CHARS = 40
+
+/**
+ * A short prompt ("continue", "다음 단계 진행해") goes on with the work in
+ * progress, but the classifier sees only its text and labels it trivial.
+ * Measured 2026-11-03: 51% of 2,668 real prompts over 14 days were 40
+ * characters or fewer. Such a prompt may raise the pick but never lower it.
+ */
+export function isFollowUp(text: string, followUpChars: number): boolean {
+  return text.trim().length <= followUpChars
+}
+
 /**
  * Folds one classifier verdict into the state. Upgrades apply at once;
  * downgrades wait for `downgradeAfterTurns` consecutive lower verdicts, since
  * every model switch re-bills the conversation prefix outside the prompt cache.
  */
-export function decide(s: TierState, proposed: Tier, o: DecideOptions): TierState {
+export function decide(s: TierState, proposed: Tier, o: DecideOptions, followUp = false): TierState {
   if (s.source === 'pinned') return s
   let target = proposed
   if (target === 'haiku' && s.lastInputTokens > o.maxTokensForHaiku) target = 'sonnet'
+  // A short follow-up in a session that has sent requests only raises: a
+  // same or lower verdict leaves the tier and any pending downgrade as they are.
+  if (followUp && s.lastInputTokens > 0 && RANK[target] <= RANK[s.tier]) return s
 
   if (RANK[target] >= RANK[s.tier]) {
     const changed = target !== s.tier
@@ -149,8 +164,9 @@ export function canTierChange(s: TierState, o: DecideOptions, maxAuto: Tier): bo
  * more effort at once, less only after `downgradeAfterTurns` lower verdicts in
  * a row (a request's thinking setting is part of what the prompt cache keys on).
  */
-export function decideEffort(s: TierState, proposed: Effort, o: DecideOptions): TierState {
+export function decideEffort(s: TierState, proposed: Effort, o: DecideOptions, followUp = false): TierState {
   if (s.effortSource === 'pinned') return s
+  if (followUp && s.lastInputTokens > 0 && s.effort !== undefined && EFFORT_RANK[proposed] <= EFFORT_RANK[s.effort]) return s
   if (s.effort === undefined || EFFORT_RANK[proposed] >= EFFORT_RANK[s.effort]) {
     const changed = proposed !== s.effort
     return { ...s, effort: proposed, effortSource: changed ? 'auto' : s.effortSource, pendingEffortDown: undefined, pendingEffortCount: 0 }
@@ -228,7 +244,7 @@ let promptSeq = 0
 // The last classifier answer came later than the bound.
 let classifierSlow = false
 
-type LateOptions = { decideOptions: DecideOptions; timeoutMs: number; enabled: boolean; wantTier: boolean }
+type LateOptions = { decideOptions: DecideOptions; timeoutMs: number; enabled: boolean; wantTier: boolean; followUp: boolean }
 
 /**
  * A label that missed the bound still decides the rest of the turn: turn.step
@@ -244,8 +260,8 @@ async function applyLate($: EngineInterface, labels: PromptLabels, seq: number, 
   const tier = labels.tierTimedOut ? got.tier : undefined
   const effort = labels.effortTimedOut ? got.effort : undefined
   if (current && (tier !== undefined || effort !== undefined)) {
-    let s = await update($, state, v => (tier !== undefined && v.source !== 'pinned' ? decide(v, tier, o.decideOptions) : v))
-    s = await update($, state, v => (effort !== undefined && v.effortSource !== 'pinned' ? decideEffort(v, effort, o.decideOptions) : v))
+    let s = await update($, state, v => (tier !== undefined && v.source !== 'pinned' ? decide(v, tier, o.decideOptions, o.followUp) : v))
+    s = await update($, state, v => (effort !== undefined && v.effortSource !== 'pinned' ? decideEffort(v, effort, o.decideOptions, o.followUp) : v))
     void show($, s, o.enabled)
   }
   await appendLog($, { event: 'classifier-late', ms: got.ms, applied: current, waited, wantTier: o.wantTier })
@@ -264,6 +280,7 @@ export const register: Register = (on, options) => {
   const providers = providerTierModels(options.providerTierModels)
   const routeEffort = options.routeEffort !== false
   const maxAuto = maxAutoTier(options.maxAutoTier)
+  const followUpChars = Number(options.followUpChars ?? DEFAULT_FOLLOW_UP_CHARS)
   const autoTiers = TIERS.filter(t => RANK[t] <= RANK[maxAuto])
 
   on('session.start', async ($, e, next) => {
@@ -359,17 +376,18 @@ export const register: Register = (on, options) => {
     const wantTier = canTierChange(current, decideOptions, maxAuto)
     const wantEffort = routeEffort && current.effortSource !== 'pinned'
     const seq = ++promptSeq
+    const followUp = isFollowUp(e.text, followUpChars)
     // While the classifier is slower than the bound (measured: whole sessions
     // at ~21 s a call), waiting only delays the prompt; the label still lands
     // late, for the rest of the turn.
     const waited = !classifierSlow
     const labels = await labelPrompt($, e.text, { model: classifierModel, timeoutMs: waited ? classifierTimeoutMs : 0, maxAuto, wantTier, wantEffort })
-    if (labels.tierTimedOut || labels.effortTimedOut) void applyLate($, labels, seq, waited, { decideOptions, timeoutMs: classifierTimeoutMs, enabled, wantTier }).catch(() => undefined)
+    if (labels.tierTimedOut || labels.effortTimedOut) void applyLate($, labels, seq, waited, { decideOptions, timeoutMs: classifierTimeoutMs, enabled, wantTier, followUp }).catch(() => undefined)
     else classifierSlow = false
     const proposed = labels.tier
     const effort = labels.effort
-    if (proposed) s = await update($, state, v => decide(v, proposed, decideOptions))
-    if (effort) s = await update($, state, v => decideEffort(v, effort, decideOptions))
+    if (proposed) s = await update($, state, v => decide(v, proposed, decideOptions, followUp))
+    if (effort) s = await update($, state, v => decideEffort(v, effort, decideOptions, followUp))
     const kept = { tier: s.tier, effort: s.effort ?? null }
     if (waited && labels.tierTimedOut) await appendLog($, { event: 'classifier-timeout', classifier: 'tier', ranMs: classifierTimeoutMs, kept })
     if (waited && labels.effortTimedOut) await appendLog($, { event: 'classifier-timeout', classifier: 'effort', ranMs: classifierTimeoutMs, kept })
@@ -384,6 +402,7 @@ export const register: Register = (on, options) => {
         from: { tier: current.tier, effort: current.effort ?? null },
         verdict: { tier: proposed ?? null, effort: effort ?? null },
         wantTier,
+        followUp,
         waited,
         timedOut,
         ms,
@@ -397,11 +416,12 @@ export const register: Register = (on, options) => {
     // be wrong (a classifier timed out, or its verdict was held back: a
     // downgrade waiting for more turns, or the haiku context guard).
     const pick = `${s.tier}·${s.effort ?? ''}`
+    // A short follow-up held below the pick is the rule working, not doubt.
     const uncertain =
       labels.tierTimedOut ||
       labels.effortTimedOut ||
-      (proposed !== undefined && proposed !== s.tier) ||
-      (effort !== undefined && effort !== s.effort)
+      (!followUp && proposed !== undefined && proposed !== s.tier) ||
+      (!followUp && effort !== undefined && effort !== s.effort)
     if (!noteDue(s.notedPick, pick, uncertain)) return next(e)
     s = await update($, state, v => ({ ...v, notedPick: pick }))
     const effortPart = s.effort ? ` with ${s.effort} effort (${s.effortSource})` : ''
