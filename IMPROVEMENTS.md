@@ -79,6 +79,7 @@ P2: cost, upkeep or polish.
 ### model-tier: label names steer the classifier; nothing checks a rename
 
 - **Status:** resolved in #21. `/tier eval` runs the production `labelPrompt` over `model-tier/eval/prompts.jsonl`, and `baseline.json` holds 4 runs. Open: effort is wrong in a systematic way on mechanical edits (5 of 9 `low` prompts come back `medium`), and the README gate number (effort 0.583) is tighter than the measured spread (0.125).
+- **Status (2026-11-04):** the mechanical-edit error is resolved in model-tier 0.11.0. The low effort label is now `nothing-to-figure-out`. Effort accuracy on 4 live runs is 0.792 to 0.917 (mean 0.875), up from a mean of 0.613 over 14 runs on `recall-or-lookup`. Tier accuracy is unchanged at 0.708 to 0.792. Each eval run records its label set, and the gate counts only runs on the shipped labels. Still open: `Prove …` (want `xhigh`) comes back `high`, and the short-reply design question (want `high`) comes back `medium`.
 
 - **Evidence.** `model-tier/hooks/register.ts:26`. Measured: the label `quick-answer` sent a hard design question ("세 줄 이내로") to `low`. The renamed `tricky-problem` labels sent it to `high`. And `exceptionally-hard` routed a novel BFT-protocol design prompt to fable, which answered after 8 min 7 s.
 - **Fix.** Add a small eval: 20 labelled prompts in `model-tier/eval/prompts.jsonl`, run by `claude plugin eval` (or `bun model-tier/eval/run.ts`) against haiku. Fail when tier or effort accuracy drops below the last run, so a label rename is measured before it ships.
