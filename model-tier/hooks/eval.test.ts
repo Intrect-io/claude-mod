@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
 import type { EvalRun } from './eval'
+import { EFFORT_LABELS, LABELS } from './label'
 
 type On = Parameters<TestBody>[1]
 const RUN = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } } as const
@@ -44,7 +45,7 @@ describe('labelPrompt, through /tier eval', () => {
 
   test('a classifier that never answers times out at the eval bound and the run goes on', async ($, on) => {
     const clock = mock.clock(on, { now: 0 })
-    on('model.classify', (_, e) => ((e.labels as readonly string[]).includes('complex') ? new Promise(() => {}) : { value: 'recall-or-lookup' }))
+    on('model.classify', (_, e) => ((e.labels as readonly string[]).includes('complex') ? new Promise(() => {}) : { value: 'nothing-to-figure-out' }))
     const files = await started($, on, [line('x')])
     const ran = $.command.run({ command: 'tier', args: 'eval /e/p.jsonl', ...RUN })
     await clock.advance(30_000)
@@ -87,7 +88,7 @@ describe('/tier eval', () => {
       return { value: undefined }
     })
     const verdicts: Record<string, [string, string]> = {
-      'rename x': ['trivial', 'recall-or-lookup'],
+      'rename x': ['trivial', 'nothing-to-figure-out'],
       'design y': ['complex', 'routine-reasoning'],
       'prove z': ['exceptionally-hard', 'hard-open-problem'],
       'add w': ['standard', 'tricky-problem'],
@@ -112,6 +113,9 @@ describe('/tier eval', () => {
       { tier: 'sonnet', effort: 'high' },
     ])
     expect(run.timeouts).toEqual({ tier: 0, effort: 0 })
+    // The run names the label sets it measured, so a gate counts only runs on the shipped labels.
+    expect(run.labels).toEqual({ tier: [...LABELS], effort: [...EFFORT_LABELS] })
+    expect(run.labels.effort[0]).toBe('nothing-to-figure-out')
     expect(run.latencyMs).toEqual({ p50: 8000, p90: 8000, max: 8000 })
     expect(run.overProductionTimeout).toEqual({ timeoutMs: 3000, count: 4 })
     expect(r.text).toContain('tier accuracy 1, effort accuracy 0.75')

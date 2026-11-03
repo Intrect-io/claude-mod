@@ -453,7 +453,7 @@ describe('the plugin', () => {
     on('command.register', () => ({ value: { command: 'tier' } }))
     on('session.start', (_, e) => ({ cwd: e.cwd }))
     // Each label set gets its own answer.
-    on('model.classify', (_, e) => ({ value: (e.labels as readonly string[]).includes('complex') ? 'complex' : 'recall-or-lookup' }))
+    on('model.classify', (_, e) => ({ value: (e.labels as readonly string[]).includes('complex') ? 'complex' : 'nothing-to-figure-out' }))
     let context: readonly string[] | undefined
     on('prompt.submit', (_, e) => {
       context = e.context
