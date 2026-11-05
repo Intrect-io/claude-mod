@@ -1,0 +1,42 @@
+{
+  "name": "refactor",
+  "version": "0.1.0",
+  "description": "Architecture rules a repository declares in .claude/architecture.json, enforced at Edit/Write (layer direction, forbidden imports), plus code-smell notes and a refactoring catalog keyed to refactoring.guru",
+  "author": {
+    "name": "unohee"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "archFile": {
+      "type": "string",
+      "title": "Architecture file",
+      "description": "Path, relative to the repository root, of the file that declares layers and allowed imports",
+      "default": ".claude/architecture.json"
+    },
+    "arch": {
+      "type": "boolean",
+      "title": "Enforce architecture",
+      "description": "Refuse an Edit or Write that adds an import the architecture file forbids",
+      "default": true
+    },
+    "smells": {
+      "type": "boolean",
+      "title": "Smell notes",
+      "description": "After an edit, note long functions, long parameter lists, deep nesting, large files and repeated blocks, with the refactoring to apply",
+      "default": true
+    },
+    "stopAudit": {
+      "type": "boolean",
+      "title": "Audit at stop",
+      "description": "When a turn ends, check the files changed since HEAD for violations that bypassed Edit/Write (e.g. sed -i), as a note",
+      "default": true
+    },
+    "llmReview": {
+      "type": "boolean",
+      "title": "Model review at stop",
+      "description": "When a turn ends, have a small model review the diff against the smell catalog, as a note (costs one request per turn with changes)",
+      "default": false
+    }
+  }
+}

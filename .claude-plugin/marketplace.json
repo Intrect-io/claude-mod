@@ -41,6 +41,15 @@
       },
       "source": "./auto-claude",
       "category": "development"
+    },
+    {
+      "name": "refactor",
+      "description": "Enforces the architecture a repository declares in .claude/architecture.json at Edit/Write (layer direction, forbidden imports), notes code smells with the refactoring to apply, and ships a refactoring.guru-keyed catalog and /arch audit.",
+      "author": {
+        "name": "unohee"
+      },
+      "source": "./refactor",
+      "category": "development"
     }
   ]
 }
