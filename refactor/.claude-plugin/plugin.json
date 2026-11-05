@@ -1,6 +1,6 @@
 {
   "name": "refactor",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Architecture rules a repository declares in .claude/architecture.json, enforced at Edit/Write (layer direction, forbidden imports), plus code-smell notes and a refactoring catalog keyed to refactoring.guru",
   "author": {
     "name": "unohee"

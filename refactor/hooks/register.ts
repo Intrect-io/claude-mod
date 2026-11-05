@@ -376,7 +376,7 @@ async function auditCommand($: EngineInterface, root: string, arch: Architecture
 }
 
 // Tests, tooling scripts, generated and vendored code: long by nature, not worth a refactor.
-const SMELL_SKIP = /(^|\/)(\.[^/]+|tests?|__tests__|spec|fixtures?|node_modules|vendor|third_party|dist|build|target|migrations|generated)\/|(^|\/)(test_[^/]*|[^/]*_test\.\w+|[^/]*\.(test|spec)\.\w+|conftest\.py)$/
+const SMELL_SKIP = /(^|\/)(\.[^/]+|tests?|__tests__|spec|fixtures?|node_modules|vendor|third_party|dist|build[^/]*|static|target|migrations|generated)\/|(^|\/)(test_[^/]*|[^/]*_test\.\w+|[^/]*\.(test|spec)\.\w+|conftest\.py)$/
 
 export const smellScope = (file: string) => !SMELL_SKIP.test(file)
 
