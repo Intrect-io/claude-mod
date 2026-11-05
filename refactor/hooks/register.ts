@@ -233,38 +233,50 @@ export const register: Register = (on, options: Options) => {
     return { ...below, additionalContext: [...(below.additionalContext ?? []), ...notes] }
   })
 
-  on('command.run', { command: COMMAND }, async ($, e) => {
-    const words = e.args.trim().split(/\s+/).filter(word => word !== '')
-    const [action = 'status', ...rest] = words
-    const toggles = await read($, togglesAtom)
-    if (action === 'catalog') return { text: renderCatalog(rest.join(' ')) }
-    if (action === 'on' || action === 'off') {
-      const key = FEATURES[rest[0] ?? '']
-      if (key === undefined) return { text: `Unknown feature "${rest[0] ?? ''}". One of: ${Object.keys(FEATURES).join(', ')}.` }
-      const changed = { ...toggles, [key]: action === 'on' }
-      await update($, togglesAtom, () => changed)
-      await $.store.set(STORE_KEY, changed)
+  on('command.run', { command: COMMAND }, async ($, e) => ({ text: await archCommand($, e.args, archFile) }))
+}
 
-      return { text: `refactor: ${rest[0]} ${action} (kept for later sessions).` }
-    }
-    const cwd = await $.session.cwd().catch(() => undefined)
-    const root = cwd === undefined ? undefined : await repoRoot($, cwd)
-    if (root === undefined) return { text: 'refactor: not inside a git repository.' }
-    const arch = await loadArchitecture($, root, archFile)
-    if (action === 'init') {
-      const files = (await run($, ['git', '-C', root, 'ls-files'], 20_000)).out.split('\n').filter(line => line !== '')
-      const exists = arch !== undefined ? `\n\n${archFile} already exists; this draft does not replace it.` : ''
+async function archCommand($: EngineInterface, args: string, archFile: string): Promise<string> {
+  const [action = 'status', ...rest] = args.trim().split(/\s+/).filter(word => word !== '')
+  const toggles = await read($, togglesAtom)
+  if (action === 'catalog') return renderCatalog(rest.join(' '))
+  if (action === 'on' || action === 'off') return switchFeature($, toggles, action, rest[0] ?? '')
+  const cwd = await $.session.cwd().catch(() => undefined)
+  const root = cwd === undefined ? undefined : await repoRoot($, cwd)
+  if (root === undefined) return 'refactor: not inside a git repository.'
+  const arch = await loadArchitecture($, root, archFile)
+  if (action === 'init') return initCommand($, root, arch, archFile)
+  if (action === 'audit') {
+    const report = await auditCommand($, root, arch)
+    if (rest[0] === '--report') return report
+    // A command's output reaches the person only; hand the report to Claude so the session goes on.
+    submitLater($, auditPrompt(report), 'the audit report')
 
-      return { text: `Draft for ${root}/${archFile} (not written; review the layers and allow list, then save it):\n\n\`\`\`json\n${draftArchitecture(files)}\n\`\`\`${exists}` }
-    }
-    if (action === 'audit') return { text: await auditCommand($, root, arch) }
-    if (action === 'fix') return { text: await fixCommand($, root, arch, rest.join(' ').trim()) }
-    const flags = Object.entries(FEATURES)
-      .map(([name, key]) => `${name} ${toggles[key] ? 'on' : 'off'}`)
-      .join(' · ')
+    return `${report}\n\nHanded to Claude for a refactoring plan (/arch audit --report only prints).`
+  }
+  if (action === 'fix') return fixCommand($, root, arch, rest.join(' ').trim())
+  const flags = Object.entries(FEATURES)
+    .map(([name, key]) => `${name} ${toggles[key] ? 'on' : 'off'}`)
+    .join(' · ')
 
-    return { text: [flags, arch === undefined ? `No ${archFile} in ${root}: nothing is enforced here. /arch init drafts one.` : summary(arch, archFile)].join('\n') }
-  })
+  return [flags, arch === undefined ? `No ${archFile} in ${root}: nothing is enforced here. /arch init drafts one.` : summary(arch, archFile)].join('\n')
+}
+
+async function switchFeature($: EngineInterface, toggles: Toggles, action: 'on' | 'off', name: string): Promise<string> {
+  const key = FEATURES[name]
+  if (key === undefined) return `Unknown feature "${name}". One of: ${Object.keys(FEATURES).join(', ')}.`
+  const changed = { ...toggles, [key]: action === 'on' }
+  await update($, togglesAtom, () => changed)
+  await $.store.set(STORE_KEY, changed)
+
+  return `refactor: ${name} ${action} (kept for later sessions).`
+}
+
+async function initCommand($: EngineInterface, root: string, arch: Architecture | undefined, archFile: string): Promise<string> {
+  const files = (await run($, ['git', '-C', root, 'ls-files'], 20_000)).out.split('\n').filter(line => line !== '')
+  const exists = arch !== undefined ? `\n\n${archFile} already exists; this draft does not replace it.` : ''
+
+  return `Draft for ${root}/${archFile} (not written; review the layers and allow list, then save it):\n\n\`\`\`json\n${draftArchitecture(files)}\n\`\`\`${exists}`
 }
 
 async function changedFiles($: EngineInterface, root: string): Promise<string[]> {
@@ -304,13 +316,27 @@ async function fixCommand($: EngineInterface, root: string, arch: Architecture |
     file = worst.file
     findings = worst.findings
   }
-  const text = fixPrompt(file, findings)
-  // Submitted once this command's hook has returned, as goal-mode's kickoff is.
-  $.clock.after(50, () => {
-    $.prompt.submit({ text }).catch(() => $.ui.toast(`refactor: the fix prompt for ${file} was not submitted; run /arch fix ${file} again.`))
-  })
+  submitLater($, fixPrompt(file, findings), `the fix prompt for ${file}`)
 
   return `refactor: handed ${file} (${findings.length} smells) to Claude.`
+}
+
+// Submitted once the command's hook has returned, as goal-mode's kickoff is.
+function submitLater($: EngineInterface, text: string, what: string): void {
+  $.clock.after(50, () => {
+    $.prompt.submit({ text }).catch(() => $.ui.toast(`refactor: ${what} was not submitted to Claude; run the command again.`))
+  })
+}
+
+/** The prompt that hands an audit report to the model: a plan and a choice, no edits yet. */
+export function auditPrompt(report: string): string {
+  return [
+    'The refactor mod ran /arch audit on this repository. Its report:',
+    '',
+    report,
+    '',
+    'Turn it into a refactoring plan. For the top files: which smell to fix first, the refactoring.guru technique (the refactor:refactor-catalog skill has the catalog), whether tests already cover that code, and the risk. Drop findings that are not worth fixing (a long but flat dispatch table, a generated file) and say why. Layer violations and import cycles, when listed, come before smells. Then ask the person with AskUserQuestion which item to start on. Do not edit any file before they choose.',
+  ].join('\n')
 }
 
 async function auditCommand($: EngineInterface, root: string, arch: Architecture | undefined): Promise<string> {
