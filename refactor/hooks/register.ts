@@ -1,12 +1,13 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Architecture, RefactorState, Toggles } from '../types'
+import type { Architecture, RefactorState, SmellLimits, Toggles } from '../types'
 import { addedViolations, auditRepo, draftArchitecture, normalize, parseArchitecture, refusal, summary, violationsIn } from './arch'
 import type { Violation } from './arch'
 import { renderCatalog, SMELLS } from './catalog'
 import { extractImports, langOf } from './imports'
 import { smellNote, smellsIn } from './smells'
+import type { Finding } from './smells'
 
 // refactor: the architecture a repository declares in .claude/architecture.json,
 // enforced where the model edits (Edit, Write); code-smell notes keyed
@@ -18,6 +19,8 @@ const FEATURES: Record<string, keyof Toggles> = { arch: 'arch', smells: 'smells'
 const INITIAL_STATE: RefactorState = { noted: [] }
 // A whole-repo audit reads at most this many source files.
 const AUDIT_MAX_FILES = 4000
+// The audit lists this many files, worst first; the rest are counted only.
+const AUDIT_TOP_FILES = 10
 // The model review sees at most this much diff.
 const REVIEW_MAX_CHARS = 12_000
 
@@ -123,7 +126,7 @@ export const register: Register = (on, options: Options) => {
     try {
       await $.command.register({
         name: COMMAND,
-        description: 'refactor: /arch [status | audit | init | catalog [smell|technique] | on|off arch|smells|stop-audit|llm-review]',
+        description: 'refactor: /arch [status | audit | fix [path] | init | catalog [smell|technique] | on|off arch|smells|stop-audit|llm-review]',
       })
     } catch {
       $.ui.log('refactor: /arch not registered (a command of that name exists)', { to: 'debug' })
@@ -255,6 +258,7 @@ export const register: Register = (on, options: Options) => {
       return { text: `Draft for ${root}/${archFile} (not written; review the layers and allow list, then save it):\n\n\`\`\`json\n${draftArchitecture(files)}\n\`\`\`${exists}` }
     }
     if (action === 'audit') return { text: await auditCommand($, root, arch) }
+    if (action === 'fix') return { text: await fixCommand($, root, arch, rest.join(' ').trim()) }
     const flags = Object.entries(FEATURES)
       .map(([name, key]) => `${name} ${toggles[key] ? 'on' : 'off'}`)
       .join(' · ')
@@ -270,7 +274,7 @@ async function changedFiles($: EngineInterface, root: string): Promise<string[]>
   return [...new Set([...tracked.out.split('\n'), ...untracked.out.split('\n')].map(line => line.trim()).filter(line => line !== '' && langOf(line) !== undefined))]
 }
 
-async function auditCommand($: EngineInterface, root: string, arch: Architecture | undefined): Promise<string> {
+async function sourceFiles($: EngineInterface, root: string): Promise<{ listed: string[]; files: Map<string, string> }> {
   const listed = (await run($, ['git', '-C', root, 'ls-files'], 20_000)).out
     .split('\n')
     .filter(file => file !== '' && langOf(file) !== undefined)
@@ -279,6 +283,38 @@ async function auditCommand($: EngineInterface, root: string, arch: Architecture
     const text = await readText($, `${root}/${file}`)
     if (text !== undefined) files.set(file, text)
   }
+
+  return { listed, files }
+}
+
+async function fixCommand($: EngineInterface, root: string, arch: Architecture | undefined, target: string): Promise<string> {
+  const limits = arch?.smells ?? parseArchitecture('{}').smells
+  let file: string
+  let findings: Finding[]
+  if (target !== '') {
+    file = normalize(target.startsWith(`${root}/`) ? target.slice(root.length + 1) : target)
+    const lang = langOf(file)
+    const text = lang === undefined ? undefined : await readText($, `${root}/${file}`)
+    if (lang === undefined || text === undefined) return `refactor: ${file} is not a readable Python, Rust or TS/JS file in ${root}.`
+    findings = smellsIn(lang, text, limits)
+    if (findings.length === 0) return `refactor: no smells over the limits in ${file}; nothing to hand over.`
+  } else {
+    const worst = rankSmells((await sourceFiles($, root)).files, limits)[0]
+    if (worst === undefined) return 'refactor: no smells over the limits in this repository.'
+    file = worst.file
+    findings = worst.findings
+  }
+  const text = fixPrompt(file, findings)
+  // Submitted once this command's hook has returned, as goal-mode's kickoff is.
+  $.clock.after(50, () => {
+    $.prompt.submit({ text }).catch(() => $.ui.toast(`refactor: the fix prompt for ${file} was not submitted; run /arch fix ${file} again.`))
+  })
+
+  return `refactor: handed ${file} (${findings.length} smells) to Claude.`
+}
+
+async function auditCommand($: EngineInterface, root: string, arch: Architecture | undefined): Promise<string> {
+  const { listed, files } = await sourceFiles($, root)
   const lines = [`refactor audit of ${root}: ${files.size} source files${listed.length > AUDIT_MAX_FILES ? ` (first ${AUDIT_MAX_FILES} of ${listed.length})` : ''}.`]
   const limits = arch?.smells ?? parseArchitecture('{}').smells
   if (arch !== undefined) {
@@ -290,18 +326,67 @@ async function auditCommand($: EngineInterface, root: string, arch: Architecture
     if (audit.unlayered > 0) lines.push('', `${audit.unlayered} source files match no layer and are not judged.`)
     if (arch.problems.length > 0) lines.push('', `Problems in the architecture file: ${arch.problems.join('; ')}`)
   } else lines.push('', 'No architecture file: layers are not checked. /arch init drafts one.')
-  const smells: Array<{ file: string; smell: string; where: string; detail: string }> = []
-  for (const [file, text] of files) {
-    const lang = langOf(file)
-    if (lang !== undefined) for (const f of smellsIn(lang, text, limits)) smells.push({ file, ...f })
-  }
+  const ranked = rankSmells(files, limits)
   const counts = new Map<string, number>()
-  for (const s of smells) counts.set(s.smell, (counts.get(s.smell) ?? 0) + 1)
-  lines.push('', `## Smells (${smells.length}): ${[...counts].map(([name, n]) => `${name} ${n}`).join(', ') || 'none'}`)
-  for (const s of smells.slice(0, 30)) lines.push(`- ${s.file} ${s.where}: ${s.smell}, ${s.detail}`)
-  lines.push('', '/arch catalog <smell> names the refactorings for each.')
+  for (const r of ranked) for (const f of r.findings) counts.set(f.smell, (counts.get(f.smell) ?? 0) + 1)
+  const total = ranked.reduce((n, r) => n + r.findings.length, 0)
+  const skipped = [...files.keys()].filter(file => !smellScope(file)).length
+  lines.push('', `## Smells (${total} in ${ranked.length} files): ${[...counts].map(([name, n]) => `${name} ${n}`).join(', ') || 'none'}`)
+  if (skipped > 0) lines.push(`(${skipped} test, tooling and vendored files left out of the smell count)`)
+  if (ranked.length > 0) lines.push('', `Worst ${Math.min(AUDIT_TOP_FILES, ranked.length)} files first:`)
+  ranked.slice(0, AUDIT_TOP_FILES).forEach((r, i) => {
+    lines.push(`${i + 1}. ${r.file} (${r.findings.length})`)
+    for (const f of r.findings.slice(0, 3)) lines.push(`   - ${f.where}: ${f.smell}, ${f.detail}`)
+    if (r.findings.length > 3) lines.push(`   - … ${r.findings.length - 3} more`)
+  })
+  lines.push(
+    '',
+    ranked.length > 0
+      ? `Next: /arch fix hands the worst file to Claude to refactor (refactor-catalog skill, tests after each step); /arch fix <path> picks another. /arch catalog <smell> names the refactorings.`
+      : '/arch catalog <smell> names the refactorings for each smell.',
+  )
 
   return lines.join('\n')
+}
+
+// Tests, tooling scripts, generated and vendored code: long by nature, not worth a refactor.
+const SMELL_SKIP = /(^|\/)(\.[^/]+|tests?|__tests__|spec|fixtures?|node_modules|vendor|third_party|dist|build|target|migrations|generated)\/|(^|\/)(test_[^/]*|[^/]*_test\.\w+|[^/]*\.(test|spec)\.\w+|conftest\.py)$/
+
+export const smellScope = (file: string) => !SMELL_SKIP.test(file)
+
+/** Source files with smells, worst first: excess over the limits, not raw counts, so one 400-line function outranks three 61-line ones. */
+export function rankSmells(files: Map<string, string>, limits: SmellLimits): Array<{ file: string; score: number; findings: Finding[] }> {
+  const ranked: Array<{ file: string; score: number; findings: Finding[] }> = []
+  for (const [file, text] of files) {
+    const lang = langOf(file)
+    if (lang === undefined || !smellScope(file)) continue
+    const findings = smellsIn(lang, text, limits)
+    if (findings.length === 0) continue
+    const score = findings.reduce((sum, f) => sum + weight(f, limits), 0)
+    ranked.push({ file, score, findings: [...findings].sort((a, b) => weight(b, limits) - weight(a, limits)) })
+  }
+
+  return ranked.sort((a, b) => b.score - a.score || a.file.localeCompare(b.file))
+}
+
+function weight(f: Finding, limits: SmellLimits): number {
+  const n = Number(f.detail.match(/^(?:nesting )?(\d+)/)?.[1] ?? 0)
+  if (f.smell === 'Long Method') return n / limits.maxFunctionLines
+  if (f.smell === 'Long Parameter List') return n / limits.maxParams
+  if (f.smell === 'Deep Nesting') return n / limits.maxNesting
+  if (f.smell === 'Large Class') return n / limits.maxFileLines
+
+  return 1
+}
+
+/** The prompt that hands one file's refactoring to the model. */
+export function fixPrompt(file: string, findings: Finding[]): string {
+  return [
+    `Refactor ${file}. The refactor mod's audit found these code smells in it:`,
+    ...findings.map(f => `- ${f.where}: ${f.smell}, ${f.detail}`),
+    '',
+    'Use the refactor:refactor-catalog skill. Behaviour must not change: first make sure tests cover the code you touch (add characterization tests if none do), work in a worktree under worktrees/, apply one refactoring technique at a time and run the tests after each. Start with the worst finding; stop and report if a step would change behaviour. Do not commit unless asked.',
+  ].join('\n')
 }
 
 // Phase 2, off by default: one small-model read of the turn's diff, a note only.

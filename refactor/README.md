@@ -55,7 +55,8 @@ After an Edit/Write of a TS/JS, Python or Rust file, the functions the edit touc
 | command | does |
 |---|---|
 | `/arch` | toggles and the declared rules |
-| `/arch audit` | every layer violation, layer cycles, file import cycles (Tarjan), smell counts |
+| `/arch audit` | every layer violation, layer cycles, file import cycles (Tarjan); smell counts and the 10 worst files, ranked by how far they exceed the limits. Tests, tooling, dot-directories and vendored or generated code are left out of the smell count |
+| `/arch fix [path]` | hands the worst file (or `path`) to Claude as a prompt: refactor it with the refactor-catalog skill, behaviour kept, tests after each step, no commit |
 | `/arch init` | a draft `architecture.json` from directory names (domain/core, app/services, infra/db, api/routes…); prints it, writes nothing |
 | `/arch catalog [name]` | the smell → refactoring catalog, or one smell or technique with links |
 | `/arch on\|off arch\|smells\|stop-audit\|llm-review` | switch a feature, kept across sessions |
