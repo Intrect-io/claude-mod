@@ -49,6 +49,10 @@ export type LogEntry =
   | { event: 'spawn'; agent: string; tier: Tier | null; timedOut: boolean; ms: number | null }
   /** A main-loop request answered by another model than the one before: the prefix was written again. */
   | { event: 'switch'; from: string; to: string; tokens: number }
+  /** A newer version of a tier's model answered, so the tier now goes out as `to` (`from` is what it went out as). */
+  | { event: 'learn'; tier: Tier; from: string; to: string }
+  /** A model id learned this way was refused, so the tier went back to `to`. */
+  | { event: 'unlearn'; tier: Tier; from: string; to: string }
   /** One finished main-loop turn: requests and tokens per model that answered. */
   | { event: 'turn'; models: Record<string, ModelTotals> }
 

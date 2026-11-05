@@ -5,6 +5,7 @@ import type { Effort, Tier, TierState } from '../types'
 import { evalCommand } from './eval'
 import { capTier, labelPrompt, RANK } from './label'
 import type { PromptLabels } from './label'
+import { newerModel, validLearned } from './latest'
 import { appendLog } from './log'
 import type { ModelTotals } from './log'
 import { statsCommand } from './stats'
@@ -81,6 +82,26 @@ export function tierModels(spec: unknown): Record<Tier, string> {
     if (isTierName(tier) && id) models[tier] = id
   }
   return models
+}
+
+/** The tiers a `tierModels` spec names: the person chose those ids, so none is replaced by a newer one. */
+export function explicitTiers(spec: unknown): Set<Tier> {
+  const named = new Set<Tier>()
+  if (typeof spec !== 'string') return named
+  for (const pair of spec.split(',')) {
+    const [tier, id] = pair.split('=').map(part => part?.trim() ?? '')
+    // An id equal to the built-in one is no choice: a saved copy of an old default stays replaceable.
+    if (isTierName(tier) && id && id !== DEFAULT_TIER_MODELS[tier]) named.add(tier)
+  }
+  return named
+}
+
+/** Where the model ids learned from answers wait for the next session. */
+const LEARNED_KEY = 'latestModels'
+
+/** Keeps the ids learned from answers for the next session; a failed write is dropped (they are learned again). */
+function saveLearned($: EngineInterface, learned: Set<Tier>, models: Record<Tier, string>): Promise<void> {
+  return $.store.set(LEARNED_KEY, Object.fromEntries([...learned].map(t => [t, models[t]]))).catch(() => undefined)
 }
 
 /** Whether this turn gets the pick note: the first one, a new pick, or an uncertain one. */
@@ -284,6 +305,14 @@ export const register: Register = (on, options) => {
   }
   const classifierModel = String(options.classifierModel ?? 'haiku')
   const models = tierModels(options.tierModels)
+  // A newer version of a tier's model that answered a request replaces the
+  // built-in id for that tier (and is kept across sessions), unless the person
+  // set the tier in `tierModels` or turned `learnModels` off.
+  const learnModels = options.learnModels !== false
+  const pinnedIds = explicitTiers(options.tierModels)
+  const learned = new Set<Tier>()
+  // Ids refused this session: not adopted again before the next reload.
+  const refusedIds = new Set<string>()
   const classifierTimeoutMs = Number(options.classifierTimeoutMs ?? 3000)
   const providers = providerTierModels(options.providerTierModels)
   const routeEffort = options.routeEffort !== false
@@ -295,6 +324,19 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     lastAnswered = undefined
+
+    if (learnModels) {
+      const stored = validLearned(await $.store.get(LEARNED_KEY).catch(() => undefined))
+      for (const tier of TIERS) {
+        const id = stored[tier]
+        // Only above what this build knows: an update that ships newer ids wins over a stale store.
+        if (id !== undefined && !pinnedIds.has(tier) && newerModel(models[tier], id) !== undefined) {
+          models[tier] = id
+          learned.add(tier)
+        }
+      }
+      await saveLearned($, learned, models)
+    }
 
     await $.tool.register({
       name: 'set_tier',
@@ -355,6 +397,10 @@ export const register: Register = (on, options) => {
       const s = await read($, state)
       return { text: `tier: ${label(s)}` }
     }
+    if (arg === 'models') {
+      const how = (t: Tier) => (pinnedIds.has(t) ? 'tierModels option' : learned.has(t) ? 'learned from an answer' : 'built in')
+      return { text: TIERS.slice().reverse().map(t => `${t}: ${models[t]} (${how(t)})`).join('\n') + (learnModels ? '' : '\nlearnModels is off.') }
+    }
     if (arg.startsWith('effort')) {
       const level = arg.slice('effort'.length).trim()
       if (level === 'auto') {
@@ -372,7 +418,7 @@ export const register: Register = (on, options) => {
       void show($, s, enabled)
       return { text: `Auto routing on; tier stays ${s.tier} until the next prompt.` }
     }
-    if (!isTierName(arg)) return { text: 'Usage: /tier [auto|fable|opus|sonnet|haiku] | /tier effort [auto|low|medium|high|xhigh|max] | /tier stats [days] | /tier eval [path.jsonl]' }
+    if (!isTierName(arg)) return { text: 'Usage: /tier [auto|fable|opus|sonnet|haiku] | /tier effort [auto|low|medium|high|xhigh|max] | /tier models | /tier stats [days] | /tier eval [path.jsonl]' }
     const s = await update($, state, (v): TierState => ({ ...v, tier: arg, source: 'pinned', pendingDown: undefined, pendingCount: 0 }))
     void show($, s, enabled)
     return { text: `Pinned to ${arg}. /tier auto to release.` }
@@ -495,11 +541,29 @@ export const register: Register = (on, options) => {
       // Refused before anything streamed: retry on the session's own model.
       if (sendModel === e.model || yielded) throw err
       $.ui.toast(`model-tier: ${sendModel} was refused, staying on ${e.model}`)
+      // An id learned from an answer that the API now refuses goes back to the built-in one.
+      if (learned.has(s.tier) && sendModel === models[s.tier]) {
+        const back = DEFAULT_TIER_MODELS[s.tier]
+        refusedIds.add(sendModel)
+        models[s.tier] = back
+        learned.delete(s.tier)
+        void saveLearned($, learned, models)
+        void appendLog($, { event: 'unlearn', tier: s.tier, from: sendModel, to: back })
+      }
       result = yield* next(e)
     }
 
     const u = result.usage
     if (u) {
+      const newer = learnModels && !pinnedIds.has(s.tier) ? newerModel(models[s.tier], u.model) : undefined
+      if (newer !== undefined && !refusedIds.has(newer) && tierOf(newer) === s.tier) {
+        const from = models[s.tier]
+        models[s.tier] = newer
+        learned.add(s.tier)
+        void saveLearned($, learned, models)
+        void appendLog($, { event: 'learn', tier: s.tier, from, to: newer })
+        $.ui.toast(`model-tier: ${newer} answered, so ${s.tier} goes as ${newer} now (was ${from})`)
+      }
       const tokens = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
       const provider = providerOf(u.model)
       const move = s.lastProvider !== undefined && s.lastProvider !== provider
