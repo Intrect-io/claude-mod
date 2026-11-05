@@ -182,4 +182,29 @@ describe('/arch', () => {
     expect(init).toContain('"name": "app"')
     expect(init).toContain('already exists')
   })
+
+  test('audit ranks files worst first and leaves tests out; fix hands the worst file to the model', async ($, on) => {
+    const w = world(on, false)
+    const body = (n: number) => Array.from({ length: n }, (_, i) => `    x${i} = ${i}`).join('\n')
+    w.files.set('/repo/pkg/small.py', `def a():\n${body(70)}\n`)
+    w.files.set('/repo/pkg/big.py', `def b():\n${body(300)}\n`)
+    w.files.set('/repo/tests/test_big.py', `def t():\n${body(400)}\n`)
+    const clock = mock.clock(on, { now: 0 })
+    const submitted: string[] = []
+    on('prompt.submit', (_, e) => {
+      submitted.push(e.text)
+      return { text: e.text }
+    })
+    await start($)
+    const audit = (await arch($, 'audit')).text
+    expect(audit).toContain('1. pkg/big.py')
+    expect(audit).toContain('2. pkg/small.py')
+    expect(audit).not.toContain('tests/test_big.py')
+    expect(audit).toContain('/arch fix')
+    expect((await arch($, 'fix')).text).toContain('handed pkg/big.py')
+    await clock.advance(100)
+    expect(submitted[0]).toContain('Refactor pkg/big.py')
+    expect(submitted[0]).toContain('refactor-catalog')
+    expect((await arch($, 'fix pkg/small.py')).text).toContain('handed pkg/small.py')
+  })
 })
