@@ -17,11 +17,15 @@ const ARCH = JSON.stringify({
   forbidImports: [{ layer: 'domain', pattern: '^fastapi' }],
 })
 
-type World = { files: Map<string, string>; ran: string[]; diff: string; untracked: string; completions: string[]; reply: string }
+type World = { files: Map<string, string>; ran: string[]; diff: string; untracked: string; completions: string[]; reply: string; submitted: string[]; clock: ReturnType<typeof mock.clock> }
 
 // A repo at /repo: tools answer 'ok' and record that they ran.
 function world(on: On, withArch = true): World {
-  const w: World = { files: new Map(), ran: [], diff: '', untracked: '', completions: [], reply: 'none' }
+  const w: World = { files: new Map(), ran: [], diff: '', untracked: '', completions: [], reply: 'none', submitted: [], clock: mock.clock(on, { now: 0 }) }
+  on('prompt.submit', (_, e) => {
+    w.submitted.push(e.text)
+    return { text: e.text }
+  })
   if (withArch) w.files.set('/repo/.claude/architecture.json', ARCH)
   mock.store(on, {})
   on('ui.log', () => ({ value: undefined }))
@@ -189,20 +193,23 @@ describe('/arch', () => {
     w.files.set('/repo/pkg/small.py', `def a():\n${body(70)}\n`)
     w.files.set('/repo/pkg/big.py', `def b():\n${body(300)}\n`)
     w.files.set('/repo/tests/test_big.py', `def t():\n${body(400)}\n`)
-    const clock = mock.clock(on, { now: 0 })
-    const submitted: string[] = []
-    on('prompt.submit', (_, e) => {
-      submitted.push(e.text)
-      return { text: e.text }
-    })
     await start($)
     const audit = (await arch($, 'audit')).text
     expect(audit).toContain('1. pkg/big.py')
     expect(audit).toContain('2. pkg/small.py')
     expect(audit).not.toContain('tests/test_big.py')
-    expect(audit).toContain('/arch fix')
+    expect(audit).toContain('Handed to Claude')
+    await w.clock.advance(100)
+    // The report goes to the model, which plans and asks before any edit.
+    expect(w.submitted[0]).toContain('1. pkg/big.py')
+    expect(w.submitted[0]).toContain('AskUserQuestion')
+    expect(w.submitted[0]).toContain('Do not edit')
+    expect((await arch($, 'audit --report')).text).not.toContain('Handed to Claude')
+    await w.clock.advance(100)
+    expect(w.submitted).toHaveLength(1)
     expect((await arch($, 'fix')).text).toContain('handed pkg/big.py')
-    await clock.advance(100)
+    await w.clock.advance(100)
+    const submitted = w.submitted.slice(1)
     expect(submitted[0]).toContain('Refactor pkg/big.py')
     expect(submitted[0]).toContain('refactor-catalog')
     expect((await arch($, 'fix pkg/small.py')).text).toContain('handed pkg/small.py')
