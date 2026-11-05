@@ -212,8 +212,24 @@ export function duplicateRuns(text: string, min: number): Array<{ first: number;
   return runs
 }
 
+// Beyond this a file is a bundle or a data dump, not code to refactor, and the
+// scans below cost seconds per file (a 350 KB minified chunk took 5 s).
+const MAX_ANALYZED_CHARS = 300_000
+const MINIFIED_AVG_LINE = 300
+
+/** Bundles, minified output and data dumps: skipped by every smell scan. */
+export function isMachineText(text: string): boolean {
+  if (text.length > MAX_ANALYZED_CHARS) return true
+  if (text.length < 20_000) return false
+  let lines = 1
+  for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) lines++
+
+  return text.length / lines > MINIFIED_AVG_LINE
+}
+
 /** Findings in a file's text, limited to functions that overlap the lines in `touched` (all when undefined). */
 export function smellsIn(lang: Lang, text: string, limits: SmellLimits, touched?: { from: number; to: number }): Finding[] {
+  if (isMachineText(text)) return []
   const overlaps = (start: number, end: number) => touched === undefined || (start <= touched.to && end >= touched.from)
   const findings: Finding[] = []
   for (const fn of functionsIn(lang, text)) {

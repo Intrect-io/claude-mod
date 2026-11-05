@@ -4,7 +4,7 @@ import { addedViolations, auditRepo, cycles, draftArchitecture, globToRegExp, la
 import { findSmell, renderCatalog, slug, SMELLS, smellUrl, TECHNIQUES, techniqueUrl } from './catalog'
 import { expandUseTree, extractImports, langOf } from './imports'
 import { applyEdit } from './register'
-import { duplicateRuns, functionsIn, smellNote, smellsIn } from './smells'
+import { duplicateRuns, functionsIn, isMachineText, smellNote, smellsIn } from './smells'
 
 const LIMITS = parseArchitecture('{}').smells
 
@@ -181,6 +181,16 @@ describe('arch', () => {
 
 describe('smells', () => {
   const long = (lines: number) => Array.from({ length: lines }, (_, i) => `  const v${i} = ${i}`).join('\n')
+
+  test('minified bundles and huge dumps are skipped, ordinary long files are not', () => {
+    const minified = `function a(){${'x=1;'.repeat(10_000)}}`
+    expect(isMachineText(minified)).toBe(true)
+    expect(isMachineText('a\n'.repeat(200_000))).toBe(true)
+    expect(isMachineText(`function f() {\n${long(120)}\n}\n`)).toBe(false)
+    const limits = parseArchitecture('{}').smells
+    expect(smellsIn('ts', minified, limits)).toEqual([])
+    expect(smellsIn('ts', `function f() {\n${long(120)}\n}\n`, limits).length).toBeGreaterThan(0)
+  })
 
   test('TypeScript functions: declarations, arrows and methods with params and nesting', () => {
     const text = [
