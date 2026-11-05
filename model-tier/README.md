@@ -16,6 +16,18 @@ only by `/tier fable` unless `maxAutoTier` allows it.
     verdict runs on opus. Only `/tier fable` reaches it: a session started on fable with `/model`
     steps down at the first classifier verdict.
   - A refused fable request falls back to the session's model, as any tier does.
+- **Newest models.** A request built here carries a full model id, and an alias is not resolved on this path,
+  so a new release (say `claude-sonnet-5-6`) would not be sent by itself. The plugin learns it instead:
+  when the model that answered a main-loop request is a higher version of the same family as the tier's
+  id (`claude-sonnet-5-6` over `claude-sonnet-5-5`, a `[1m]` flag or date stamp aside), that id is sent
+  for the tier from the next request, and kept in `$.store` for later sessions.
+  - A model arrives this way through `/model`, a Claude Code update that moves its own default, or a
+    router that answers newer. The plugin makes no request for it and needs no credentials.
+  - A tier named in `tierModels` is never replaced. A learned id the API refuses goes back to the
+    built-in one and is not adopted again before the next reload. `learnModels: false` turns it off.
+  - `/tier models` shows each tier's id and where it came from. The `learn` and `unlearn` log lines
+    record each change. The built-in ids in `register.ts` (`DEFAULT_TIER_MODELS`) still move on release,
+    and a stored id at or below them is ignored.
   - Skipped when no verdict could change the tier: pinned, or already at `maxAutoTier`
     with the context past `maxTokensForDowngrade` (`canTierChange`). Measured 2026-11-03:
     the average main-loop context was ~400k tokens, so this saves one classifier call on
@@ -95,6 +107,7 @@ showing the session's configured model: this mod rewrites requests, not the sett
 - `/tier fable|opus|sonnet|haiku`: pin a tier. The classifier and `set_tier` leave it alone.
 - `/tier auto`: return to automatic routing
 - `/tier effort low|medium|high|xhigh|max`: pin the effort. `/tier effort auto` releases it.
+- `/tier models`: the model id each tier is sent as, and whether it is built in, learned or set by option
 - `/tier stats [days]`: summarize the log over the last `days` days (default 7); see [Log and `/tier stats`](#log-and-tier-stats)
 - `/tier eval [path]`: run the classifier eval (see [Classifier eval](#classifier-eval))
 
@@ -107,6 +120,8 @@ showing the session's configured model: this mod rewrites requests, not the sett
 | `maxTokensForHaiku` | `150000` | prompt-token ceiling for haiku |
 | `maxTokensForDowngrade` | `200000` | above this, the tier only goes up |
 | `classifierModel` | `haiku` | model used to label prompts |
+| `tierModels` | empty | override the id sent for a tier (`sonnet=claude-sonnet-5-5,…`); a named tier is never replaced by a newer one |
+| `learnModels` | `true` | adopt a newer version of a tier's model once it has answered |
 | `classifierTimeoutMs` | `3000` | keep the current tier and effort when classifying takes longer |
 | `routeEffort` | `true` | also classify and send a reasoning effort per turn |
 | `followUpChars` | `40` | a prompt this short or shorter may raise the pick, never lower it |

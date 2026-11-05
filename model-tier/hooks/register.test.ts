@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { AgentSpawnInput, HookStream, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import type { TierState } from '../types'
-import { canTierChange, capTier, decide, decideEffort, INITIAL, isFollowUp, isTier, maxAutoTier, modelFor, providerOf, providerTierModels, routableAgents, tierModels } from './register'
+import { canTierChange, capTier, decide, decideEffort, explicitTiers, INITIAL, isFollowUp, isTier, maxAutoTier, modelFor, providerOf, providerTierModels, routableAgents, tierModels } from './register'
 
 const OPTS = { downgradeAfterTurns: 2, maxTokensForHaiku: 150000, maxTokensForDowngrade: 200000 }
 const at = (over: Partial<TierState>): TierState => ({ ...INITIAL, ...over })
@@ -91,6 +91,13 @@ describe('decide', () => {
     expect(tierModels(undefined).sonnet).toBe('claude-sonnet-5-5')
     expect(tierModels('sonnet=claude-sonnet-5, bogus=x').sonnet).toBe('claude-sonnet-5')
     expect(tierModels('sonnet=claude-sonnet-5').haiku).toBe('claude-haiku-5-5')
+  })
+
+  test('explicitTiers names only the tiers the person changed from the built-in id', () => {
+    expect([...explicitTiers(undefined)]).toEqual([])
+    expect([...explicitTiers('')]).toEqual([])
+    expect([...explicitTiers('fable=claude-fable-5-1,opus=claude-opus-5-5,sonnet=claude-sonnet-5-5,haiku=claude-haiku-5-5')]).toEqual([])
+    expect([...explicitTiers('sonnet=claude-sonnet-4-5, bogus=x')]).toEqual(['sonnet'])
   })
 
   test('isTier reads resolved ids', () => {
@@ -217,6 +224,66 @@ describe('providers (the router answering on codex or ollama)', () => {
     await drain($.turn.step({ ...STEP, index: 3, model: 'claude-opus-5-5' })) // engine still on Claude: the map sends sonnet? haiku→default? sent below
 
     expect(sent).toEqual(['claude-opus-5-5', 'claude-opus-5-5', 'codex', 'codex'])
+  })
+})
+
+describe('following the newest models', () => {
+  const quiet = (on: Parameters<Parameters<typeof test>[1]>[1]) => {
+    on('ui.status', () => ({ value: undefined }))
+    on('session.model', () => ({ value: 'claude-opus-5-5' }))
+    on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1000000 }, rateLimits: [] } }))
+    on('tool.register', () => ({ value: { tool: 'mcp__model-tier__set_tier' } }))
+    on('command.register', () => ({ value: { command: 'tier' } }))
+    on('session.start', (_, e) => ({ cwd: e.cwd }))
+  }
+
+  test('a newer version that answers is sent from the next request on', async ($, on) => {
+    quiet(on)
+    const sent: string[] = []
+    on('turn.step', async function* (_, e) {
+      sent.push(e.model)
+      return answered(e, 1000, e.index === 0 ? 'claude-opus-5-6[1m]' : e.model)
+    })
+
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    await drain($.turn.step(STEP))
+    await drain($.turn.step({ ...STEP, index: 1 }))
+
+    expect(sent).toEqual(['claude-opus-5-5', 'claude-opus-5-6'])
+  })
+
+  test('a learned id the API refuses goes back to the built-in one and is not adopted again', async ($, on) => {
+    quiet(on)
+    on('ui.toast', () => ({ value: undefined }))
+    const sent: string[] = []
+    on('turn.step', async function* (_, e) {
+      sent.push(e.model)
+      if (e.model === 'claude-opus-5-6') throw new Error('model not allowed')
+      // The engine's own model keeps answering as the newer id.
+      return answered(e, 1000, 'claude-opus-5-6')
+    })
+
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    await drain($.turn.step(STEP)) // answered by 5-6: learned
+    await drain($.turn.step({ ...STEP, index: 1 })) // sent as 5-6, refused, retried on the session's model
+    await drain($.turn.step({ ...STEP, index: 2 })) // back on the built-in id, 5-6 not adopted again
+
+    expect(sent).toEqual(['claude-opus-5-5', 'claude-opus-5-6', 'claude-opus-5-5', 'claude-opus-5-5'])
+  })
+
+  test('an older answer changes nothing', async ($, on) => {
+    quiet(on)
+    const sent: string[] = []
+    on('turn.step', async function* (_, e) {
+      sent.push(e.model)
+      return answered(e, 1000, 'claude-opus-4-1')
+    })
+
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    await drain($.turn.step(STEP))
+    await drain($.turn.step({ ...STEP, index: 1 }))
+
+    expect(sent).toEqual(['claude-opus-5-5', 'claude-opus-5-5'])
   })
 })
 
