@@ -118,7 +118,7 @@ describe('guards', () => {
 describe('ship-gate', () => {
   test('a merged PR must close the issues the user handed over, Done and comment', async ($, on) => {
     const w = world(on)
-    w.prView = JSON.stringify({ title: 'feat: x (QQQ-1)', body: 'also ZZZ-2', commits: [] })
+    w.prView = JSON.stringify({ title: 'feat: x', body: 'Closes QQQ-1. Refs ZZZ-2', commits: [] })
     await start($)
     await prompt($, 'QQQ-1 작업 PR 머지해줘')
 
@@ -137,9 +137,20 @@ describe('ship-gate', () => {
     expect((await $.classic.Stop(STOP)).block).toBeUndefined()
   })
 
+  test('an issue the PR only references is a toast, not a stop block', async ($, on) => {
+    const w = world(on)
+    w.prView = JSON.stringify({ title: 'feat: recovery mail (QQQ-1 W4)', body: 'Refs QQQ-1, QQQ-2', commits: [] })
+    await start($)
+    await prompt($, 'QQQ-1 QQQ-2 진행해줘')
+    await $.tool.call({ tool: 'Bash', command: 'gh pr merge 6 --squash' })
+
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
+    expect(w.toasts.some(text => text.includes('QQQ-1') && text.includes('QQQ-2'))).toBe(true)
+  })
+
   test('the stop block gives up after two tries', async ($, on) => {
     const w = world(on)
-    w.prView = 'QQQ-1'
+    w.prView = 'Fixes QQQ-1'
     await start($)
     await prompt($, 'QQQ-1')
     await $.tool.call({ tool: 'Bash', command: 'gh pr merge 5' })
@@ -216,7 +227,7 @@ describe('report-lint', () => {
 
 test('one stop carries one block: report-lint first, the ship gate on the next stop', async ($, on) => {
   const w = world(on, { toggles: { guards: true, shipGate: true, reportLint: true } })
-  w.prView = 'QQQ-1'
+  w.prView = 'Fixes QQQ-1'
   await start($)
   await prompt($, 'QQQ-1 고치고 머지')
   await $.tool.call({ tool: 'Write', file_path: '/repo/a.py', content: 'x\n' })
