@@ -19,7 +19,7 @@ import { grantAllowsLinear, grantVerdict, senderName } from './grant'
 import { gcSignature, gcSummary } from './memory-gc'
 import { checkListIssues, checkSaveComment, checkSaveIssue, isLinearRequest, withoutReminders } from './linear-guard'
 import { isEnglishLine, lintReport } from './report-lint'
-import { isCodeqlAnalyze, isDoneState, isPrList, isReleaseCommand, issueIds, linearIds, mergedPr } from './ship-gate'
+import { closingIds, isCodeqlAnalyze, isDoneState, isPrList, isReleaseCommand, issueIds, linearIds, mergedPr } from './ship-gate'
 
 const ENV = { home: '/Users/u', tmpdir: '/var/folders/xx/T/', venv: '/Users/u/dev/mlx_env/bin/activate' }
 const ROOT = '/Users/u/dev/repo'
@@ -147,6 +147,12 @@ test('port 1234 and openswarm review', async () => {
 describe('ship-gate parsing', () => {
   test('issue ids, merges, PR lists, CodeQL, Done states', async () => {
     expect(issueIds('feat: x (INT-12)\nfixes STO-1737 and INT-12')).toEqual(['INT-12', 'STO-1737'])
+    expect(closingIds('feat: x (INT-12)\nfixes STO-1737 and INT-12')).toEqual(['STO-1737', 'INT-12'])
+    expect(closingIds('Closes: AUD-1, AUD-2 & AUD-3. Refs AUD-9')).toEqual(['AUD-1', 'AUD-2', 'AUD-3'])
+    expect(closingIds('Resolved AUD-4')).toEqual(['AUD-4'])
+    expect(closingIds('Refs AUD-1662, AUD-2209. Do not close either.')).toEqual([])
+    expect(closingIds('feat(recovery): mail (AUD-2374 W4)')).toEqual([])
+    expect(closingIds('the closest AUD-5 is a fixture')).toEqual([])
     expect(mergedPr('gh pr merge 42 --squash')).toBe('42')
     expect(mergedPr('cd repo && gh pr merge --squash --delete-branch')).toBe('')
     expect(mergedPr('gh pr view 42')).toBeUndefined()

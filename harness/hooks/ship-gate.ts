@@ -18,7 +18,7 @@ const envAtom = atom({ plugin: 'harness', key: 'env' } as const, {}, { shape: 'e
 
 // Merge and release gate (rules/linear-grooming.md §5, CLAUDE.md §5):
 // - after `gh pr merge`, every issue the user handed over in this session and
-//   named by that PR must get a Done transition and an evidence comment before
+//   closed by that PR (Closes/Fixes/Resolves <ID>) must get a Done transition and an evidence comment before
 //   the turn may stop (2026-07-08: three misses in a row);
 // - an irreversible release or deploy needs `gh pr list` (open PRs) and a
 //   CodeQL run first (2026-07-09 release without a PR; 2026-08-14 CodeQL found
@@ -32,6 +32,19 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export function issueIds(text: string): string[] {
   return [...new Set(text.match(ISSUE_ID) ?? [])]
+}
+
+// IDs a PR says it closes: "Closes AUD-1", "Fixes: AUD-1, AUD-2", "resolves AUD-1 and AUD-2". A bare mention
+// ("Refs AUD-1", an umbrella program in a title) is a reference, not a claim to finish the issue, so it must not
+// demand a Done transition (2026-11-07: umbrella issues AUD-2209/AUD-2374, named only as context, blocked every
+// stop for a whole session).
+const CLOSING = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s+((?:[A-Z][A-Z0-9]{1,5}-\d+\b(?:\s*(?:,|and|&)\s*)?)+)/gi
+
+export function closingIds(text: string): string[] {
+  const out: string[] = []
+  for (const match of text.matchAll(CLOSING)) out.push(...(match[1].match(ISSUE_ID) ?? []))
+
+  return [...new Set(out)]
 }
 
 // Only IDs the Linear workspace can have: `issue_patterns` in ~/.claude/linear.json (e.g. "AX-\\d+"). Other
@@ -266,12 +279,15 @@ async function trackMerge($: EngineInterface, pr: string, command: string): Prom
   } catch {
     // gh unavailable: nothing to track.
   }
-  const ids = linearIds(issueIds(text), await issuePatterns($))
-  if (ids.length === 0) return
+  const patterns = await issuePatterns($)
+  const named = linearIds(issueIds(text), patterns)
+  if (named.length === 0) return
+  // Only issues the PR closes (Closes/Fixes/Resolves) and the user handed over are tracked; the rest is a toast.
+  const ids = linearIds(closingIds(text), patterns)
   const ship = await read($, shipAtom)
   const handed = ids.filter(id => ship.mentioned.includes(id))
-  const other = ids.filter(id => !ship.mentioned.includes(id))
-  if (other.length > 0) $.ui.toast(`Merged PR ${pr} also names ${other.join(', ')}; close them in Linear if they were yours.`)
+  const other = named.filter(id => !handed.includes(id))
+  if (other.length > 0) $.ui.toast(`Merged PR ${pr} also names ${other.join(', ')}; close them in Linear if this PR finished them.`)
   if (handed.length === 0) return
   await update($, shipAtom, s => ({
     ...s,
