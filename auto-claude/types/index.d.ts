@@ -34,6 +34,10 @@ export type AutoRecord = {
   ciMode: 'github' | 'local'
   // Lines of .claude/goal-loop.log already read.
   logOffset: number
+  // The last line of it read: the cursor once goal-mode's 2000-line cap stops the count growing.
+  logLast?: string
+  // Ticks in a row the log read shorter than logOffset without logLast in it (a write in progress, or a cleared log).
+  logHeld?: number
   // Goals the loop has started (its `start` events).
   started: number
   // Goals the loop has finished (met, blocked or deferred): equal to started when it is idle.
@@ -66,6 +70,12 @@ export type AutoRecord = {
   deploy?: { command: string; codeql: string[]; timeoutMs: number }
   deploys?: number
   note?: string
+  // Idle detection: what the run last did (ship.ts progressSig), when that last changed,
+  // and the idle nudges sent since (at most MAX_IDLE_NUDGES, reset by any progress).
+  sig?: string
+  movedAt?: number
+  idleNudges?: number
+  idleNudgedAt?: number
 }
 
 declare module 'claude-code' {

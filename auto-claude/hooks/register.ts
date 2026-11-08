@@ -5,7 +5,8 @@ import { fixLine, kickoffText, parseQueue, planNudgeText, POLICY, READY_TOOL, re
 import { segment } from './segment'
 import { codeqlSuite, countSarif, DEPLOY_FILE, parseDeploy } from './deploy'
 import type { DeploySpec } from './deploy'
-import { capReached, diagnose, gateCredit, inFlight, MAX_RED, mergeable, parseChecks, prNumber, readLog, summary } from './ship'
+import { capReached, diagnose, gateCredit, idleDue, inFlight, isWaiting, MAX_IDLE_NUDGES, MAX_RED, mergeable, parseChecks, prNumber, progressSig, readLog, repoSlug, summary } from './ship'
+import type { StallFacts } from './ship'
 import type { Caps } from './ship'
 
 // auto-claude: an unattended run of one repository, driven on top of
@@ -17,6 +18,8 @@ import type { Caps } from './ship'
 // $.process.run, never as a model turn, and the model is denied merging.
 
 const COMMAND = 'auto-claude'
+// The ready tool's full name, as the tool.call matcher sees it.
+const READY_TOOL_ID = 'mcp__auto-claude__auto_plan_ready'
 const STORE = (root: string) => `auto:${root}`
 const FILES = (root: string) => ({
   plan: `${root}/.claude/auto-plan.md`,
@@ -56,6 +59,11 @@ let fastTick = false
 let activeRoot: string | undefined
 // The owner an orphaned run was last reported for, once per session.
 let orphanTold: string | undefined
+// Ticks failed in a row and the last error: a tick that throws every time
+// (an unwritable gate, a broken store) moves nothing and must not stay silent.
+let tickFails = 0
+let tickError: string | undefined
+const TICK_FAIL_TELL = 3
 
 type Run = { exitCode: number; stdout: string; stderr: string }
 
@@ -69,6 +77,13 @@ async function run($: EngineInterface, argv: string[], cwd: string, timeoutMs = 
 }
 
 const out = (r: Run) => (r.stderr.trim() || r.stdout.trim()).slice(0, 400)
+
+// A repository with no remote lands its milestones in its own default branch: its "remote" is itself.
+const LOCAL = '.'
+const refOf = (r: { remote: string; defaultBranch: string }, branch = r.defaultBranch) => (r.remote === LOCAL ? branch : `${r.remote}/${branch}`)
+async function fetchRemote($: EngineInterface, r: { remote: string }, cwd: string): Promise<void> {
+  if (r.remote !== LOCAL) await run($, ['git', '-C', cwd, 'fetch', '-q', r.remote], cwd)
+}
 
 async function readText($: EngineInterface, path: string): Promise<string | undefined> {
   try {
@@ -158,7 +173,7 @@ async function release($: EngineInterface, r: AutoRecord, pollMs: number): Promi
   // goal-mode logs a start before it spends the credit: the gate is read
   // first and the log after, so a spent gate is never mistaken for an idle loop.
   const credit = gateCredit(await readText($, f.gate)) ?? 0
-  if (readLog((await readText($, f.log)) ?? '', r.logOffset).entries.some(e => e.event === 'start')) return r
+  if (readLog((await readText($, f.log)) ?? '', r.logOffset, r.logLast).entries.some(e => e.event === 'start')) return r
   if (credit <= 0) {
     await $.fs.write(f.gate, '1\n')
     const next: AutoRecord = { ...r, want: 'on' }
@@ -259,13 +274,16 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
     return { r: { ...r, held: r.held + 1 }, item: update({ state: 'held', note: where.gone }) }
   }
   const wt = where.wt
+  // gh is told which repository the branch was pushed to (see repoSlug).
+  const slug = r.remote === LOCAL ? undefined : repoSlug((await run($, ['git', '-C', wt, 'remote', 'get-url', r.remote], wt, 15_000)).stdout)
+  const repo = slug === undefined ? [] : ['--repo', slug]
 
   if (item.state === 'push') {
     if (r.ciMode === 'local') return { r, item: update({ state: 'ci' }) }
     const pushed = await run($, ['git', '-C', wt, 'push', '-u', r.remote, `${item.branch}:${item.headRef}`, ...(item.branch !== item.headRef ? ['--force-with-lease'] : [])], wt)
     if (pushed.exitCode !== 0) return { r, item: update({ note: `push failed: ${out(pushed)}` }) }
     if (item.pr !== undefined) return { r, item: update({ state: 'ci', since: await $.clock.now() }) }
-    const made = await run($, ['gh', 'pr', 'create', '--head', item.headRef, '--base', r.defaultBranch, '--title', item.goal.slice(0, 120), '--body', `Milestone of an auto-claude run.\n\nCheck: \`${item.check ?? '-'}\`\n\nPlan: .claude/auto-plan.md (local to the run).`], wt)
+    const made = await run($, ['gh', 'pr', 'create', ...repo, '--head', item.headRef, '--base', r.defaultBranch, '--title', item.goal.slice(0, 120), '--body', `Milestone of an auto-claude run.\n\nCheck: \`${item.check ?? '-'}\`\n\nPlan: .claude/auto-plan.md (local to the run).`], wt)
     const pr = prNumber(made.stdout + made.stderr)
     if (pr === undefined) return { r, item: update({ note: `gh pr create failed: ${out(made)}` }) }
     await tell($, r, `opened PR #${pr}: ${item.goal.slice(0, 80)}`)
@@ -276,8 +294,8 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
 
   let failure: string | undefined
   if (r.ciMode === 'local') {
-    await run($, ['git', '-C', wt, 'fetch', '-q', r.remote], wt)
-    const rebased = await run($, ['git', '-C', wt, 'rebase', `${r.remote}/${r.defaultBranch}`], wt)
+    await fetchRemote($, r, wt)
+    const rebased = await run($, ['git', '-C', wt, 'rebase', refOf(r)], wt)
     if (rebased.exitCode !== 0) {
       await run($, ['git', '-C', wt, 'rebase', '--abort'], wt)
       failure = `does not rebase onto ${r.defaultBranch}: ${out(rebased)}`
@@ -291,7 +309,7 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
       }
     }
   } else {
-    const checks = parseChecks((await run($, ['gh', 'pr', 'checks', String(item.pr), '--json', 'bucket'], wt)).stdout)
+    const checks = parseChecks((await run($, ['gh', 'pr', 'checks', String(item.pr), ...repo, '--json', 'bucket'], wt)).stdout)
     if (checks === 'pending') return { r, item }
     // Asked right after the PR was opened, GitHub has usually not registered
     // its checks yet: that is pending too, until the grace runs out.
@@ -299,17 +317,20 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
     if (checks === 'red') failure = 'CI failed (gh pr checks)'
     if (failure === undefined) {
       // Looked at again right before merging.
-      const state = mergeable((await run($, ['gh', 'pr', 'view', String(item.pr), '--json', 'state,mergeable'], wt)).stdout)
+      const state = mergeable((await run($, ['gh', 'pr', 'view', String(item.pr), ...repo, '--json', 'state,mergeable'], wt)).stdout)
       if (state.unknown) return { r, item }
-      if (!state.open) return { r, item: update({ state: 'held', note: 'the PR is no longer open' }) }
-      if (state.conflict) failure = `conflicts with ${r.defaultBranch}`
+      // A merge whose reply was lost (a 502 after GitHub merged it) has landed.
+      if (state.merged) {
+        // Fall through to the merged bookkeeping below.
+      } else if (!state.open) return { r, item: update({ state: 'held', note: 'the PR is no longer open' }) }
+      else if (state.conflict) failure = `conflicts with ${r.defaultBranch}`
       else {
         // CI judged the PR; the milestone's own check is judged on the pushed head too.
         await run($, ['git', '-C', r.root, 'fetch', '-q', r.remote, item.headRef], r.root)
         failure = await verifyFresh($, r, item, `${r.remote}/${item.headRef}`)
       }
-      if (failure === undefined) {
-        const merged = await run($, ['gh', 'pr', 'merge', String(item.pr), '--squash', '--delete-branch'], wt)
+      if (failure === undefined && !state.merged) {
+        const merged = await run($, ['gh', 'pr', 'merge', String(item.pr), ...repo, '--squash', '--delete-branch'], wt)
         if (merged.exitCode !== 0) return { r, item: update({ note: `merge failed: ${out(merged)}` }) }
       }
     }
@@ -352,9 +373,9 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
 async function deployMerged($: EngineInterface, r: AutoRecord, spec: DeploySpec): Promise<string | undefined> {
   const dir = `${r.root}/worktrees/auto-deploy`
   await run($, ['git', '-C', r.root, 'worktree', 'remove', '--force', dir], r.root)
-  await run($, ['git', '-C', r.root, 'fetch', '-q', r.remote], r.root)
-  const made = await run($, ['git', '-C', r.root, 'worktree', 'add', '--detach', dir, `${r.remote}/${r.defaultBranch}`], r.root)
-  if (made.exitCode !== 0) return `no checkout of ${r.remote}/${r.defaultBranch}: ${out(made)}`
+  await fetchRemote($, r, r.root)
+  const made = await run($, ['git', '-C', r.root, 'worktree', 'add', '--detach', dir, refOf(r)], r.root)
+  if (made.exitCode !== 0) return `no checkout of ${refOf(r)}: ${out(made)}`
   try {
     for (const language of spec.codeql) {
       const blocked = await codeqlGate($, r, dir, language)
@@ -393,8 +414,8 @@ async function finalCheck($: EngineInterface, r: AutoRecord, caps: Caps): Promis
   // Judged on what was merged: a fresh detached checkout of the default branch.
   const dir = `${r.root}/worktrees/auto-final`
   await run($, ['git', '-C', r.root, 'worktree', 'remove', '--force', dir], r.root)
-  await run($, ['git', '-C', r.root, 'fetch', '-q', r.remote], r.root)
-  const made = await run($, ['git', '-C', r.root, 'worktree', 'add', '--detach', dir, `${r.remote}/${r.defaultBranch}`], r.root)
+  await fetchRemote($, r, r.root)
+  const made = await run($, ['git', '-C', r.root, 'worktree', 'add', '--detach', dir, refOf(r)], r.root)
   const ran = made.exitCode === 0 ? await run($, ['bash', '-lc', check], dir, 600_000) : made
   await run($, ['git', '-C', r.root, 'worktree', 'remove', '--force', dir], r.root)
   if (ran.exitCode === 0) {
@@ -415,6 +436,7 @@ async function finalCheck($: EngineInterface, r: AutoRecord, caps: Caps): Promis
 async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<void> {
   if (ticking || activeRoot === undefined) return
   ticking = true
+  let failed = false
   try {
     const got = await readRecord($, activeRoot)
     if (got === undefined) return
@@ -437,7 +459,8 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
       await stopRun($, r, '.claude/auto-claude.stop appeared')
       return
     }
-    const cap = capReached(r, caps, Date.now())
+    // The engine's clock, like every other time the run keeps (beatAt, phaseAt, movedAt).
+    const cap = capReached(r, caps, await $.clock.now())
     if (cap !== undefined) {
       await stopRun($, r, cap)
       return
@@ -465,8 +488,13 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
     }
 
     // What the loop did since the last look.
-    const { entries, offset } = readLog((await readText($, FILES(r.root).log)) ?? '', r.logOffset)
-    r = { ...r, logOffset: offset }
+    const logText = (await readText($, FILES(r.root).log)) ?? ''
+    let read = readLog(logText, r.logOffset, r.logLast)
+    // Held on the tick before too: no half-written file lasts a whole tick, so
+    // the log was replaced (cleared by hand), and all of it is new.
+    if (read.held === true && (r.logHeld ?? 0) >= 1) read = readLog(logText, 0)
+    const { entries, offset, last } = read
+    r = { ...r, logOffset: offset, logLast: last, logHeld: read.held === true ? (r.logHeld ?? 0) + 1 : 0 }
     for (const e of entries) {
       if (e.event === 'start' && e.branch !== undefined) {
         r = { ...r, started: r.started + 1, worktrees: { ...r.worktrees, [e.branch]: e.worktree ?? '' }, kicks: 0, kickTold: false, kickReply: undefined, ...(r.kickTold === true ? { note: undefined } : {}) }
@@ -509,6 +537,7 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
       // Waiting (CI pending, an error to retry): the next tick looks again.
       if (step.item.state === item.state) break
     }
+    r = await idleCheck($, r)
     await writeRecord($, r)
 
     // A pending CI is looked at again soon, between the ticks.
@@ -536,8 +565,19 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
       }
     }
   } catch (error) {
-    $.ui.log(`auto-claude: tick failed: ${String(error).slice(0, 300)}`, { to: 'debug' })
+    failed = true
+    tickFails++
+    tickError = String(error).slice(0, 300)
+    $.ui.log(`auto-claude: tick failed: ${tickError}`, { to: 'debug' })
+    // Told once per streak; a tick that gets through starts the count again.
+    if (tickFails === TICK_FAIL_TELL && activeRoot !== undefined) {
+      await tell($, { root: activeRoot } as AutoRecord, `every tick fails (${tickFails} in a row), so nothing moves: ${tickError.slice(0, 200)}`).catch(() => {})
+    }
   } finally {
+    if (!failed) {
+      tickFails = 0
+      tickError = undefined
+    }
     ticking = false
   }
 }
@@ -556,18 +596,89 @@ async function clearStop($: EngineInterface, root: string): Promise<{ cleared: b
 
 const clearedNote = (c: { cleared: boolean }) => (c.cleared ? ' A leftover .claude/auto-claude.stop was moved to .claude/auto-claude.stop.cleared.' : '')
 
+// Lines a bootstrapped repository ignores before its first commit: secrets and
+// noise must not enter a history auto-claude then builds on.
+const BOOTSTRAP_IGNORE = ['.env', '.env.*', '!.env.example', '*.pem', '*.key', '*.p12', '*.pfx', 'node_modules/', '.DS_Store', 'worktrees/', '.claude/settings.local.json']
+// A directory with more files than this, or other repositories inside it, is not one project.
+const BOOTSTRAP_MAX_FILES = 3000
+
+// A directory that is not a git repository (or has one with no commit yet) is
+// made into one: `git init` on main, a .gitignore for secrets, one initial
+// commit of what is there. Returns why it will not, for a directory that is
+// plainly not a single project (the home directory, a folder of repositories).
+async function bootstrapRepo($: EngineInterface, dir: string, hasRepo: boolean): Promise<{ root: string; note: string } | { error: string }> {
+  const home = (await $.env.get('HOME').catch(() => undefined))?.replace(/\/$/, '')
+  if (dir === '/' || dir === home) return { error: `Not a project directory: ${dir}. cd into the project's folder and start there.` }
+  const nested = (await run($, ['bash', '-c', 'find . -mindepth 2 -maxdepth 3 -name .git -not -path "./worktrees/*" | head -1'], dir, 30_000)).stdout.trim()
+  if (nested !== '') return { error: `Not bootstrapped: ${dir} holds other repositories (${nested}); start inside one of them.` }
+  const counted = (await run($, ['bash', '-c', `find . -type f -not -path "./.git/*" -not -path "*/node_modules/*" | head -${BOOTSTRAP_MAX_FILES + 1} | wc -l`], dir, 60_000)).stdout.trim()
+  if (Number(counted) > BOOTSTRAP_MAX_FILES) return { error: `Not bootstrapped: ${dir} holds more than ${BOOTSTRAP_MAX_FILES} files, so it is not one project; start in the project's folder, or run git init yourself.` }
+  if (!hasRepo) {
+    let init = await run($, ['git', '-C', dir, 'init', '-b', 'main'], dir, 30_000)
+    // git before 2.28 has no -b.
+    if (init.exitCode !== 0) {
+      init = await run($, ['git', '-C', dir, 'init'], dir, 30_000)
+      if (init.exitCode === 0) await run($, ['git', '-C', dir, 'symbolic-ref', 'HEAD', 'refs/heads/main'], dir, 15_000)
+    }
+    if (init.exitCode !== 0) return { error: `Not bootstrapped: git init failed in ${dir}: ${out(init)}` }
+  }
+  const root = await repoRoot($, dir)
+  if (root === undefined) return { error: `Not bootstrapped: ${dir} is still not a git repository after git init.` }
+  await ensureLines($, `${root}/.gitignore`, BOOTSTRAP_IGNORE, '# auto-claude bootstrap')
+  await run($, ['git', '-C', root, 'add', '-A'], root, 60_000)
+  const staged = (await run($, ['git', '-C', root, 'diff', '--cached', '--name-only'], root, 30_000)).stdout.split('\n').filter(l => l.trim() !== '').length
+  const made = await run($, ['git', '-C', root, 'commit', '--allow-empty', '-m', 'Initial commit'], root, 60_000)
+  if (made.exitCode !== 0) return { error: `Not bootstrapped: the initial commit failed (is git user.name / user.email set?): ${out(made)}` }
+  return { root, note: `${hasRepo ? 'Made the first commit' : 'Initialized a git repository'} here (main, ${staged} file${staged === 1 ? '' : 's'}; secrets and noise are in .gitignore).` }
+}
+
 async function startCommand($: EngineInterface, hint: string, ciMode: string): Promise<string> {
   const where = await sessionRoot($)
-  const root = where.root
-  if (root === undefined) return notInRepo(where)
+  let root = where.root
+  const notes: string[] = []
+  // Not a repository: the session's own directory becomes one (never an
+  // ancestor found by walking up from a removed directory).
+  if (root === undefined) {
+    if (where.used !== where.cwd) return notInRepo(where)
+    const made = await bootstrapRepo($, where.cwd, false)
+    if ('error' in made) return made.error
+    root = made.root
+    notes.push(made.note)
+  }
   const existing = await readRecord($, root)
   if (existing?.on === true) return `A run is already on here (phase ${existing.phase}); /${COMMAND} status, or /${COMMAND} stop first.`
-  const remote = (await run($, ['git', '-C', root, 'remote'], root)).stdout.split('\n').map(s => s.trim()).find(s => s === 'origin') ?? undefined
-  if (remote === undefined) return 'This repository has no `origin` remote: auto-claude ships milestones there.'
-  await run($, ['git', '-C', root, 'fetch', '-q', remote], root)
-  const head = (await run($, ['git', '-C', root, 'symbolic-ref', '--short', `refs/remotes/${remote}/HEAD`], root)).stdout.trim()
-  const defaultBranch = head.startsWith(`${remote}/`) ? head.slice(remote.length + 1) : 'main'
-  const mode = ciMode === 'github' || ciMode === 'local' ? ciMode : (await run($, ['gh', 'repo', 'view', '--json', 'name'], root, 30_000)).exitCode === 0 ? 'github' : 'local'
+  // A repository with no commit has nothing to branch milestones from.
+  if ((await run($, ['git', '-C', root, 'rev-parse', '--verify', '--quiet', 'HEAD'], root, 15_000)).exitCode !== 0) {
+    const made = await bootstrapRepo($, root, true)
+    if ('error' in made) return made.error
+    notes.push(made.note)
+  }
+  const hasOrigin = (await run($, ['git', '-C', root, 'remote'], root)).stdout.split('\n').some(s => s.trim() === 'origin')
+  let remote = 'origin'
+  let defaultBranch = 'main'
+  let mode: 'github' | 'local' = 'local'
+  if (hasOrigin) {
+    await run($, ['git', '-C', root, 'fetch', '-q', remote], root)
+    const head = (await run($, ['git', '-C', root, 'symbolic-ref', '--short', `refs/remotes/${remote}/HEAD`], root)).stdout.trim()
+    // origin/HEAD is set only by clone: a repository whose origin was added by
+    // hand has none, and its default may well be master. The remote says.
+    const asked = head.startsWith(`${remote}/`) ? undefined : (await run($, ['git', '-C', root, 'ls-remote', '--symref', remote, 'HEAD'], root, 30_000)).stdout.match(/^ref: refs\/heads\/(\S+)\s+HEAD/m)?.[1]
+    defaultBranch = head.startsWith(`${remote}/`) ? head.slice(remote.length + 1) : (asked ?? 'main')
+    mode = ciMode === 'github' || ciMode === 'local' ? ciMode : (await run($, ['gh', 'repo', 'view', '--json', 'name'], root, 30_000)).exitCode === 0 ? 'github' : 'local'
+  } else {
+    // No origin: milestones land in this repository's own branch, checked by
+    // their own checks. A push into the checked-out branch updates its files
+    // in place, which needs a clean tree.
+    if (ciMode === 'github') return 'Not started: github CI needs an `origin` remote, and this repository has none.'
+    remote = LOCAL
+    const branch = (await run($, ['git', '-C', root, 'symbolic-ref', '--short', 'HEAD'], root, 15_000)).stdout.trim()
+    if (branch === '') return 'Not started: HEAD is detached, so there is no branch for milestones to land in; check one out.'
+    defaultBranch = branch
+    const dirty = (await run($, ['git', '-C', root, 'status', '--porcelain', '--untracked-files=no'], root, 30_000)).stdout.trim()
+    if (dirty !== '') return `Not started: ${branch} has uncommitted changes, and milestones land in it in place; commit or stash them first.`
+    await run($, ['git', '-C', root, 'config', 'receive.denyCurrentBranch', 'updateInstead'], root, 15_000)
+    notes.push(`No remote: milestones land in ${branch} here, checked by their own checks.`)
+  }
 
   // Read once: what this run deploys cannot change while it runs.
   const deployText = await readText($, `${root}/${DEPLOY_FILE}`)
@@ -575,11 +686,13 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string): P
   if (deploy !== undefined && 'error' in deploy) return `Not started: ${deploy.error}.`
 
   const f = FILES(root)
+  const logLines = ((await readText($, f.log)) ?? '').split('\n').filter(l => l.trim() !== '')
+  await run($, ['mkdir', '-p', `${root}/.git/info`], root, 15_000)
   await ensureLines($, f.exclude, EXCLUDES, '# auto-claude')
   const stop = await clearStop($, root)
   if ('error' in stop) return `Not started: ${stop.error}.`
   await ensureLines($, f.deny, DENY, '# auto-claude: merging and releases are the driver\'s')
-  await $.fs.write(f.base, `${remote}/${defaultBranch}\n`)
+  await $.fs.write(f.base, `${refOf({ remote, defaultBranch })}\n`)
   // Closed until the plan is ready.
   const r: AutoRecord = {
     on: true,
@@ -588,11 +701,12 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string): P
     sessionId: await $.session.id(),
     hint,
     round: 1,
-    startedAt: Date.now(),
+    startedAt: await $.clock.now(),
     remote,
     defaultBranch,
     ciMode: mode,
-    logOffset: ((await readText($, f.log)) ?? '').split('\n').filter(l => l.trim() !== '').length,
+    logOffset: logLines.length,
+    logLast: logLines.at(-1),
     started: 0,
     finished: 0,
     credit: true,
@@ -610,29 +724,58 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string): P
   await $.fs.write(f.gate, '0\n')
   activeRoot = root
   await writeRecord($, r)
-  const text = `${kickoffText(hint, `${remote}/${defaultBranch}`)}${deploy === undefined ? '' : `\n- auto-claude deploys after each merge (${DEPLOY_FILE}). Plan no deploy milestone and never deploy yourself.`}`
+  const text = `${kickoffText(hint, refOf({ remote, defaultBranch }), remote === LOCAL)}${deploy === undefined ? '' : `\n- auto-claude deploys after each merge (${DEPLOY_FILE}). Plan no deploy milestone and never deploy yourself.`}`
   $.clock.after(100, () => {
     $.prompt.submit({ text }).catch(() => $.ui.toast('auto-claude: the planning prompt was not submitted; send any message to start.'))
   })
 
   const moved = where.used === where.cwd ? '' : ` (the session's directory ${where.cwd} no longer exists; used ${where.used})`
   const deploys = deploy === undefined ? '' : `, deploys after each merge with \`${deploy.command}\`${deploy.codeql.length > 0 ? ` after a CodeQL scan (${deploy.codeql.join(', ')})` : ''}`
-  return `auto-claude on in ${root}${moved} (${mode} CI, merges into ${defaultBranch}${deploys}). Claude plans the run now.${clearedNote(stop)}`
+  return `auto-claude on in ${root}${moved} (${mode} CI, merges into ${defaultBranch}${deploys}). Claude plans the run now.${clearedNote(stop)}${notes.length > 0 ? ` ${notes.join(' ')}` : ''}`
 }
 
-async function stallLine($: EngineInterface, r: AutoRecord): Promise<string | undefined> {
+async function stallFacts($: EngineInterface, r: AutoRecord): Promise<StallFacts> {
   const f = FILES(r.root)
   const planErrors = r.phase === 'plan' ? ((v => (v.ok ? [] : v.errors))(validatePlan(await readText($, f.plan), await readText($, f.queue), r.round === 1))) : []
-  const why = diagnose(r, {
-    now: await $.clock.now(),
+  const now = await $.clock.now()
+  return {
+    now,
     sessionId: await $.session.id(),
     staleMs: STALE_MS,
     credit: gateCredit(await readText($, f.gate)),
     planErrors,
     maxNudges: MAX_NUDGES,
     planWaitMs: PLAN_NUDGE_MS,
-  })
+    ...(r.movedAt === undefined ? {} : { idleMs: now - r.movedAt }),
+    ...(tickFails >= TICK_FAIL_TELL && tickError !== undefined ? { tickFails, tickError } : {}),
+  }
+}
+
+async function stallLine($: EngineInterface, r: AutoRecord): Promise<string | undefined> {
+  const why = diagnose(r, await stallFacts($, r))
   return why === undefined ? undefined : `stalled: ${why}`
+}
+
+// A run that stays idle is told to the person again and again (the shipping
+// error's one note after 10 ticks was missed: a run sat 2 h at a PR that would
+// not open). Each nudge names the cause and, where the loop is the one that
+// is idle, asks it to start again. Progress, or waiting on a clock of its own
+// (a goal being built, a PR's CI), starts the count over.
+async function idleCheck($: EngineInterface, r: AutoRecord): Promise<AutoRecord> {
+  if (!r.on || r.phase !== 'run') return r
+  const now = await $.clock.now()
+  const sig = progressSig(r)
+  if (sig !== r.sig || r.movedAt === undefined || isWaiting(r, now)) return { ...r, sig, movedAt: now, idleNudges: 0, idleNudgedAt: undefined }
+  const n = idleDue(r, now)
+  if (n === undefined) return r
+  const why = diagnose(r, await stallFacts($, r)) ?? `idle ${Math.round((now - r.movedAt) / 60_000)} min`
+  // A shipping step that fails retries every tick already. When the loop is the idle one, clearing kickedAt
+  // lets `release` (this same tick) grant and ask at once, past its backoff; the tries and what was told stay.
+  const item = inFlight(r.ships)
+  const heal = item === undefined || item.state === 'fixing'
+  const last = n >= MAX_IDLE_NUDGES ? ' No more nudges; /auto-claude status keeps the stalled line.' : ''
+  await tell($, r, `idle ${Math.round((now - r.movedAt) / 60_000)} min (nudge ${n}/${MAX_IDLE_NUDGES}): ${why}.${heal ? ' Asking the loop to start again.' : ''} /auto-claude status for detail; /auto-claude resume re-grants and re-asks.${last}`)
+  return { ...r, idleNudges: n, idleNudgedAt: now, ...(heal ? { kickedAt: undefined } : {}) }
 }
 
 async function statusText($: EngineInterface): Promise<string> {
@@ -693,7 +836,11 @@ export const register: Register = (on, options) => {
     return { ...composed, sections: [...composed.sections, { id: 'auto-claude:policy', text: POLICY, scope: 'session' as const }] }
   })
 
-  on('tool.call', { tool: `mcp__auto-claude__${READY_TOOL}` }, async $ => {
+  // The SDK's Matcher over tool.call's input union is too deep for tsc (TS2589);
+  // a stub handler `async () => ({ result: 'x' })` reproduces it, so it is the
+  // matcher's type, not this hook. Only this line is exempt.
+  // @ts-expect-error TS2589 in claude-code's Matcher<Args<'tool.call'>>
+  on('tool.call', { tool: READY_TOOL_ID }, async ($): Promise<{ result: string }> => {
     const root = activeRoot
     const r = root === undefined ? undefined : await readRecord($, root)
     if (r === undefined || !r.on) return { result: `No auto-claude run is on; /${COMMAND} start first.` }
@@ -731,7 +878,7 @@ export const register: Register = (on, options) => {
         on: true,
         phase,
         sessionId: await $.session.id(),
-        startedAt: Date.now(),
+        startedAt: now,
         beatAt: now,
         kicks: 0,
         kickTold: false,
@@ -743,7 +890,7 @@ export const register: Register = (on, options) => {
       orphanTold = undefined
       await writeRecord($, next)
       if (phase === 'plan') {
-        const text = kickoffText(r.hint, `${r.remote}/${r.defaultBranch}`)
+        const text = kickoffText(r.hint, refOf(r), r.remote === LOCAL)
         $.clock.after(100, () => {
           $.prompt.submit({ text }).catch(() => $.ui.toast('auto-claude: the planning prompt was not submitted; send any message to start.'))
         })

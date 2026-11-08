@@ -5,7 +5,7 @@ import { countSarif, parseDeploy } from './deploy'
 import { LOOP_PROTOCOL } from './loop-protocol'
 import type { ProtocolStep } from './loop-protocol'
 import { finalCheckOf, fixLine, kickoffText, parseQueue, validatePlan } from './plan'
-import { capReached, inFlight, mergeable, parseChecks, prNumber, readLog } from './ship'
+import { capReached, idleDue, inFlight, mergeable, parseChecks, prNumber, progressSig, readLog, repoSlug } from './ship'
 
 type On = Parameters<TestBody>[1]
 type Engine = Parameters<TestBody>[0]
@@ -59,8 +59,39 @@ describe('ship', () => {
   test('log tail reads from the offset and survives a trimmed log', () => {
     const log = '{"event":"start","branch":"goal/01-a"}\n{"event":"met","goal":"a","branch":"goal/01-a"}\nnot json\n'
     expect(readLog(log, 0).entries.map(e => e.event)).toEqual(['start', 'met'])
-    expect(readLog(log, 2)).toEqual({ entries: [], offset: 3 })
+    // A last line that does not parse may be torn: the cursor stays before it.
+    expect(readLog(log, 2)).toEqual({ entries: [], offset: 2, last: '{"event":"met","goal":"a","branch":"goal/01-a"}' })
     expect(readLog(log, 99).entries).toHaveLength(2)
+  })
+
+  test('the log is followed by its last line read, so a trimmed log neither stalls nor replays', () => {
+    const line = (i: number) => JSON.stringify({ ts: `t${i}`, event: 'start', branch: `b${i}` })
+    const text = (from: number, to: number) => `${Array.from({ length: to - from }, (_, k) => line(from + k)).join('\n')}\n`
+    const first = readLog(text(0, 5), 0)
+    expect(first.last).toBe(line(4))
+    // Trimmed to the same length: only the two new lines.
+    expect(readLog(text(2, 7), first.offset, first.last).entries.map(e => e.branch)).toEqual(['b5', 'b6'])
+    // Cleared by hand and refilled: nothing read before is read again.
+    expect(readLog(text(0, 5), 5, line(4)).entries).toEqual([])
+    // Trimmed past the last line read (goal-mode keeps the length, so it is
+    // never shorter than what was read): the whole window is new.
+    expect(readLog(text(10, 15), 5, line(4)).entries).toHaveLength(5)
+  })
+
+  test('a log read while goal-mode rewrites it (a prefix, a torn last line) replays nothing and loses nothing', () => {
+    const line = (i: number) => JSON.stringify({ ts: `t${i}`, event: 'start', branch: `b${i}` })
+    const text = (from: number, to: number) => `${Array.from({ length: to - from }, (_, k) => line(from + k)).join('\n')}\n`
+    // A prefix of a log already read to line 4: nothing, and the cursor stays.
+    const prefix = readLog(text(0, 3), 5, line(4))
+    expect(prefix.entries).toEqual([])
+    expect(prefix.last).toBe(line(4))
+    // A torn last line is not read, and the cursor stays on the last whole one.
+    const full = text(0, 6)
+    const torn = readLog(full.slice(0, full.length - 10), 5, line(4))
+    expect(torn.entries).toEqual([])
+    expect(torn.last).toBe(line(4))
+    // The next read, whole, yields that line once.
+    expect(readLog(full, torn.offset, torn.last).entries.map(e => e.branch)).toEqual(['b5'])
   })
 
   test('checks, mergeability and PR numbers', () => {
@@ -68,8 +99,18 @@ describe('ship', () => {
     expect(parseChecks('[{"bucket":"pass"},{"bucket":"pending"}]')).toBe('pending')
     expect(parseChecks('[{"bucket":"fail"}]')).toBe('red')
     expect(parseChecks('')).toBe('none')
-    expect(mergeable('{"state":"OPEN","mergeable":"CONFLICTING"}')).toEqual({ open: true, conflict: true, unknown: false })
+    expect(mergeable('{"state":"OPEN","mergeable":"CONFLICTING"}')).toEqual({ open: true, merged: false, conflict: true, unknown: false })
+    // A merged PR reports mergeable UNKNOWN; that must not read as "not yet judged".
+    expect(mergeable('{"state":"MERGED","mergeable":"UNKNOWN"}')).toEqual({ open: false, merged: true, conflict: false, unknown: false })
     expect(prNumber('https://github.com/o/r/pull/42\n')).toBe(42)
+  })
+
+  test('gh is aimed at the pushed remote\'s repository, whatever the URL form', () => {
+    expect(repoSlug('git@github.com:o/r.git\n')).toBe('o/r')
+    expect(repoSlug('https://github.com/o/r.git')).toBe('o/r')
+    expect(repoSlug('https://github.com/o/r')).toBe('o/r')
+    expect(repoSlug('ssh://git@github.com/o/r.git')).toBe('o/r')
+    expect(repoSlug('https://example.com/o/r.git')).toBeUndefined()
   })
 
   test('one milestone ships at a time; caps stop the run', () => {
@@ -106,6 +147,14 @@ function world(on: On, store: Record<string, unknown> = {}) {
     // GitHub CI mode, and a branch push whose git cannot be spawned.
     github: false,
     gitGone: false,
+    // Whether the directory is a git repository (git init makes it one), and whether it has an origin.
+    repo: true,
+    origin: true,
+    // origin/HEAD as `git symbolic-ref` sees it ('' when it was never set), and the remote's own HEAD branch.
+    originHead: 'origin/main',
+    remoteHead: 'main',
+    // Paths whose writes fail (a read-only file, a full disk).
+    unwritable: new Set<string>(),
     // What goal-mode answers to `loop on`.
     loopReply: 'Loop on: started',
     // The deploy command's exit, run in the driver's fresh checkout.
@@ -135,6 +184,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
   })
   on('fs.exists', (_, e) => ({ value: exists(e.path) }))
   on('fs.write', (_, e) => {
+    if (w.unwritable.has(e.path)) return { deny: `EACCES ${e.path}` }
     w.files.set(e.path, e.text)
     return { value: undefined }
   })
@@ -152,7 +202,12 @@ function world(on: On, store: Record<string, unknown> = {}) {
     const ok = (stdout = '', exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     // git cannot start in a directory that is gone (Bun: posix_spawn ENOENT).
     if (e.init?.cwd !== undefined && removed(e.init.cwd)) return ok('', -1)
-    if (a.includes('--git-common-dir')) return ok('/repo/.git\n')
+    if (a.includes('--git-common-dir')) return w.repo ? ok('/repo/.git\n') : ok('', 128)
+    if (a.includes(' init')) {
+      w.repo = true
+      return ok()
+    }
+    if (a.includes('symbolic-ref --short HEAD')) return ok('main\n')
     if (e.argv[0] === 'mv') {
       const [from, to] = e.argv.slice(-2) as [string, string]
       const text = w.files.get(from)
@@ -161,8 +216,10 @@ function world(on: On, store: Record<string, unknown> = {}) {
       w.files.delete(from)
       return ok()
     }
-    if (a.endsWith(' remote')) return ok('origin\n')
-    if (a.includes('symbolic-ref')) return ok('origin/main\n')
+    if (a.endsWith(' remote')) return ok(w.origin ? 'origin\n' : '')
+    if (a.includes(' remote get-url ')) return ok('git@github.com:o/r.git\n')
+    if (a.includes('symbolic-ref')) return w.originHead === '' ? ok('', 128) : ok(`${w.originHead}\n`)
+    if (a.includes('ls-remote --symref')) return ok(`ref: refs/heads/${w.remoteHead}\tHEAD\nabc123\tHEAD\n`)
     if (a.startsWith('gh repo view')) return ok('', w.github ? 0 : 1)
     if (a.startsWith('gh pr create')) return ok('https://github.com/o/r/pull/7\n')
     if (a.startsWith('gh pr checks')) {
@@ -192,10 +249,12 @@ function world(on: On, store: Record<string, unknown> = {}) {
 
 const cmd = ($: Engine, args: string) => $.command.run({ command: 'auto-claude', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
 // goal-mode's side: each start is logged, then spends one of the gate's credit.
-const log = (w: ReturnType<typeof world>, lines: Array<{ event: string } & Record<string, unknown>>) => {
+// cap: keep only the last `cap` lines after each append, as goal-mode does (LOOP_LOG_MAX_LINES).
+const log = (w: ReturnType<typeof world>, lines: Array<{ event: string } & Record<string, unknown>>, cap?: number) => {
   for (const line of lines) {
     const prev = w.files.get('/repo/.claude/goal-loop.log') ?? ''
-    w.files.set('/repo/.claude/goal-loop.log', `${prev}${JSON.stringify(line)}\n`)
+    const all = `${prev}${JSON.stringify(line)}\n`.split('\n').filter(l => l !== '')
+    w.files.set('/repo/.claude/goal-loop.log', `${(cap === undefined ? all : all.slice(-cap)).join('\n')}\n`)
     if (line.event !== 'start') continue
     const credit = Number.parseInt(w.files.get('/repo/.claude/goal-loop.gate') ?? '', 10)
     if (Number.isFinite(credit)) w.files.set('/repo/.claude/goal-loop.gate', `${Math.max(credit - 1, 0)}\n`)
@@ -386,6 +445,88 @@ describe('a run, local CI', () => {
     expect((await cmd($, 'status')).text).toContain('auto-claude off · phase done')
   })
 
+  test('a loop log at goal-mode\'s 2000-line cap still yields every new event (the line count no longer grows)', async ($, on) => {
+    const w = world(on)
+    const CAP = 2000
+    w.files.set('/repo/.claude/goal-loop.log', `${Array.from({ length: CAP }, (_, i) => JSON.stringify({ ts: `t${i}`, event: 'denied' })).join('\n')}\n`)
+    await planned($, w)
+    await w.clock.advance(30_000)
+    log(w, [
+      { ts: 'a1', event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { ts: 'a2', event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ], CAP)
+    w.files.set('/repo/.claude/goals.md', QUEUE.replace('- [ ] add', '- [x] add'))
+    await w.clock.advance(30_000)
+    expect(w.pushes.some(p => p.includes('HEAD:main') && p.includes('goal-01-add'))).toBe(true)
+    // The next milestone is read too, after more trimming.
+    log(w, [
+      { ts: 'b1', event: 'start', goal: 'sub() returns a-b', worktree: '/repo/worktrees/goal-02-sub', branch: 'goal/02-sub' },
+      { ts: 'b2', event: 'met', goal: 'sub() returns a-b', branch: 'goal/02-sub' },
+    ], CAP)
+    await w.clock.advance(30_000)
+    expect(w.pushes.some(p => p.includes('HEAD:main') && p.includes('goal-02-sub'))).toBe(true)
+    // Each milestone landed once: no event was read twice.
+    expect(w.pushes.filter(p => p.includes('HEAD:main')).length).toBe(2)
+    expect((await cmd($, 'status')).text).toContain('2 merged, 0 held')
+  })
+
+  test('an origin with no origin/HEAD (a clone made by remote add + fetch) takes the remote\'s own default branch, not main', async ($, on) => {
+    const w = world(on)
+    w.originHead = ''
+    w.remoteHead = 'master'
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect((await cmd($, 'start')).text).toContain('merges into master')
+    expect(w.files.get('/repo/.claude/goal-loop.base')).toBe('origin/master\n')
+  })
+
+  test('a tick that fails every time is told to the person once, with its error, and again only after it recovered', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    await w.clock.advance(30_000)
+    log(w, [
+      { event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ])
+    w.files.set('/repo/.claude/goals.md', QUEUE.replace('- [ ] add', '- [x] add'))
+    // Landing milestone 1 is fine; granting the next start cannot write the gate.
+    w.unwritable.add(GATE)
+    for (let i = 0; i < 10; i++) await w.clock.advance(30_000)
+    const told = w.notifies.filter(n => n.includes('tick fails'))
+    expect(told).toHaveLength(1)
+    expect(told[0]).toContain('EACCES')
+    expect((await cmd($, 'status')).text).toContain('stalled: every tick fails')
+    w.unwritable.delete(GATE)
+    await w.clock.advance(30_000)
+    expect((await cmd($, 'status')).text).not.toContain('every tick fails')
+  })
+
+  test('the time cap is counted on the engine\'s clock: 24 h after the start the run stops', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    log(w, [{ event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' }])
+    await w.clock.advance(23 * 60 * MIN)
+    expect(w.notifies.some(n => n.includes('time cap'))).toBe(false)
+    await w.clock.advance(61 * MIN)
+    expect(w.notifies.some(n => n.includes('stopped: the time cap (24 h) was reached'))).toBe(true)
+  })
+
+  test('a loop log cleared by hand is read from its start once it stays short for a second tick', async ($, on) => {
+    const w = world(on)
+    w.files.set('/repo/.claude/goal-loop.log', `${Array.from({ length: 40 }, (_, i) => JSON.stringify({ ts: `t${i}`, event: 'denied' })).join('\n')}\n`)
+    await planned($, w)
+    await w.clock.advance(30_000)
+    w.files.set('/repo/.claude/goal-loop.log', '')
+    log(w, [
+      { ts: 'a1', event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { ts: 'a2', event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ])
+    w.files.set('/repo/.claude/goals.md', QUEUE.replace('- [ ] add', '- [x] add'))
+    await w.clock.advance(30_000)
+    expect(w.pushes.some(p => p.includes('goal-01-add'))).toBe(false)
+    await w.clock.advance(30_000)
+    expect(w.pushes.filter(p => p.includes('HEAD:main') && p.includes('goal-01-add'))).toHaveLength(1)
+  })
+
   test('the gate stays shut while the loop is still building a milestone', async ($, on) => {
     const w = world(on)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
@@ -574,6 +715,9 @@ describe('a run, local CI', () => {
     expect(w.merged).toHaveLength(1)
     expect(w.files.get(GATE)).toBe('1\n')
     expect(w.commands).toEqual(['goal-mode loop on', 'goal-mode loop on'])
+    // Every gh call names origin's repository, so a fork's upstream is never picked.
+    for (const call of w.runs.filter(a => /^gh pr (create|checks|view|merge)/.test(a))) expect(call).toContain('--repo o/r')
+    expect(w.runs.some(a => a.startsWith('gh pr create'))).toBe(true)
 
     // The next one's CI is pending: looked at again within 10 s, landed once green.
     log(w, [
@@ -615,7 +759,7 @@ describe('a run, local CI', () => {
     expect(w.files.get(PIECE)).toBe('')
     await cmd($, 'start')
     expect(w.files.get(PIECE)).toContain('auto·R1·plan')
-    await $.session.end({ reason: 'clear', sessionId: 'me' })
+    await $.session.end({ reason: 'clear', sessionId: 'me', resume: { id: 'me' } })
     expect(w.files.get(PIECE)).toBe('')
   })
 
@@ -764,3 +908,151 @@ describe('a run, local CI', () => {
   })
 })
 
+
+describe('a directory with no git repository', () => {
+  test('start runs git init, ignores secrets, makes the first commit, and lands milestones in main itself', async ($, on) => {
+    const w = world(on)
+    w.repo = false
+    w.origin = false
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    const text = (await cmd($, 'start build a tiny lib')).text ?? ''
+    expect(text).toContain('auto-claude on in /repo')
+    expect(text).toContain('Initialized a git repository')
+    expect(text).toContain('No remote: milestones land in main')
+    expect(w.runs.some(a => a.includes(' init -b main'))).toBe(true)
+    expect(w.runs.some(a => a.includes('commit --allow-empty -m Initial commit'))).toBe(true)
+    expect(w.runs.some(a => a.includes('config receive.denyCurrentBranch updateInstead'))).toBe(true)
+    expect(w.files.get('/repo/.gitignore')).toMatch(/\.env[\s\S]*worktrees\//)
+    // The loop builds from the local branch, with no remote to fetch.
+    expect(w.files.get('/repo/.claude/goal-loop.base')).toBe('main\n')
+    await w.clock.advance(200)
+    expect(w.prompts[0]).toContain('This repository has no remote')
+
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set('/repo/.claude/goals.md', QUEUE)
+    await $.tool.call({ tool: 'mcp__auto-claude__auto_plan_ready' } as never)
+    await w.clock.advance(30_000)
+    log(w, [
+      { event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ])
+    await w.clock.advance(30_000)
+    expect(w.pushes.some(a => a.endsWith(' push . HEAD:main'))).toBe(true)
+    expect(w.runs.some(a => a.includes(' fetch '))).toBe(false)
+    expect(w.runs.some(a => a.includes('rebase main'))).toBe(true)
+  })
+
+  test('the home directory is not bootstrapped', async ($, on) => {
+    const w = world(on)
+    w.repo = false
+    w.cwd = '/home'
+    await $.session.start({ cwd: '/home', surface: 'terminal', isInteractive: true })
+    expect((await cmd($, 'start')).text).toContain('Not a project directory')
+    expect(w.runs.some(a => a.includes(' init'))).toBe(false)
+  })
+})
+
+describe('an idle run', () => {
+  const nudges = (w: ReturnType<typeof world>) => w.notifies.filter(n => n.includes('(nudge '))
+
+  test('progressSig ignores an error note; idleDue is 15 min, then 30 min apart, at most 3', () => {
+    const ship = { goal: 'g', headRef: 'a', branch: 'a', state: 'push' as const, red: 0, since: 0 }
+    const base = { started: 1, finished: 1, merges: 0, held: 0 }
+    expect(progressSig({ ...base, ships: [ship] })).toBe(progressSig({ ...base, ships: [{ ...ship, note: 'push failed' }] }))
+    expect(progressSig({ ...base, ships: [ship] })).not.toBe(progressSig({ ...base, ships: [{ ...ship, state: 'ci' as const }] }))
+    const r = { on: true, phase: 'run' as const, movedAt: 0 }
+    const min = (n: number) => n * 60_000
+    expect(idleDue({ ...r }, min(14))).toBeUndefined()
+    expect(idleDue({ ...r }, min(15))).toBe(1)
+    expect(idleDue({ ...r, idleNudges: 1, idleNudgedAt: min(15) }, min(44))).toBeUndefined()
+    expect(idleDue({ ...r, idleNudges: 1, idleNudgedAt: min(15) }, min(45))).toBe(2)
+    expect(idleDue({ ...r, idleNudges: 3, idleNudgedAt: min(75) }, min(500))).toBeUndefined()
+    expect(idleDue({ ...r, phase: 'plan' }, min(500))).toBeUndefined()
+  })
+
+  test('a loop that does not start is nudged at 15 min, then every 30 min, three times, and asked again each time', async ($, on) => {
+    const w = world(on)
+    w.loopReply = 'A session goal is active ("x"): /goal-mode clear it before starting the loop.'
+    await planned($, w)
+    for (let i = 0; i < 28; i++) await w.clock.advance(30_000)
+    expect(nudges(w)).toHaveLength(0)
+    await w.clock.advance(2 * MIN)
+    expect(nudges(w)).toHaveLength(1)
+    expect(nudges(w)[0]).toContain('nudge 1/3')
+    expect(nudges(w)[0]).toContain('A session goal is active')
+    const asks = w.commands.filter(c => c === 'goal-mode loop on').length
+    // The next nudge is 30 min later, not sooner; the third is the last.
+    for (let i = 0; i < 58; i++) await w.clock.advance(30_000)
+    expect(nudges(w)).toHaveLength(1)
+    await w.clock.advance(MIN)
+    expect(nudges(w)).toHaveLength(2)
+    expect(w.commands.filter(c => c === 'goal-mode loop on').length).toBeGreaterThan(asks)
+    for (let i = 0; i < 70; i++) await w.clock.advance(MIN)
+    expect(nudges(w)).toHaveLength(3)
+    expect(nudges(w)[2]).toContain('No more nudges')
+    expect((await cmd($, 'status')).text).toContain('stalled:')
+  })
+
+  test('progress starts the count over; a goal being built and a pending CI are not idle', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    await planned($, w)
+    await w.clock.advance(31 * MIN)
+    expect(nudges(w)).toHaveLength(1)
+
+    // A goal started and being built for an hour: waiting, not idle.
+    log(w, [{ event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' }])
+    for (let i = 0; i < 4; i++) await w.clock.advance(15 * MIN)
+    expect(nudges(w)).toHaveLength(1)
+
+    // Met, its CI pending with nothing wrong: waiting too.
+    w.checks = '[{"bucket":"pending"}]'
+    log(w, [{ event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' }])
+    for (let i = 0; i < 4; i++) await w.clock.advance(15 * MIN)
+    expect(nudges(w)).toHaveLength(1)
+
+    // Merged: progress. The count starts again at nudge 1 once the loop sits idle.
+    w.checks = '[{"bucket":"pass"}]'
+    await w.clock.advance(30_000)
+    expect(w.merged).toHaveLength(1)
+    w.loopReply = 'A session goal is active ("x")'
+    await w.clock.advance(31 * MIN)
+    expect(nudges(w).some(n => n.includes('nudge 1/3') && n !== nudges(w)[0])).toBe(true)
+  })
+
+  test('a CI that stays pending (no runner takes it) or a mergeability GitHub never decides is waiting only 90 min, then nudged', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    w.checks = '[{"bucket":"pending"}]'
+    await planned($, w)
+    log(w, [
+      { event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ])
+    for (let i = 0; i < 6; i++) await w.clock.advance(15 * MIN)
+    expect(nudges(w)).toHaveLength(0)
+    for (let i = 0; i < 4; i++) await w.clock.advance(5 * MIN)
+    const n = nudges(w)
+    expect(n).toHaveLength(1)
+    expect(n[0]).toContain('PR #7')
+    expect(n[0]).toContain('min for CI')
+    expect(n[0]).not.toContain('Asking the loop to start again')
+    expect((await cmd($, 'status')).text).toContain('stalled: PR #7 has waited')
+  })
+
+  test('a shipping error that does not clear is nudged with its note, and the loop is not asked', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    w.gitGone = true
+    await planned($, w)
+    log(w, [
+      { event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ])
+    for (let i = 0; i < 34; i++) await w.clock.advance(30_000)
+    const n = nudges(w)
+    expect(n).toHaveLength(1)
+    expect(n[0]).toContain('ENOENT')
+    expect(n[0]).not.toContain('Asking the loop to start again')
+  })
+})

@@ -6,7 +6,7 @@ Claude Code mods (plugins with a hooks module), served as a local folder marketp
 | --- | --- | --- |
 | [goal-mode](goal-mode/) | 0.7.0 | Session goals, handed to Claude Code's own `/goal`: set by you (`/goal-mode set <condition> [--check <cmd>]`) or by Claude itself (nudged on outcome requests and approved plans); its own evaluator judges only the loop's queued goals |
 | [harness](harness/) | 0.3.2 | The integrated harness: the user's Claude rules enforced at the tool call, session tooling and workflow automation (formerly house-rules) |
-| [auto-claude](auto-claude/) | 0.3.0 | Unattended run of a repository on top of goal-mode's loop: plans the long-term goal and milestones, ships each (push, PR, CI, merge when green, then deploy where `.claude/auto-deploy.json` opts in), replans until the final check passes |
+| [auto-claude](auto-claude/) | 0.4.1 | Unattended run of a repository on top of goal-mode's loop: plans the long-term goal and milestones, ships each (push, PR, CI, merge when green, then deploy where `.claude/auto-deploy.json` opts in), replans until the final check passes |
 | [model-tier](model-tier/) | 0.11.0 | Routes each main-loop turn to fable, opus, sonnet or haiku and a reasoning effort by task complexity, with a `set_tier` tool the model calls to correct either |
 | [refactor](refactor/) | 0.1.3 | Enforces the architecture a repo declares in `.claude/architecture.json` at Edit/Write (layer direction, forbidden imports), notes code smells with the refactoring.guru technique to apply, `/arch audit` for violations and import cycles |
 

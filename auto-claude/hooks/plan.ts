@@ -51,7 +51,7 @@ export function validatePlan(plan: string | undefined, queue: string | undefined
 
 export const READY_TOOL = 'auto_plan_ready'
 
-export function kickoffText(hint: string, base: string): string {
+export function kickoffText(hint: string, base: string, noRemote = false): string {
   return [
     '[auto-claude] The person started an autonomous run of this repository. Plan it now; build nothing yet.',
     hint !== '' ? `Their aim: ${hint}` : 'No aim was given: finish what this repository is evidently for.',
@@ -61,6 +61,7 @@ export function kickoffText(hint: string, base: string): string {
     `2. .claude/goals.md: one line per milestone, in order: \`- [ ] <milestone end state> :: check: <shell command that proves it>\`. Each milestone is one reviewable PR, built in its own worktree from ${base} after the earlier milestones are merged, so each check must pass from such a checkout. State only what is true on the milestone's own branch: never \"merged\", \"pushed\" or \"PR opened\" (that happens after it is met).`,
     `Then call mcp__auto-claude__${READY_TOOL}. It checks the files and starts the run: goal-mode's loop builds each milestone, and auto-claude pushes it, opens a PR, waits for CI and merges when green.`,
     'Nobody is watching: decide every choice yourself (the recommended or safest option), write each decision with its reason under ## Decisions, and ask only for credentials, payment or an irreversible step.',
+    ...(noRemote ? [`This repository has no remote: each milestone lands in ${base} in this checkout, judged by its own check, with no PR and no CI. If the repository is empty or nearly so, make the first milestone its scaffold (README, manifest, test setup, one passing test) with a check that proves it runs.`] : []),
   ].join('\n')
 }
 
