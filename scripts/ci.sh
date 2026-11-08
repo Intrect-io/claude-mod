@@ -2,8 +2,8 @@
 # Created: 2026-10-27
 # Purpose: The repository's CI, run the same way locally and in GitHub Actions:
 #   `claude plugin validate` for the marketplace and every mod, `claude plugin
-#   test` for every mod, then `bun scripts/sync-shared.ts --check` for the
-#   copies generated from shared/.
+#   test` for every mod, tsc for each mod with a tsconfig.json, then
+#   `bun scripts/sync-shared.ts --check` for the copies generated from shared/.
 # Dependencies: claude (Claude Code CLI; no login needed), bun, perl
 # Test Status: run by .github/workflows/ci.yml and by the auto-claude milestone checks
 #
@@ -46,6 +46,26 @@ for mod in "${mods[@]}"; do
   if [ -z "$passes" ] || [ -z "$fails" ] || [ "$passes" -lt 1 ] || [ "$fails" -ne 0 ]; then
     printf '%s\n' "$out" | tail -30
     failed+=("$mod test (pass=${passes:-?} fail=${fails:-?})")
+  fi
+done
+
+# Type check, for each mod with a tsconfig.json. Its base config lives in the
+# generated .claude-plugin/types (gitignored, written by `claude plugin init`),
+# so a checkout without it (GitHub Actions) says it skipped instead of failing.
+# bun strips types without checking them, so `claude plugin test` alone never
+# sees a type error.
+for mod in "${mods[@]}"; do
+  [ -f "$mod/tsconfig.json" ] || continue
+  if [ ! -f "$mod/.claude-plugin/types/tsconfig.json" ]; then
+    echo "== $mod: tsc skipped (no generated .claude-plugin/types)"
+    continue
+  fi
+  echo "== $mod: tsc"
+  out=$(cd "$mod" && bun x --package typescript@5.6.3 tsc --noEmit -p . 2>&1)
+  errs=$(printf '%s\n' "$out" | grep -c 'error TS')
+  if [ "$errs" -ne 0 ]; then
+    printf '%s\n' "$out" | grep 'error TS' | head -20
+    failed+=("$mod tsc ($errs errors)")
   fi
 done
 
