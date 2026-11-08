@@ -457,7 +457,8 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
       await stopRun($, r, '.claude/auto-claude.stop appeared')
       return
     }
-    const cap = capReached(r, caps, Date.now())
+    // The engine's clock, like every other time the run keeps (beatAt, phaseAt, movedAt).
+    const cap = capReached(r, caps, await $.clock.now())
     if (cap !== undefined) {
       await stopRun($, r, cap)
       return
@@ -693,7 +694,7 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string): P
     sessionId: await $.session.id(),
     hint,
     round: 1,
-    startedAt: Date.now(),
+    startedAt: await $.clock.now(),
     remote,
     defaultBranch,
     ciMode: mode,
@@ -866,7 +867,7 @@ export const register: Register = (on, options) => {
         on: true,
         phase,
         sessionId: await $.session.id(),
-        startedAt: Date.now(),
+        startedAt: now,
         beatAt: now,
         kicks: 0,
         kickTold: false,

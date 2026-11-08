@@ -482,6 +482,16 @@ describe('a run, local CI', () => {
     expect((await cmd($, 'status')).text).not.toContain('every tick fails')
   })
 
+  test('the time cap is counted on the engine\'s clock: 24 h after the start the run stops', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    log(w, [{ event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' }])
+    await w.clock.advance(23 * 60 * MIN)
+    expect(w.notifies.some(n => n.includes('time cap'))).toBe(false)
+    await w.clock.advance(61 * MIN)
+    expect(w.notifies.some(n => n.includes('stopped: the time cap (24 h) was reached'))).toBe(true)
+  })
+
   test('the gate stays shut while the loop is still building a milestone', async ($, on) => {
     const w = world(on)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
