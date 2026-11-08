@@ -5,7 +5,7 @@ import { countSarif, parseDeploy } from './deploy'
 import { LOOP_PROTOCOL } from './loop-protocol'
 import type { ProtocolStep } from './loop-protocol'
 import { finalCheckOf, fixLine, kickoffText, parseQueue, validatePlan } from './plan'
-import { capReached, inFlight, mergeable, parseChecks, prNumber, readLog } from './ship'
+import { capReached, idleDue, inFlight, mergeable, parseChecks, prNumber, progressSig, readLog, repoSlug } from './ship'
 
 type On = Parameters<TestBody>[1]
 type Engine = Parameters<TestBody>[0]
@@ -68,8 +68,18 @@ describe('ship', () => {
     expect(parseChecks('[{"bucket":"pass"},{"bucket":"pending"}]')).toBe('pending')
     expect(parseChecks('[{"bucket":"fail"}]')).toBe('red')
     expect(parseChecks('')).toBe('none')
-    expect(mergeable('{"state":"OPEN","mergeable":"CONFLICTING"}')).toEqual({ open: true, conflict: true, unknown: false })
+    expect(mergeable('{"state":"OPEN","mergeable":"CONFLICTING"}')).toEqual({ open: true, merged: false, conflict: true, unknown: false })
+    // A merged PR reports mergeable UNKNOWN; that must not read as "not yet judged".
+    expect(mergeable('{"state":"MERGED","mergeable":"UNKNOWN"}')).toEqual({ open: false, merged: true, conflict: false, unknown: false })
     expect(prNumber('https://github.com/o/r/pull/42\n')).toBe(42)
+  })
+
+  test('gh is aimed at the pushed remote\'s repository, whatever the URL form', () => {
+    expect(repoSlug('git@github.com:o/r.git\n')).toBe('o/r')
+    expect(repoSlug('https://github.com/o/r.git')).toBe('o/r')
+    expect(repoSlug('https://github.com/o/r')).toBe('o/r')
+    expect(repoSlug('ssh://git@github.com/o/r.git')).toBe('o/r')
+    expect(repoSlug('https://example.com/o/r.git')).toBeUndefined()
   })
 
   test('one milestone ships at a time; caps stop the run', () => {
@@ -106,6 +116,9 @@ function world(on: On, store: Record<string, unknown> = {}) {
     // GitHub CI mode, and a branch push whose git cannot be spawned.
     github: false,
     gitGone: false,
+    // Whether the directory is a git repository (git init makes it one), and whether it has an origin.
+    repo: true,
+    origin: true,
     // What goal-mode answers to `loop on`.
     loopReply: 'Loop on: started',
     // The deploy command's exit, run in the driver's fresh checkout.
@@ -152,7 +165,12 @@ function world(on: On, store: Record<string, unknown> = {}) {
     const ok = (stdout = '', exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     // git cannot start in a directory that is gone (Bun: posix_spawn ENOENT).
     if (e.init?.cwd !== undefined && removed(e.init.cwd)) return ok('', -1)
-    if (a.includes('--git-common-dir')) return ok('/repo/.git\n')
+    if (a.includes('--git-common-dir')) return w.repo ? ok('/repo/.git\n') : ok('', 128)
+    if (a.includes(' init')) {
+      w.repo = true
+      return ok()
+    }
+    if (a.includes('symbolic-ref --short HEAD')) return ok('main\n')
     if (e.argv[0] === 'mv') {
       const [from, to] = e.argv.slice(-2) as [string, string]
       const text = w.files.get(from)
@@ -161,7 +179,8 @@ function world(on: On, store: Record<string, unknown> = {}) {
       w.files.delete(from)
       return ok()
     }
-    if (a.endsWith(' remote')) return ok('origin\n')
+    if (a.endsWith(' remote')) return ok(w.origin ? 'origin\n' : '')
+    if (a.includes(' remote get-url ')) return ok('git@github.com:o/r.git\n')
     if (a.includes('symbolic-ref')) return ok('origin/main\n')
     if (a.startsWith('gh repo view')) return ok('', w.github ? 0 : 1)
     if (a.startsWith('gh pr create')) return ok('https://github.com/o/r/pull/7\n')
@@ -574,6 +593,9 @@ describe('a run, local CI', () => {
     expect(w.merged).toHaveLength(1)
     expect(w.files.get(GATE)).toBe('1\n')
     expect(w.commands).toEqual(['goal-mode loop on', 'goal-mode loop on'])
+    // Every gh call names origin's repository, so a fork's upstream is never picked.
+    for (const call of w.runs.filter(a => /^gh pr (create|checks|view|merge)/.test(a))) expect(call).toContain('--repo o/r')
+    expect(w.runs.some(a => a.startsWith('gh pr create'))).toBe(true)
 
     // The next one's CI is pending: looked at again within 10 s, landed once green.
     log(w, [
@@ -764,3 +786,131 @@ describe('a run, local CI', () => {
   })
 })
 
+
+describe('a directory with no git repository', () => {
+  test('start runs git init, ignores secrets, makes the first commit, and lands milestones in main itself', async ($, on) => {
+    const w = world(on)
+    w.repo = false
+    w.origin = false
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    const text = (await cmd($, 'start build a tiny lib')).text ?? ''
+    expect(text).toContain('auto-claude on in /repo')
+    expect(text).toContain('Initialized a git repository')
+    expect(text).toContain('No remote: milestones land in main')
+    expect(w.runs.some(a => a.includes(' init -b main'))).toBe(true)
+    expect(w.runs.some(a => a.includes('commit --allow-empty -m Initial commit'))).toBe(true)
+    expect(w.runs.some(a => a.includes('config receive.denyCurrentBranch updateInstead'))).toBe(true)
+    expect(w.files.get('/repo/.gitignore')).toMatch(/\.env[\s\S]*worktrees\//)
+    // The loop builds from the local branch, with no remote to fetch.
+    expect(w.files.get('/repo/.claude/goal-loop.base')).toBe('main\n')
+    await w.clock.advance(200)
+    expect(w.prompts[0]).toContain('This repository has no remote')
+
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set('/repo/.claude/goals.md', QUEUE)
+    await $.tool.call({ tool: 'mcp__auto-claude__auto_plan_ready' } as never)
+    await w.clock.advance(30_000)
+    log(w, [
+      { event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ])
+    await w.clock.advance(30_000)
+    expect(w.pushes.some(a => a.endsWith(' push . HEAD:main'))).toBe(true)
+    expect(w.runs.some(a => a.includes(' fetch '))).toBe(false)
+    expect(w.runs.some(a => a.includes('rebase main'))).toBe(true)
+  })
+
+  test('the home directory is not bootstrapped', async ($, on) => {
+    const w = world(on)
+    w.repo = false
+    w.cwd = '/home'
+    await $.session.start({ cwd: '/home', surface: 'terminal', isInteractive: true })
+    expect((await cmd($, 'start')).text).toContain('Not a project directory')
+    expect(w.runs.some(a => a.includes(' init'))).toBe(false)
+  })
+})
+
+describe('an idle run', () => {
+  const nudges = (w: ReturnType<typeof world>) => w.notifies.filter(n => n.includes('(nudge '))
+
+  test('progressSig ignores an error note; idleDue is 15 min, then 30 min apart, at most 3', () => {
+    const ship = { goal: 'g', headRef: 'a', branch: 'a', state: 'push' as const, red: 0, since: 0 }
+    const base = { started: 1, finished: 1, merges: 0, held: 0 }
+    expect(progressSig({ ...base, ships: [ship] })).toBe(progressSig({ ...base, ships: [{ ...ship, note: 'push failed' }] }))
+    expect(progressSig({ ...base, ships: [ship] })).not.toBe(progressSig({ ...base, ships: [{ ...ship, state: 'ci' as const }] }))
+    const r = { on: true, phase: 'run' as const, movedAt: 0 }
+    const min = (n: number) => n * 60_000
+    expect(idleDue({ ...r }, min(14))).toBeUndefined()
+    expect(idleDue({ ...r }, min(15))).toBe(1)
+    expect(idleDue({ ...r, idleNudges: 1, idleNudgedAt: min(15) }, min(44))).toBeUndefined()
+    expect(idleDue({ ...r, idleNudges: 1, idleNudgedAt: min(15) }, min(45))).toBe(2)
+    expect(idleDue({ ...r, idleNudges: 3, idleNudgedAt: min(75) }, min(500))).toBeUndefined()
+    expect(idleDue({ ...r, phase: 'plan' }, min(500))).toBeUndefined()
+  })
+
+  test('a loop that does not start is nudged at 15 min, then every 30 min, three times, and asked again each time', async ($, on) => {
+    const w = world(on)
+    w.loopReply = 'A session goal is active ("x"): /goal-mode clear it before starting the loop.'
+    await planned($, w)
+    for (let i = 0; i < 28; i++) await w.clock.advance(30_000)
+    expect(nudges(w)).toHaveLength(0)
+    await w.clock.advance(2 * MIN)
+    expect(nudges(w)).toHaveLength(1)
+    expect(nudges(w)[0]).toContain('nudge 1/3')
+    expect(nudges(w)[0]).toContain('A session goal is active')
+    const asks = w.commands.filter(c => c === 'goal-mode loop on').length
+    // The next nudge is 30 min later, not sooner; the third is the last.
+    for (let i = 0; i < 58; i++) await w.clock.advance(30_000)
+    expect(nudges(w)).toHaveLength(1)
+    await w.clock.advance(MIN)
+    expect(nudges(w)).toHaveLength(2)
+    expect(w.commands.filter(c => c === 'goal-mode loop on').length).toBeGreaterThan(asks)
+    for (let i = 0; i < 70; i++) await w.clock.advance(MIN)
+    expect(nudges(w)).toHaveLength(3)
+    expect(nudges(w)[2]).toContain('No more nudges')
+    expect((await cmd($, 'status')).text).toContain('stalled:')
+  })
+
+  test('progress starts the count over; a goal being built and a pending CI are not idle', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    await planned($, w)
+    await w.clock.advance(31 * MIN)
+    expect(nudges(w)).toHaveLength(1)
+
+    // A goal started and being built for an hour: waiting, not idle.
+    log(w, [{ event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' }])
+    for (let i = 0; i < 4; i++) await w.clock.advance(15 * MIN)
+    expect(nudges(w)).toHaveLength(1)
+
+    // Met, its CI pending with nothing wrong: waiting too.
+    w.checks = '[{"bucket":"pending"}]'
+    log(w, [{ event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' }])
+    for (let i = 0; i < 4; i++) await w.clock.advance(15 * MIN)
+    expect(nudges(w)).toHaveLength(1)
+
+    // Merged: progress. The count starts again at nudge 1 once the loop sits idle.
+    w.checks = '[{"bucket":"pass"}]'
+    await w.clock.advance(30_000)
+    expect(w.merged).toHaveLength(1)
+    w.loopReply = 'A session goal is active ("x")'
+    await w.clock.advance(31 * MIN)
+    expect(nudges(w).some(n => n.includes('nudge 1/3') && n !== nudges(w)[0])).toBe(true)
+  })
+
+  test('a shipping error that does not clear is nudged with its note, and the loop is not asked', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    w.gitGone = true
+    await planned($, w)
+    log(w, [
+      { event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ])
+    for (let i = 0; i < 34; i++) await w.clock.advance(30_000)
+    const n = nudges(w)
+    expect(n).toHaveLength(1)
+    expect(n[0]).toContain('ENOENT')
+    expect(n[0]).not.toContain('Asking the loop to start again')
+  })
+})

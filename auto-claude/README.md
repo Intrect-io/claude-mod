@@ -9,6 +9,12 @@ An unattended run of one repository. Give it an aim in one line, or none at all.
 
 It depends on [goal-mode](../goal-mode/), which supplies the loop: one worktree per milestone, checks, the evaluator, stuck handling and guards.
 
+## Starting anywhere
+
+- **Not a git repository.** `/auto-claude start` in a plain directory runs `git init -b main`, adds secrets and noise to `.gitignore` (`.env*`, `*.pem`, `*.key`, `node_modules/`, `worktrees/`, `.claude/settings.local.json`), and makes one initial commit of what is there. Plan the empty case too: with no files, the first milestone is the scaffold.
+- **Refused.** The home directory, `/`, a directory with more than 3000 files, and a directory that holds other repositories are not one project, so nothing is initialized there.
+- **No `origin` remote** (a new repository, or an existing one). Milestones land in the repository's own default branch: the check, a rebase onto it, then `git push . HEAD:<branch>` with `receive.denyCurrentBranch=updateInstead`, which updates the checked-out files in place. There is no PR and no CI, and `.claude/goal-loop.base` is the branch itself. An existing repository must have a clean tracked tree to start.
+
 ## A run
 
 1. **Plan.**
@@ -54,6 +60,7 @@ A repository opts in by committing `.claude/auto-deploy.json`:
   - A `/goal-mode loop on` that starts nothing is retried with backoff. After 3 tries the person is told the loop's reply.
   - A run still planning gets a reminder every 15 minutes that lists what the plan files lack. After 3 reminders the run stops.
   - A shipping error that repeats is reported once.
+  - **Idle nudge.** A run on the `run` phase where nothing was started, shipped or merged for 15 minutes is reported to the person with its cause (the `stalled:` reason, or "idle N min"), again 30 minutes later, and once more, 3 nudges in all (`idleNudges` in the record; any progress resets the count). When the loop is the idle one, the nudge also clears the `loop on` backoff so the grant is asked at once. A goal being built and a PR whose CI is pending are waiting, not idle. The session model is not prompted.
   - `/auto-claude status` ends with a `stalled:` line when the run is not moving. It names the cause and gives the evidence: an orphaned owner (when it last ticked), a granted start the loop does not take (its last `loop on` reply), overdue planning (what the plan files lack), or a shipping error that repeats (its note and count).
   - A run whose owning session has gone quiet for 10 minutes is reported as orphaned in other sessions, and `/auto-claude resume` picks it up there.
   - Only the owning session receives the unattended rules.

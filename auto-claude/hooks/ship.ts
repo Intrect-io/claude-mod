@@ -45,12 +45,14 @@ export function parseChecks(json: string): Checks {
 }
 
 // `gh pr view <n> --json state,mergeable`: may it be merged now.
-export function mergeable(json: string): { open: boolean; conflict: boolean; unknown: boolean } {
+export function mergeable(json: string): { open: boolean; merged: boolean; conflict: boolean; unknown: boolean } {
   try {
     const v = JSON.parse(json) as { state?: string; mergeable?: string }
-    return { open: v.state === 'OPEN', conflict: v.mergeable === 'CONFLICTING', unknown: v.mergeable === 'UNKNOWN' }
+    // GitHub reports mergeable UNKNOWN for a merged PR, so merged is read first.
+    const merged = v.state === 'MERGED'
+    return { open: v.state === 'OPEN', merged, conflict: v.mergeable === 'CONFLICTING', unknown: !merged && v.mergeable === 'UNKNOWN' }
   } catch {
-    return { open: false, conflict: false, unknown: true }
+    return { open: false, merged: false, conflict: false, unknown: true }
   }
 }
 
@@ -97,6 +99,8 @@ export type StallFacts = {
   maxNudges: number
   // Planning this long is no longer just planning (the first reminder's wait).
   planWaitMs: number
+  // How long nothing has moved (now - movedAt), when known.
+  idleMs?: number
 }
 
 const ago = (now: number, at: number) => `${Math.max(0, Math.round((now - at) / 60_000))} min ago`
@@ -125,7 +129,50 @@ export function diagnose(r: AutoRecord, f: StallFacts): string | undefined {
     const reply = (r.kickReply ?? 'no reply').replace(/\s+/g, ' ').slice(0, 200)
     return `a granted start is not taken: /goal-mode loop on ran ${r.kicks}× (last ${r.kickedAt !== undefined ? ago(f.now, r.kickedAt) : 'at an unknown time'}) and answered: ${reply}`
   }
+  if (r.phase === 'run' && f.idleMs !== undefined && f.idleMs >= IDLE_NUDGE_MS && !isWaiting(r)) {
+    return `idle ${Math.round(f.idleMs / 60_000)} min: nothing was started, shipped or merged`
+  }
 
   return undefined
 }
 
+
+// "owner/name" of a GitHub remote URL (https or ssh form), else undefined.
+// gh picks its target repository itself: in a fork that also has an `upstream`
+// remote it can choose the parent, where the run's branch does not exist
+// ("Head sha can't be blank ... Head ref must be a branch"; measured on a fork
+// with no `gh repo set-default`). Every gh call names the pushed remote's repo.
+export function repoSlug(url: string): string | undefined {
+  const m = url.trim().match(/github\.com[:/]([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/)
+  return m === null ? undefined : `${m[1]}/${m[2]}`
+}
+
+// Idle: the run is on and nothing has been started, shipped or merged for this
+// long. The first nudge comes after IDLE_NUDGE_MS, the next ones IDLE_REPEAT_MS
+// apart, MAX_IDLE_NUDGES in all; any progress starts the count again.
+export const IDLE_NUDGE_MS = 15 * 60_000
+export const IDLE_REPEAT_MS = 30 * 60_000
+export const MAX_IDLE_NUDGES = 3
+
+// What the run has done, so far: it changes when a goal starts or ends, a PR
+// moves on or a milestone is merged or held. A repeating error note is not progress.
+export function progressSig(r: Pick<AutoRecord, 'started' | 'finished' | 'merges' | 'held' | 'ships'>): string {
+  return [r.started, r.finished, r.merges, r.held, ...r.ships.map(s => `${s.headRef}:${s.state}:${s.pr ?? ''}`)].join('|')
+}
+
+// Waiting on something that has its own clock is not idle: the loop building a
+// goal, or a PR's CI pending with nothing wrong.
+export function isWaiting(r: Pick<AutoRecord, 'started' | 'finished' | 'ships'>): boolean {
+  if (r.started > r.finished) return true
+  const item = inFlight(r.ships)
+  return item?.state === 'ci' && item.note === undefined
+}
+
+// The number of the nudge due now (1..MAX_IDLE_NUDGES), or undefined.
+export function idleDue(r: Pick<AutoRecord, 'on' | 'phase' | 'movedAt' | 'idleNudges' | 'idleNudgedAt'>, now: number): number | undefined {
+  if (!r.on || r.phase !== 'run' || r.movedAt === undefined) return undefined
+  const sent = r.idleNudges ?? 0
+  if (sent >= MAX_IDLE_NUDGES) return undefined
+  if (sent === 0) return now - r.movedAt >= IDLE_NUDGE_MS ? 1 : undefined
+  return now - (r.idleNudgedAt ?? r.movedAt) >= IDLE_REPEAT_MS ? sent + 1 : undefined
+}

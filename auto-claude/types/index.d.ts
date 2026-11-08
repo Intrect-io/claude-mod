@@ -66,6 +66,12 @@ export type AutoRecord = {
   deploy?: { command: string; codeql: string[]; timeoutMs: number }
   deploys?: number
   note?: string
+  // Idle detection: what the run last did (ship.ts progressSig), when that last changed,
+  // and the idle nudges sent since (at most MAX_IDLE_NUDGES, reset by any progress).
+  sig?: string
+  movedAt?: number
+  idleNudges?: number
+  idleNudgedAt?: number
 }
 
 declare module 'claude-code' {
