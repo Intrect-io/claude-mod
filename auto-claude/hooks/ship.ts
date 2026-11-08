@@ -8,29 +8,45 @@ import type { AutoRecord, ShipItem } from '../types'
 // a record from before `last`.
 export type LogEntry = { event: string; goal?: string; branch?: string; worktree?: string; reason?: string }
 
-export function readLog(text: string, offset: number, last?: string): { entries: LogEntry[]; offset: number; last?: string } {
+export function readLog(text: string, offset: number, last?: string): { entries: LogEntry[]; offset: number; last?: string; held?: true } {
   const lines = text.split('\n').filter(line => line.trim() !== '')
   let from: number
   if (last !== undefined) {
-    // The line moves only towards the start when the log is trimmed. Not
-    // found: trimmed past it, so every line in the window is new.
+    // The line moves only towards the start when the log is trimmed.
     const at = lines.lastIndexOf(last, Math.min(offset, lines.length) - 1)
+    // Not found in a log shorter than what was read: goal-mode rewrites the
+    // whole file on each append, so this is a read in the middle of that
+    // write. Nothing is read and the cursor stays; the next tick sees it whole.
+    // (A log cleared by hand reads the same way, until the caller decides it
+    // was replaced: see `held`.)
+    if (at < 0 && lines.length < offset) return { entries: [], offset, last, held: true }
+    // Not found otherwise: trimmed past it, so every line in the window is new.
     from = at >= 0 ? at + 1 : 0
   } else {
     // A shorter file than we read means it was trimmed.
     from = offset > lines.length ? Math.max(lines.length - 50, 0) : offset
   }
   const entries: LogEntry[] = []
-  for (const line of lines.slice(from)) {
+  // The cursor only ever rests on a line that parsed: a torn last line is read
+  // again, whole, next time.
+  let cursor = from
+  let cursorLine = from > 0 ? lines[from - 1] : last
+  for (let i = from; i < lines.length; i++) {
     try {
-      const value = JSON.parse(line) as LogEntry
+      const value = JSON.parse(lines[i]!) as LogEntry
       if (typeof value.event === 'string') entries.push(value)
+      cursor = i + 1
+      cursorLine = lines[i]
     } catch {
-      // A torn line is skipped.
+      // A torn last line waits for the next read; one in the middle is skipped.
+      if (i < lines.length - 1) {
+        cursor = i + 1
+        cursorLine = lines[i]
+      }
     }
   }
 
-  return { entries, offset: lines.length, last: lines.at(-1) ?? last }
+  return { entries, offset: cursor, last: cursorLine }
 }
 
 // goal-loop.gate as goal-mode reads it: starts still allowed, undefined for none.

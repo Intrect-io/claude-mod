@@ -36,6 +36,8 @@ export type AutoRecord = {
   logOffset: number
   // The last line of it read: the cursor once goal-mode's 2000-line cap stops the count growing.
   logLast?: string
+  // Ticks in a row the log read shorter than logOffset without logLast in it (a write in progress, or a cleared log).
+  logHeld?: number
   // Goals the loop has started (its `start` events).
   started: number
   // Goals the loop has finished (met, blocked or deferred): equal to started when it is idle.

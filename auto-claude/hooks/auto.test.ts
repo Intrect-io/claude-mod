@@ -59,7 +59,8 @@ describe('ship', () => {
   test('log tail reads from the offset and survives a trimmed log', () => {
     const log = '{"event":"start","branch":"goal/01-a"}\n{"event":"met","goal":"a","branch":"goal/01-a"}\nnot json\n'
     expect(readLog(log, 0).entries.map(e => e.event)).toEqual(['start', 'met'])
-    expect(readLog(log, 2)).toEqual({ entries: [], offset: 3, last: 'not json' })
+    // A last line that does not parse may be torn: the cursor stays before it.
+    expect(readLog(log, 2)).toEqual({ entries: [], offset: 2, last: '{"event":"met","goal":"a","branch":"goal/01-a"}' })
     expect(readLog(log, 99).entries).toHaveLength(2)
   })
 
@@ -72,8 +73,25 @@ describe('ship', () => {
     expect(readLog(text(2, 7), first.offset, first.last).entries.map(e => e.branch)).toEqual(['b5', 'b6'])
     // Cleared by hand and refilled: nothing read before is read again.
     expect(readLog(text(0, 5), 5, line(4)).entries).toEqual([])
-    // Trimmed past the last line read: the whole window is new.
-    expect(readLog(text(10, 13), 5, line(4)).entries).toHaveLength(3)
+    // Trimmed past the last line read (goal-mode keeps the length, so it is
+    // never shorter than what was read): the whole window is new.
+    expect(readLog(text(10, 15), 5, line(4)).entries).toHaveLength(5)
+  })
+
+  test('a log read while goal-mode rewrites it (a prefix, a torn last line) replays nothing and loses nothing', () => {
+    const line = (i: number) => JSON.stringify({ ts: `t${i}`, event: 'start', branch: `b${i}` })
+    const text = (from: number, to: number) => `${Array.from({ length: to - from }, (_, k) => line(from + k)).join('\n')}\n`
+    // A prefix of a log already read to line 4: nothing, and the cursor stays.
+    const prefix = readLog(text(0, 3), 5, line(4))
+    expect(prefix.entries).toEqual([])
+    expect(prefix.last).toBe(line(4))
+    // A torn last line is not read, and the cursor stays on the last whole one.
+    const full = text(0, 6)
+    const torn = readLog(full.slice(0, full.length - 10), 5, line(4))
+    expect(torn.entries).toEqual([])
+    expect(torn.last).toBe(line(4))
+    // The next read, whole, yields that line once.
+    expect(readLog(full, torn.offset, torn.last).entries.map(e => e.branch)).toEqual(['b5'])
   })
 
   test('checks, mergeability and PR numbers', () => {
@@ -490,6 +508,23 @@ describe('a run, local CI', () => {
     expect(w.notifies.some(n => n.includes('time cap'))).toBe(false)
     await w.clock.advance(61 * MIN)
     expect(w.notifies.some(n => n.includes('stopped: the time cap (24 h) was reached'))).toBe(true)
+  })
+
+  test('a loop log cleared by hand is read from its start once it stays short for a second tick', async ($, on) => {
+    const w = world(on)
+    w.files.set('/repo/.claude/goal-loop.log', `${Array.from({ length: 40 }, (_, i) => JSON.stringify({ ts: `t${i}`, event: 'denied' })).join('\n')}\n`)
+    await planned($, w)
+    await w.clock.advance(30_000)
+    w.files.set('/repo/.claude/goal-loop.log', '')
+    log(w, [
+      { ts: 'a1', event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { ts: 'a2', event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ])
+    w.files.set('/repo/.claude/goals.md', QUEUE.replace('- [ ] add', '- [x] add'))
+    await w.clock.advance(30_000)
+    expect(w.pushes.some(p => p.includes('goal-01-add'))).toBe(false)
+    await w.clock.advance(30_000)
+    expect(w.pushes.filter(p => p.includes('HEAD:main') && p.includes('goal-01-add'))).toHaveLength(1)
   })
 
   test('the gate stays shut while the loop is still building a milestone', async ($, on) => {

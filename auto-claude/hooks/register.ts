@@ -488,8 +488,13 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
     }
 
     // What the loop did since the last look.
-    const { entries, offset, last } = readLog((await readText($, FILES(r.root).log)) ?? '', r.logOffset, r.logLast)
-    r = { ...r, logOffset: offset, logLast: last }
+    const logText = (await readText($, FILES(r.root).log)) ?? ''
+    let read = readLog(logText, r.logOffset, r.logLast)
+    // Held on the tick before too: no half-written file lasts a whole tick, so
+    // the log was replaced (cleared by hand), and all of it is new.
+    if (read.held === true && (r.logHeld ?? 0) >= 1) read = readLog(logText, 0)
+    const { entries, offset, last } = read
+    r = { ...r, logOffset: offset, logLast: last, logHeld: read.held === true ? (r.logHeld ?? 0) + 1 : 0 }
     for (const e of entries) {
       if (e.event === 'start' && e.branch !== undefined) {
         r = { ...r, started: r.started + 1, worktrees: { ...r.worktrees, [e.branch]: e.worktree ?? '' }, kicks: 0, kickTold: false, kickReply: undefined, ...(r.kickTold === true ? { note: undefined } : {}) }
