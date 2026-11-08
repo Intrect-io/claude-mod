@@ -57,6 +57,11 @@ let fastTick = false
 let activeRoot: string | undefined
 // The owner an orphaned run was last reported for, once per session.
 let orphanTold: string | undefined
+// Ticks failed in a row and the last error: a tick that throws every time
+// (an unwritable gate, a broken store) moves nothing and must not stay silent.
+let tickFails = 0
+let tickError: string | undefined
+const TICK_FAIL_TELL = 3
 
 type Run = { exitCode: number; stdout: string; stderr: string }
 
@@ -429,6 +434,7 @@ async function finalCheck($: EngineInterface, r: AutoRecord, caps: Caps): Promis
 async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<void> {
   if (ticking || activeRoot === undefined) return
   ticking = true
+  let failed = false
   try {
     const got = await readRecord($, activeRoot)
     if (got === undefined) return
@@ -551,8 +557,19 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
       }
     }
   } catch (error) {
-    $.ui.log(`auto-claude: tick failed: ${String(error).slice(0, 300)}`, { to: 'debug' })
+    failed = true
+    tickFails++
+    tickError = String(error).slice(0, 300)
+    $.ui.log(`auto-claude: tick failed: ${tickError}`, { to: 'debug' })
+    // Told once per streak; a tick that gets through starts the count again.
+    if (tickFails === TICK_FAIL_TELL && activeRoot !== undefined) {
+      await tell($, { root: activeRoot } as AutoRecord, `every tick fails (${tickFails} in a row), so nothing moves: ${tickError.slice(0, 200)}`).catch(() => {})
+    }
   } finally {
+    if (!failed) {
+      tickFails = 0
+      tickError = undefined
+    }
     ticking = false
   }
 }
@@ -722,6 +739,7 @@ async function stallFacts($: EngineInterface, r: AutoRecord): Promise<StallFacts
     maxNudges: MAX_NUDGES,
     planWaitMs: PLAN_NUDGE_MS,
     ...(r.movedAt === undefined ? {} : { idleMs: now - r.movedAt }),
+    ...(tickFails >= TICK_FAIL_TELL && tickError !== undefined ? { tickFails, tickError } : {}),
   }
 }
 

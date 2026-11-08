@@ -114,6 +114,9 @@ export type StallFacts = {
   planWaitMs: number
   // How long nothing has moved (now - movedAt), when known.
   idleMs?: number
+  // Ticks of the owner failed in a row, and the last error, once that is a streak.
+  tickFails?: number
+  tickError?: string
 }
 
 const ago = (now: number, at: number) => `${Math.max(0, Math.round((now - at) / 60_000))} min ago`
@@ -124,6 +127,7 @@ export function diagnose(r: AutoRecord, f: StallFacts): string | undefined {
   if (r.sessionId !== undefined && r.sessionId !== f.sessionId && f.now - beat >= f.staleMs) {
     return `orphaned: the session running it (${r.sessionId.slice(0, 8)}) last ticked ${ago(f.now, beat)}, so nothing moves; /auto-claude resume here to go on`
   }
+  if (f.tickFails !== undefined) return `every tick fails (${f.tickFails} in a row), so nothing moves: ${(f.tickError ?? '').slice(0, 200)}`
   // phaseAt is when planning began or was last reminded: a reminder already
   // sent, or the first one's wait run out, means the plan is overdue.
   const since = r.phaseAt ?? r.startedAt

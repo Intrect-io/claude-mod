@@ -135,6 +135,8 @@ function world(on: On, store: Record<string, unknown> = {}) {
     // origin/HEAD as `git symbolic-ref` sees it ('' when it was never set), and the remote's own HEAD branch.
     originHead: 'origin/main',
     remoteHead: 'main',
+    // Paths whose writes fail (a read-only file, a full disk).
+    unwritable: new Set<string>(),
     // What goal-mode answers to `loop on`.
     loopReply: 'Loop on: started',
     // The deploy command's exit, run in the driver's fresh checkout.
@@ -164,6 +166,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
   })
   on('fs.exists', (_, e) => ({ value: exists(e.path) }))
   on('fs.write', (_, e) => {
+    if (w.unwritable.has(e.path)) return { deny: `EACCES ${e.path}` }
     w.files.set(e.path, e.text)
     return { value: undefined }
   })
@@ -456,6 +459,27 @@ describe('a run, local CI', () => {
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     expect((await cmd($, 'start')).text).toContain('merges into master')
     expect(w.files.get('/repo/.claude/goal-loop.base')).toBe('origin/master\n')
+  })
+
+  test('a tick that fails every time is told to the person once, with its error, and again only after it recovered', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    await w.clock.advance(30_000)
+    log(w, [
+      { event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ])
+    w.files.set('/repo/.claude/goals.md', QUEUE.replace('- [ ] add', '- [x] add'))
+    // Landing milestone 1 is fine; granting the next start cannot write the gate.
+    w.unwritable.add(GATE)
+    for (let i = 0; i < 10; i++) await w.clock.advance(30_000)
+    const told = w.notifies.filter(n => n.includes('tick fails'))
+    expect(told).toHaveLength(1)
+    expect(told[0]).toContain('EACCES')
+    expect((await cmd($, 'status')).text).toContain('stalled: every tick fails')
+    w.unwritable.delete(GATE)
+    await w.clock.advance(30_000)
+    expect((await cmd($, 'status')).text).not.toContain('every tick fails')
   })
 
   test('the gate stays shut while the loop is still building a milestone', async ($, on) => {
