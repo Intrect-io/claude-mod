@@ -142,7 +142,11 @@ export function diagnose(r: AutoRecord, f: StallFacts): string | undefined {
     const reply = (r.kickReply ?? 'no reply').replace(/\s+/g, ' ').slice(0, 200)
     return `a granted start is not taken: /goal-mode loop on ran ${r.kicks}× (last ${r.kickedAt !== undefined ? ago(f.now, r.kickedAt) : 'at an unknown time'}) and answered: ${reply}`
   }
-  if (r.phase === 'run' && f.idleMs !== undefined && f.idleMs >= IDLE_NUDGE_MS && !isWaiting(r)) {
+  const stuck = r.phase === 'run' ? ciStuck(r, f.now) : undefined
+  if (stuck !== undefined) {
+    return `PR #${stuck.pr ?? '?'} has waited ${stuck.minutes} min for CI to finish or GitHub to decide it can merge (a queued check with no runner?); gh pr checks ${stuck.pr ?? ''} shows which`
+  }
+  if (r.phase === 'run' && f.idleMs !== undefined && f.idleMs >= IDLE_NUDGE_MS && !isWaiting(r, f.now)) {
     return `idle ${Math.round(f.idleMs / 60_000)} min: nothing was started, shipped or merged`
   }
 
@@ -173,12 +177,24 @@ export function progressSig(r: Pick<AutoRecord, 'started' | 'finished' | 'merges
   return [r.started, r.finished, r.merges, r.held, ...r.ships.map(s => `${s.headRef}:${s.state}:${s.pr ?? ''}`)].join('|')
 }
 
+// A PR waits this long for its CI to finish (or for GitHub to decide whether it
+// can be merged) before the wait itself counts as a stall: a check queued for
+// a self-hosted runner that is offline stays pending for good.
+export const CI_STUCK_MS = 90 * 60_000
+
+// The in-flight PR waiting past CI_STUCK_MS, with how long, else undefined.
+export function ciStuck(r: Pick<AutoRecord, 'ships'>, now: number): { pr?: number; minutes: number } | undefined {
+  const item = inFlight(r.ships)
+  if (item?.state !== 'ci' || item.note !== undefined || now - item.since < CI_STUCK_MS) return undefined
+  return { pr: item.pr, minutes: Math.round((now - item.since) / 60_000) }
+}
+
 // Waiting on something that has its own clock is not idle: the loop building a
-// goal, or a PR's CI pending with nothing wrong.
-export function isWaiting(r: Pick<AutoRecord, 'started' | 'finished' | 'ships'>): boolean {
+// goal, or a PR's CI pending with nothing wrong, for up to CI_STUCK_MS.
+export function isWaiting(r: Pick<AutoRecord, 'started' | 'finished' | 'ships'>, now: number): boolean {
   if (r.started > r.finished) return true
   const item = inFlight(r.ships)
-  return item?.state === 'ci' && item.note === undefined
+  return item?.state === 'ci' && item.note === undefined && ciStuck(r, now) === undefined
 }
 
 // The number of the nudge due now (1..MAX_IDLE_NUDGES), or undefined.

@@ -938,6 +938,26 @@ describe('an idle run', () => {
     expect(nudges(w).some(n => n.includes('nudge 1/3') && n !== nudges(w)[0])).toBe(true)
   })
 
+  test('a CI that stays pending (no runner takes it) or a mergeability GitHub never decides is waiting only 90 min, then nudged', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    w.checks = '[{"bucket":"pending"}]'
+    await planned($, w)
+    log(w, [
+      { event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ])
+    for (let i = 0; i < 6; i++) await w.clock.advance(15 * MIN)
+    expect(nudges(w)).toHaveLength(0)
+    for (let i = 0; i < 4; i++) await w.clock.advance(5 * MIN)
+    const n = nudges(w)
+    expect(n).toHaveLength(1)
+    expect(n[0]).toContain('PR #7')
+    expect(n[0]).toContain('min for CI')
+    expect(n[0]).not.toContain('Asking the loop to start again')
+    expect((await cmd($, 'status')).text).toContain('stalled: PR #7 has waited')
+  })
+
   test('a shipping error that does not clear is nudged with its note, and the loop is not asked', async ($, on) => {
     const w = world(on)
     w.github = true

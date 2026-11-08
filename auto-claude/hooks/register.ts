@@ -736,7 +736,7 @@ async function idleCheck($: EngineInterface, r: AutoRecord): Promise<AutoRecord>
   if (!r.on || r.phase !== 'run') return r
   const now = await $.clock.now()
   const sig = progressSig(r)
-  if (sig !== r.sig || r.movedAt === undefined || isWaiting(r)) return { ...r, sig, movedAt: now, idleNudges: 0, idleNudgedAt: undefined }
+  if (sig !== r.sig || r.movedAt === undefined || isWaiting(r, now)) return { ...r, sig, movedAt: now, idleNudges: 0, idleNudgedAt: undefined }
   const n = idleDue(r, now)
   if (n === undefined) return r
   const why = diagnose(r, await stallFacts($, r)) ?? `idle ${Math.round((now - r.movedAt) / 60_000)} min`
