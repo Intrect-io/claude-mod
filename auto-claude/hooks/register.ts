@@ -166,7 +166,7 @@ async function release($: EngineInterface, r: AutoRecord, pollMs: number): Promi
   // goal-mode logs a start before it spends the credit: the gate is read
   // first and the log after, so a spent gate is never mistaken for an idle loop.
   const credit = gateCredit(await readText($, f.gate)) ?? 0
-  if (readLog((await readText($, f.log)) ?? '', r.logOffset).entries.some(e => e.event === 'start')) return r
+  if (readLog((await readText($, f.log)) ?? '', r.logOffset, r.logLast).entries.some(e => e.event === 'start')) return r
   if (credit <= 0) {
     await $.fs.write(f.gate, '1\n')
     const next: AutoRecord = { ...r, want: 'on' }
@@ -479,8 +479,8 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
     }
 
     // What the loop did since the last look.
-    const { entries, offset } = readLog((await readText($, FILES(r.root).log)) ?? '', r.logOffset)
-    r = { ...r, logOffset: offset }
+    const { entries, offset, last } = readLog((await readText($, FILES(r.root).log)) ?? '', r.logOffset, r.logLast)
+    r = { ...r, logOffset: offset, logLast: last }
     for (const e of entries) {
       if (e.event === 'start' && e.branch !== undefined) {
         r = { ...r, started: r.started + 1, worktrees: { ...r.worktrees, [e.branch]: e.worktree ?? '' }, kicks: 0, kickTold: false, kickReply: undefined, ...(r.kickTold === true ? { note: undefined } : {}) }
@@ -658,6 +658,7 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string): P
   if (deploy !== undefined && 'error' in deploy) return `Not started: ${deploy.error}.`
 
   const f = FILES(root)
+  const logLines = ((await readText($, f.log)) ?? '').split('\n').filter(l => l.trim() !== '')
   await run($, ['mkdir', '-p', `${root}/.git/info`], root, 15_000)
   await ensureLines($, f.exclude, EXCLUDES, '# auto-claude')
   const stop = await clearStop($, root)
@@ -676,7 +677,8 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string): P
     remote,
     defaultBranch,
     ciMode: mode,
-    logOffset: ((await readText($, f.log)) ?? '').split('\n').filter(l => l.trim() !== '').length,
+    logOffset: logLines.length,
+    logLast: logLines.at(-1),
     started: 0,
     finished: 0,
     credit: true,

@@ -59,8 +59,21 @@ describe('ship', () => {
   test('log tail reads from the offset and survives a trimmed log', () => {
     const log = '{"event":"start","branch":"goal/01-a"}\n{"event":"met","goal":"a","branch":"goal/01-a"}\nnot json\n'
     expect(readLog(log, 0).entries.map(e => e.event)).toEqual(['start', 'met'])
-    expect(readLog(log, 2)).toEqual({ entries: [], offset: 3 })
+    expect(readLog(log, 2)).toEqual({ entries: [], offset: 3, last: 'not json' })
     expect(readLog(log, 99).entries).toHaveLength(2)
+  })
+
+  test('the log is followed by its last line read, so a trimmed log neither stalls nor replays', () => {
+    const line = (i: number) => JSON.stringify({ ts: `t${i}`, event: 'start', branch: `b${i}` })
+    const text = (from: number, to: number) => `${Array.from({ length: to - from }, (_, k) => line(from + k)).join('\n')}\n`
+    const first = readLog(text(0, 5), 0)
+    expect(first.last).toBe(line(4))
+    // Trimmed to the same length: only the two new lines.
+    expect(readLog(text(2, 7), first.offset, first.last).entries.map(e => e.branch)).toEqual(['b5', 'b6'])
+    // Cleared by hand and refilled: nothing read before is read again.
+    expect(readLog(text(0, 5), 5, line(4)).entries).toEqual([])
+    // Trimmed past the last line read: the whole window is new.
+    expect(readLog(text(10, 13), 5, line(4)).entries).toHaveLength(3)
   })
 
   test('checks, mergeability and PR numbers', () => {
@@ -211,10 +224,12 @@ function world(on: On, store: Record<string, unknown> = {}) {
 
 const cmd = ($: Engine, args: string) => $.command.run({ command: 'auto-claude', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
 // goal-mode's side: each start is logged, then spends one of the gate's credit.
-const log = (w: ReturnType<typeof world>, lines: Array<{ event: string } & Record<string, unknown>>) => {
+// cap: keep only the last `cap` lines after each append, as goal-mode does (LOOP_LOG_MAX_LINES).
+const log = (w: ReturnType<typeof world>, lines: Array<{ event: string } & Record<string, unknown>>, cap?: number) => {
   for (const line of lines) {
     const prev = w.files.get('/repo/.claude/goal-loop.log') ?? ''
-    w.files.set('/repo/.claude/goal-loop.log', `${prev}${JSON.stringify(line)}\n`)
+    const all = `${prev}${JSON.stringify(line)}\n`.split('\n').filter(l => l !== '')
+    w.files.set('/repo/.claude/goal-loop.log', `${(cap === undefined ? all : all.slice(-cap)).join('\n')}\n`)
     if (line.event !== 'start') continue
     const credit = Number.parseInt(w.files.get('/repo/.claude/goal-loop.gate') ?? '', 10)
     if (Number.isFinite(credit)) w.files.set('/repo/.claude/goal-loop.gate', `${Math.max(credit - 1, 0)}\n`)
@@ -403,6 +418,31 @@ describe('a run, local CI', () => {
     expect(w.files.get('/repo/.claude/auto-plan.md')).toContain('## Result')
     expect(w.notifies.at(-1)).toContain('finished: the final check passed after 1 round(s). 2 merged, 0 held')
     expect((await cmd($, 'status')).text).toContain('auto-claude off · phase done')
+  })
+
+  test('a loop log at goal-mode\'s 2000-line cap still yields every new event (the line count no longer grows)', async ($, on) => {
+    const w = world(on)
+    const CAP = 2000
+    w.files.set('/repo/.claude/goal-loop.log', `${Array.from({ length: CAP }, (_, i) => JSON.stringify({ ts: `t${i}`, event: 'denied' })).join('\n')}\n`)
+    await planned($, w)
+    await w.clock.advance(30_000)
+    log(w, [
+      { ts: 'a1', event: 'start', goal: 'add() returns a+b', worktree: '/repo/worktrees/goal-01-add', branch: 'goal/01-add' },
+      { ts: 'a2', event: 'met', goal: 'add() returns a+b', branch: 'goal/01-add' },
+    ], CAP)
+    w.files.set('/repo/.claude/goals.md', QUEUE.replace('- [ ] add', '- [x] add'))
+    await w.clock.advance(30_000)
+    expect(w.pushes.some(p => p.includes('HEAD:main') && p.includes('goal-01-add'))).toBe(true)
+    // The next milestone is read too, after more trimming.
+    log(w, [
+      { ts: 'b1', event: 'start', goal: 'sub() returns a-b', worktree: '/repo/worktrees/goal-02-sub', branch: 'goal/02-sub' },
+      { ts: 'b2', event: 'met', goal: 'sub() returns a-b', branch: 'goal/02-sub' },
+    ], CAP)
+    await w.clock.advance(30_000)
+    expect(w.pushes.some(p => p.includes('HEAD:main') && p.includes('goal-02-sub'))).toBe(true)
+    // Each milestone landed once: no event was read twice.
+    expect(w.pushes.filter(p => p.includes('HEAD:main')).length).toBe(2)
+    expect((await cmd($, 'status')).text).toContain('2 merged, 0 held')
   })
 
   test('the gate stays shut while the loop is still building a milestone', async ($, on) => {

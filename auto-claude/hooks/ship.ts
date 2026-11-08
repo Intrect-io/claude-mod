@@ -1,12 +1,25 @@
 import type { AutoRecord, ShipItem } from '../types'
 
-// The loop's JSONL log as events, from the line after `offset` on.
+// The loop's JSONL log as events, from after the last line already read.
+// goal-mode keeps only its last 2000 lines (LOOP_LOG_MAX_LINES), so once the
+// log is full its line count stops growing: a line offset alone then reads
+// nothing new, ever. The cursor is the last line read (each carries a ts),
+// looked for backwards from where it was; `offset` alone is the fallback for
+// a record from before `last`.
 export type LogEntry = { event: string; goal?: string; branch?: string; worktree?: string; reason?: string }
 
-export function readLog(text: string, offset: number): { entries: LogEntry[]; offset: number } {
+export function readLog(text: string, offset: number, last?: string): { entries: LogEntry[]; offset: number; last?: string } {
   const lines = text.split('\n').filter(line => line.trim() !== '')
-  // The loop caps its log; a shorter file than we read means it was trimmed.
-  const from = offset > lines.length ? Math.max(lines.length - 50, 0) : offset
+  let from: number
+  if (last !== undefined) {
+    // The line moves only towards the start when the log is trimmed. Not
+    // found: trimmed past it, so every line in the window is new.
+    const at = lines.lastIndexOf(last, Math.min(offset, lines.length) - 1)
+    from = at >= 0 ? at + 1 : 0
+  } else {
+    // A shorter file than we read means it was trimmed.
+    from = offset > lines.length ? Math.max(lines.length - 50, 0) : offset
+  }
   const entries: LogEntry[] = []
   for (const line of lines.slice(from)) {
     try {
@@ -17,7 +30,7 @@ export function readLog(text: string, offset: number): { entries: LogEntry[]; of
     }
   }
 
-  return { entries, offset: lines.length }
+  return { entries, offset: lines.length, last: lines.at(-1) ?? last }
 }
 
 // goal-loop.gate as goal-mode reads it: starts still allowed, undefined for none.

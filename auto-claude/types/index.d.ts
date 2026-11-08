@@ -34,6 +34,8 @@ export type AutoRecord = {
   ciMode: 'github' | 'local'
   // Lines of .claude/goal-loop.log already read.
   logOffset: number
+  // The last line of it read: the cursor once goal-mode's 2000-line cap stops the count growing.
+  logLast?: string
   // Goals the loop has started (its `start` events).
   started: number
   // Goals the loop has finished (met, blocked or deferred): equal to started when it is idle.
