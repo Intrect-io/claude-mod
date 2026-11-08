@@ -18,6 +18,8 @@ import type { Caps } from './ship'
 // $.process.run, never as a model turn, and the model is denied merging.
 
 const COMMAND = 'auto-claude'
+// The ready tool's full name, as the tool.call matcher sees it.
+const READY_TOOL_ID = 'mcp__auto-claude__auto_plan_ready'
 const STORE = (root: string) => `auto:${root}`
 const FILES = (root: string) => ({
   plan: `${root}/.claude/auto-plan.md`,
@@ -829,7 +831,11 @@ export const register: Register = (on, options) => {
     return { ...composed, sections: [...composed.sections, { id: 'auto-claude:policy', text: POLICY, scope: 'session' as const }] }
   })
 
-  on('tool.call', { tool: `mcp__auto-claude__${READY_TOOL}` }, async $ => {
+  // The SDK's Matcher over tool.call's input union is too deep for tsc (TS2589);
+  // a stub handler `async () => ({ result: 'x' })` reproduces it, so it is the
+  // matcher's type, not this hook. Only this line is exempt.
+  // @ts-expect-error TS2589 in claude-code's Matcher<Args<'tool.call'>>
+  on('tool.call', { tool: READY_TOOL_ID }, async ($): Promise<{ result: string }> => {
     const root = activeRoot
     const r = root === undefined ? undefined : await readRecord($, root)
     if (r === undefined || !r.on) return { result: `No auto-claude run is on; /${COMMAND} start first.` }

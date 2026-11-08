@@ -724,7 +724,7 @@ describe('a run, local CI', () => {
     expect(w.files.get(PIECE)).toBe('')
     await cmd($, 'start')
     expect(w.files.get(PIECE)).toContain('auto·R1·plan')
-    await $.session.end({ reason: 'clear', sessionId: 'me' })
+    await $.session.end({ reason: 'clear', sessionId: 'me', resume: { id: 'me' } })
     expect(w.files.get(PIECE)).toBe('')
   })
 
