@@ -132,6 +132,9 @@ function world(on: On, store: Record<string, unknown> = {}) {
     // Whether the directory is a git repository (git init makes it one), and whether it has an origin.
     repo: true,
     origin: true,
+    // origin/HEAD as `git symbolic-ref` sees it ('' when it was never set), and the remote's own HEAD branch.
+    originHead: 'origin/main',
+    remoteHead: 'main',
     // What goal-mode answers to `loop on`.
     loopReply: 'Loop on: started',
     // The deploy command's exit, run in the driver's fresh checkout.
@@ -194,7 +197,8 @@ function world(on: On, store: Record<string, unknown> = {}) {
     }
     if (a.endsWith(' remote')) return ok(w.origin ? 'origin\n' : '')
     if (a.includes(' remote get-url ')) return ok('git@github.com:o/r.git\n')
-    if (a.includes('symbolic-ref')) return ok('origin/main\n')
+    if (a.includes('symbolic-ref')) return w.originHead === '' ? ok('', 128) : ok(`${w.originHead}\n`)
+    if (a.includes('ls-remote --symref')) return ok(`ref: refs/heads/${w.remoteHead}\tHEAD\nabc123\tHEAD\n`)
     if (a.startsWith('gh repo view')) return ok('', w.github ? 0 : 1)
     if (a.startsWith('gh pr create')) return ok('https://github.com/o/r/pull/7\n')
     if (a.startsWith('gh pr checks')) {
@@ -443,6 +447,15 @@ describe('a run, local CI', () => {
     // Each milestone landed once: no event was read twice.
     expect(w.pushes.filter(p => p.includes('HEAD:main')).length).toBe(2)
     expect((await cmd($, 'status')).text).toContain('2 merged, 0 held')
+  })
+
+  test('an origin with no origin/HEAD (a clone made by remote add + fetch) takes the remote\'s own default branch, not main', async ($, on) => {
+    const w = world(on)
+    w.originHead = ''
+    w.remoteHead = 'master'
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect((await cmd($, 'start')).text).toContain('merges into master')
+    expect(w.files.get('/repo/.claude/goal-loop.base')).toBe('origin/master\n')
   })
 
   test('the gate stays shut while the loop is still building a milestone', async ($, on) => {

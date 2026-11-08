@@ -635,7 +635,10 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string): P
   if (hasOrigin) {
     await run($, ['git', '-C', root, 'fetch', '-q', remote], root)
     const head = (await run($, ['git', '-C', root, 'symbolic-ref', '--short', `refs/remotes/${remote}/HEAD`], root)).stdout.trim()
-    defaultBranch = head.startsWith(`${remote}/`) ? head.slice(remote.length + 1) : 'main'
+    // origin/HEAD is set only by clone: a repository whose origin was added by
+    // hand has none, and its default may well be master. The remote says.
+    const asked = head.startsWith(`${remote}/`) ? undefined : (await run($, ['git', '-C', root, 'ls-remote', '--symref', remote, 'HEAD'], root, 30_000)).stdout.match(/^ref: refs\/heads\/(\S+)\s+HEAD/m)?.[1]
+    defaultBranch = head.startsWith(`${remote}/`) ? head.slice(remote.length + 1) : (asked ?? 'main')
     mode = ciMode === 'github' || ciMode === 'local' ? ciMode : (await run($, ['gh', 'repo', 'view', '--json', 'name'], root, 30_000)).exitCode === 0 ? 'github' : 'local'
   } else {
     // No origin: milestones land in this repository's own branch, checked by
