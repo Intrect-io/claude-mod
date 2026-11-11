@@ -1,5 +1,5 @@
 // The loop's work queue: a Markdown checklist a person writes, one goal per
-// line. goal-mode's loop reads and marks it; auto-claude writes it and reads
+// line. auto-claude's loop reads and marks it; its driver writes it and reads
 // it, so both must parse it the same way. `[ ]` pending, `[x]` done, `[!]` blocked; the loop appends its note as
 // a trailing HTML comment so the line stays readable.
 //

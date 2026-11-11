@@ -7,15 +7,6 @@
   },
   "plugins": [
     {
-      "name": "goal-mode",
-      "description": "Claude가 스스로 세션 goal을 걸어 Claude Code의 /goal에 넘기고, 큐에 쌓인 goal을 무인 loop로 돌리며 자체 evaluator가 그 goal만 판정한다.",
-      "author": {
-        "name": "unohee"
-      },
-      "source": "./goal-mode",
-      "category": "development"
-    },
-    {
       "name": "harness",
       "description": "Integrated harness: enforces the user's Claude rules at the tool call (git/worktree/delete/venv/port/Linear/memory guards, merge-and-release gate, report lint), plus session tooling and workflow automation.",
       "author": {
@@ -35,7 +26,7 @@
     },
     {
       "name": "auto-claude",
-      "description": "Unattended run of a repository: Claude plans the long-term end state and milestones, goal-mode's loop builds each, auto-claude pushes, opens PRs and merges when CI is green, then replans until the final check passes.",
+      "description": "Unattended run of a repository, to the end state live: Claude plans the long-term goal, milestones and deploy; the built-in loop builds each in a worktree and judges it; auto-claude pushes, opens PRs, merges when CI is green, deploys and smoke-checks, and a watchdog repairs or routes around stalls until the final check passes.",
       "author": {
         "name": "unohee"
       },

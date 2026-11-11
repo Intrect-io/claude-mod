@@ -4,9 +4,8 @@ Claude Code mods (plugins with a hooks module), served as a local folder marketp
 
 | mod | version | what it does |
 | --- | --- | --- |
-| [goal-mode](goal-mode/) | 0.7.0 | Session goals, handed to Claude Code's own `/goal`: set by you (`/goal-mode set <condition> [--check <cmd>]`) or by Claude itself (nudged on outcome requests and approved plans); its own evaluator judges only the loop's queued goals |
-| [harness](harness/) | 0.3.2 | The integrated harness: the user's Claude rules enforced at the tool call, session tooling and workflow automation (formerly house-rules) |
-| [auto-claude](auto-claude/) | 0.4.1 | Unattended run of a repository on top of goal-mode's loop: plans the long-term goal and milestones, ships each (push, PR, CI, merge when green, then deploy where `.claude/auto-deploy.json` opts in), replans until the final check passes |
+| [harness](harness/) | 0.3.4 | The integrated harness: the user's Claude rules enforced at the tool call, session tooling and workflow automation (formerly house-rules) |
+| [auto-claude](auto-claude/) | 1.0.0 | Unattended run of a repository through to live: plans the long-term goal, milestones and deploy; its own loop builds and judges each milestone in a worktree; ships each (push, PR, required CI, merge), deploys and smoke-checks it; a watchdog repairs or routes around stalls; replans until the final check passes. Absorbed goal-mode in 1.0.0 |
 | [model-tier](model-tier/) | 0.11.0 | Routes each main-loop turn to fable, opus, sonnet or haiku and a reasoning effort by task complexity, with a `set_tier` tool the model calls to correct either |
 | [refactor](refactor/) | 0.1.3 | Enforces the architecture a repo declares in `.claude/architecture.json` at Edit/Write (layer direction, forbidden imports), notes code smells with the refactoring.guru technique to apply, `/arch audit` for violations and import cycles |
 
@@ -14,10 +13,9 @@ Claude Code mods (plugins with a hooks module), served as a local folder marketp
 
 ```sh
 claude plugin marketplace add Intrect-io/claude-mod
-claude plugin install goal-mode@claude-mod
 claude plugin install harness@claude-mod
 claude plugin install model-tier@claude-mod
-claude plugin install auto-claude@claude-mod   # needs goal-mode
+claude plugin install auto-claude@claude-mod
 claude plugin install refactor@claude-mod
 ```
 
@@ -30,7 +28,7 @@ claude plugin validate <mod>
 claude plugin test <mod>
 ```
 
-Files that several mods share live in `shared/`. A mod imports nothing outside its folder, so `bun scripts/sync-shared.ts` writes each mod's copy, and CI fails when a copy differs from `shared/`. Edit the file in `shared/`, never a copy. `shared/loop-protocol.jsonl` records the protocol between goal-mode's loop and auto-claude, gate values and log lines included. goal-mode's tests check that the loop writes it, and auto-claude's tests replay it, so a change on either side fails a test on the other.
+Files that several mods share live in `shared/`. A mod imports nothing outside its folder, so `bun scripts/sync-shared.ts` writes each mod's copy, and CI fails when a copy differs from `shared/`. Edit the file in `shared/`, never a copy. (goal-mode, whose loop auto-claude drove through a file protocol kept in `shared/loop-protocol.jsonl`, merged into auto-claude in 1.0.0; the loop and its driver now call each other directly.)
 
 `scripts/ci.sh` runs the whole gate that `.github/workflows/ci.yml` runs on every pull request and on main. It validates the marketplace and every mod, runs every mod's tests, and typechecks and tests fleet-hub. `claude plugin test` exits 0 even when a test fails, so the script reads the pass and fail counts instead.
 
