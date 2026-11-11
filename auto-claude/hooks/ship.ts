@@ -1,4 +1,4 @@
-import type { AutoRecord, ShipItem } from '../types'
+import type { AutoRecord, ShipItem, ShipState } from '../types'
 
 // The loop's JSONL log as events, from after the last line already read.
 // The loop keeps only its last 2000 lines (loop.ts LOG_MAX_LINES), so once the
@@ -280,12 +280,37 @@ export function httpsOf(slug: string): string {
 // A session with a milestone open and no turn for this long is not building it
 // (a dropped prompt, an interrupt, a turn that ended to "wait"): the watchdog
 // prompts it again, backing off, LOOP_WAKES times, then blocks the milestone.
-export const LOOP_QUIET_MS = 3 * 60_000
+// The first wake comes soon: a run never leaves the session resting.
+export const LOOP_QUIET_MS = 60_000
 export const LOOP_WAKES = 3
+const WAKE_AT_MS = [1, 3, 6, 12].map(min => min * 60_000)
 
-// The wait before wake number `wakes + 1`: 3, 6, then 12 min of quiet.
+// The wait before wake number `wakes + 1`: 1, 3, then 6 min of quiet; the
+// milestone is blocked after 12.
 export function wakeDue(quietMs: number, wakes: number): boolean {
-  return quietMs >= LOOP_QUIET_MS * 2 ** Math.min(wakes, 4)
+  return quietMs >= WAKE_AT_MS[Math.min(wakes, WAKE_AT_MS.length - 1)]!
+}
+
+// Milestones built ahead of the PR that is shipping: while its CI runs, the
+// session builds the next ones on its branch instead of sitting idle.
+export const MAX_AHEAD = 2
+const UNFINISHED: ReadonlySet<ShipState> = new Set<ShipState>(['stacked', 'push', 'ci', 'fixing'])
+
+// Ship items not merged or held yet, in the order they ship.
+export function unfinished(ships: readonly ShipItem[]): ShipItem[] {
+  return ships.filter(s => UNFINISHED.has(s.state))
+}
+
+// Where the next milestone starts. Nothing shipping, or a line with its own
+// base (a fix goal): there. Else it is stacked on the branch of the last
+// milestone still shipping, at most MAX_AHEAD deep, and never while the live
+// deploy is broken (its repair goes first). undefined: not yet.
+export function startBase(r: Pick<AutoRecord, 'ships' | 'deployFails'>, next: { base?: string }, defaultRef: string): { base: string; stacked: boolean } | undefined {
+  const open = unfinished(r.ships)
+  if (next.base !== undefined) return { base: next.base, stacked: false }
+  if (open.length === 0) return { base: defaultRef, stacked: false }
+  if ((r.deployFails ?? 0) > 0 || open.length > MAX_AHEAD) return undefined
+  return { base: open[open.length - 1]!.branch, stacked: true }
 }
 
 // Waiting on something that has its own clock is not idle: the loop building a

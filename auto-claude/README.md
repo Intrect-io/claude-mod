@@ -44,6 +44,7 @@ goal-mode merged into auto-claude in 1.0.0 (see "From goal-mode" below). Its loo
    - Right before landing, the milestone's check runs once more in a **fresh checkout**: a detached worktree at `worktrees/auto-verify`, made from the branch head fetched from origin (github) or from the rebased commit (local). A check that passes only in the builder's worktree becomes a fix goal, like a red CI.
    - When CI fails or the PR conflicts, auto-claude appends a fix goal built on the milestone's branch (`:: base: goal/NN-…`), and the loop builds that next. After 3 failures the milestone is held.
    - **Deploy.** After each merge, as the plan says (see "Deploying").
+   - **The session never rests through CI.** While a PR waits on CI, the next milestone starts at once, **stacked** on that PR's branch: the commit it starts from is recorded. Up to 2 milestones are built ahead this way. They ship in order. When the one before lands (squashed) or is held, the stacked branch runs `git rebase --onto origin/<default> <recorded commit>`, which drops its parent's commits, and is then pushed like any other. A stacked branch that does not rebase cleanly gets a fix goal that does the rebase by hand. Nothing is stacked while the live deploy is broken: its repair goes first. A fix goal (`:: base:`) always starts on its own base.
 4. **Finish or replan.** When the queue is done, auto-claude runs the final check on a fresh checkout of the merged default branch.
    - If it passes, auto-claude deploys once more if a deploy is still due. Then it writes a `## Result` section and stops.
    - If it fails, Claude appends new milestones from the check's output (round 2, and so on, up to `maxRounds`).
@@ -103,8 +104,10 @@ A run never asks the person to look at `status` or to run a command. When someth
 
 | what stops | what happens |
 | --- | --- |
-| A milestone is open, but the session has had no turn for 3 min: the model ended its turn to "wait", a prompt was dropped, an interrupt, or a stop the judge could not read | The milestone's prompt is sent again, after 3, 6 and 12 min of quiet. After the third, the milestone is blocked and the next one starts. A stop being judged, or a retry pause, is not quiet. Turns are tracked with `turn.start` / `turn.complete`. |
-| Planning ends without `auto_plan_ready` | A reminder 2 min after that turn ended, listing what the plan files lack (15 min at most otherwise). After 3, the run stops. |
+| A milestone is open, but the session has had no turn for 1 min: the model ended its turn to "wait", a prompt was dropped, an interrupt, or a stop the judge could not read | The milestone's prompt is sent again, after 1, 3 and 6 min of quiet. At 12 min, the milestone is blocked and the next one starts. A stop being judged, or a retry pause, is not quiet. Turns are tracked with `turn.start` / `turn.complete`. |
+| The model waits inside a turn | Refused while a run is on: `sleep` of 60 s or more (or a computed duration), `gh run watch`, `gh pr checks --watch`, `Monitor`, `CronCreate` and `ScheduleWakeup`. auto-claude watches CI, merges and deploys itself, and prompts the session when there is work. Shorter sleeps (a check waiting for a server) pass. |
+| A shipping error to diagnose while the session builds another milestone | The diagnosis prompt waits until that milestone is done, so the stop judge never judges the wrong work. |
+| Planning ends without `auto_plan_ready` | A reminder 1 min after that turn ended, listing what the plan files lack (15 min at most otherwise). After 3, the run stops. |
 | An SSH remote refuses the push (`Permission denied (publickey)`) | The push goes to the https URL of the same repository. |
 | The same shipping error, check after check | At 5 checks, the session model gets the error and what was tried, and fixes what it can (gh auth, remotes, `gh repo set-default`). At 10, the milestone is held and the run goes on. |
 | A PR closed under the run | It is opened again once, then held. |

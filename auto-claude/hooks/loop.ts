@@ -13,7 +13,7 @@ import type { EngineInterface } from 'claude-code'
 import type { Goal, LoopCurrent, LoopRecord, LoopView } from '../types'
 import { clip, evaluate } from './evaluator'
 import type { StopFields } from './evaluator'
-import { checkBash, checkPath, uncommitted } from './guard'
+import { checkBash, checkPath, uncommitted, WAIT_MAX_S, waitsLong } from './guard'
 import { markItem, nextPending, parseQueue, slugify } from './queue'
 
 export const DEFER_TOOL = 'defer_goal'
@@ -314,12 +314,18 @@ export async function deferCall($: EngineInterface, reasonRaw: unknown): Promise
 // in it (`view`). The person cannot answer, a plan-mode turn would hold the
 // run, and a session goal of Claude Code's own (/goal) would block the loop's
 // stops (measured in de-artifact: the run idled to its 24 h cap).
+// A run never rests inside a turn either: auto-claude watches CI, merges and
+// deploys itself, and wakes the session when it has work for it.
+const WAIT_TOOLS: ReadonlySet<string> = new Set(['CronCreate', 'ScheduleWakeup', 'Monitor'])
+const WAIT_REFUSAL = `auto-claude run: do not wait or schedule a wake-up. auto-claude watches CI, merges and deploys by itself and prompts this session when there is work; keep working on the milestone, or end the turn if it is done (sleeps under ${WAIT_MAX_S} s are fine).`
+
 export function guardRefusal(e: Record<string, unknown>, view: LoopView | null, runOn: boolean): string | undefined {
   const tool = String(e.tool)
   if (runOn || view !== null) {
     if (tool === 'AskUserQuestion') return `auto-claude run: nobody can answer. Decide with a stated assumption (the recommended or safest option), or call ${DEFER_TOOL_ID} for an external blocker.`
     if (tool === 'EnterPlanMode') return 'auto-claude run: plan mode would hold the run; plan inline and keep working.'
     if (tool === 'ProposeGoal' || tool === 'mcp__goal-mode__set_goal') return 'auto-claude run: the loop sets each milestone as the goal itself; a session goal would block it.'
+    if (WAIT_TOOLS.has(tool) || (tool === 'Bash' && typeof e.command === 'string' && waitsLong(e.command))) return WAIT_REFUSAL
   }
   if (view === null) return undefined
   if (tool === 'Bash' && typeof e.command === 'string') return checkBash(e.command, view)
@@ -332,7 +338,8 @@ export const LOOP_POLICY = `# auto-claude milestone — ACTIVE
 You are building one milestone of an unattended auto-claude run. Nobody is watching this session.
 - Do not ask questions (AskUserQuestion is refused) and do not enter plan mode. Decide with a stated assumption and record it in the commit message.
 - A "CONFIDENCE HALT" becomes a call to ${DEFER_TOOL_ID} with the reason, and only for external blockers (credentials, a human decision, missing access) after at least ${MIN_CHECKS_TO_DEFER} failed checks. Otherwise keep working.
-- Work only inside the milestone's worktree; commit after each meaningful step. Push only your goal/* branch, never main or with force. auto-claude pushes, merges and deploys for you.`
+- Work only inside the milestone's worktree; commit after each meaningful step. Push only your goal/* branch, never main or with force. auto-claude pushes, merges and deploys for you.
+- Never wait inside a turn (no long sleep, CI watch, Monitor, cron or scheduled wake-up). While an earlier milestone's CI runs you are already building the next one; when this one is done, end the turn and the next prompt comes by itself.`
 
 export function kickoffText(current: LoopCurrent, seq: number): string {
   return [

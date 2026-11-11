@@ -2,11 +2,12 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { countSarif, parseDeploy, scriptsOf, specOfPlan } from './deploy'
 import { parseVerdict, transcriptTail } from './evaluator'
-import { checkBash, checkPath, deploysSomething, uncommitted } from './guard'
-import { maxBranchSeq } from './loop'
+import { checkBash, checkPath, deploysSomething, uncommitted, waitsLong } from './guard'
+import { guardRefusal, maxBranchSeq } from './loop'
+import type { ShipState } from '../types'
 import { deployFixLine, deployOf, finalCheckOf, fixLine, kickoffText, POLICY, validatePlan } from './plan'
 import { markItem, nextPending, parseQueue, slugify, summarize } from './queue'
-import { capReached, causeOf, ciAction, httpsOf, idleDue, inFlight, isWaiting, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, wakeDue } from './ship'
+import { capReached, causeOf, ciAction, httpsOf, idleDue, inFlight, isWaiting, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, unfinished, MAX_AHEAD, wakeDue } from './ship'
 
 const PLAN = '## Goal\nadd and sub work\n\nFinal check: `python3 -m unittest -q`\nDeploy: `bash scripts/deploy.sh`\nSmoke check: `curl -fsS http://localhost:8080/health`\nCodeQL: python\n\n## Milestones\n1. add\n2. sub\n\n## Decisions\n'
 const QUEUE = '- [ ] add() returns a+b :: check: python3 -m unittest -q test_add\n- [ ] sub() returns a-b :: check: python3 -m unittest -q test_sub\n'
@@ -198,16 +199,33 @@ describe('ship', () => {
     expect(causeOf('its worktree /x and branch goal/01 are gone')).toBe('worktree')
   })
 
-  test('a milestone open in a quiet session is woken at 3, 6 and 12 min of quiet; quiet is not waiting (P4, P5)', () => {
-    expect(wakeDue(2 * MIN, 0)).toBe(false)
-    expect(wakeDue(3 * MIN, 0)).toBe(true)
-    expect(wakeDue(5 * MIN, 1)).toBe(false)
-    expect(wakeDue(6 * MIN, 1)).toBe(true)
-    expect(wakeDue(12 * MIN, 2)).toBe(true)
+  test('a milestone open in a quiet session is woken at 1, 3 and 6 min of quiet, blocked at 12; quiet is not waiting (P4, P5)', () => {
+    expect(wakeDue(MIN - 1, 0)).toBe(false)
+    expect(wakeDue(MIN, 0)).toBe(true)
+    expect(wakeDue(2 * MIN, 1)).toBe(false)
+    expect(wakeDue(3 * MIN, 1)).toBe(true)
+    expect(wakeDue(6 * MIN, 2)).toBe(true)
+    expect(wakeDue(11 * MIN, 3)).toBe(false)
+    expect(wakeDue(12 * MIN, 3)).toBe(true)
     const building = { started: 1, finished: 0, ships: [] }
     expect(isWaiting(building, 0)).toBe(true)
-    expect(isWaiting(building, 0, 2 * MIN)).toBe(true)
-    expect(isWaiting(building, 0, 3 * MIN)).toBe(false)
+    expect(isWaiting(building, 0, 30_000)).toBe(true)
+    expect(isWaiting(building, 0, MIN)).toBe(false)
+  })
+
+  test('the next milestone starts on the default branch, a fix on its own base, else stacked on the last one shipping, at most MAX_AHEAD deep', () => {
+    const ship = (headRef: string, state: ShipState) => ({ goal: headRef, headRef, branch: headRef, state, red: 0, since: 0 })
+    expect(startBase({ ships: [] }, {}, 'origin/main')).toEqual({ base: 'origin/main', stacked: false })
+    expect(startBase({ ships: [ship('a', 'merged'), ship('b', 'held')] }, {}, 'origin/main')).toEqual({ base: 'origin/main', stacked: false })
+    expect(startBase({ ships: [ship('a', 'ci')] }, { base: 'goal/01-a' }, 'origin/main')).toEqual({ base: 'goal/01-a', stacked: false })
+    expect(startBase({ ships: [ship('a', 'ci')] }, {}, 'origin/main')).toEqual({ base: 'a', stacked: true })
+    expect(startBase({ ships: [ship('a', 'ci'), ship('b', 'stacked')] }, {}, 'origin/main')).toEqual({ base: 'b', stacked: true })
+    expect(MAX_AHEAD).toBe(2)
+    expect(startBase({ ships: [ship('a', 'ci'), ship('b', 'stacked'), ship('c', 'stacked')] }, {}, 'origin/main')).toBeUndefined()
+    // A broken deploy: its repair goes first, nothing piles on.
+    expect(startBase({ ships: [ship('a', 'ci')], deployFails: 1 }, {}, 'origin/main')).toBeUndefined()
+    expect(unfinished([ship('a', 'merged'), ship('b', 'fixing'), ship('c', 'stacked')]).map(s => s.headRef)).toEqual(['b', 'c'])
+    expect(inFlight([ship('c', 'stacked')])).toBeUndefined()
   })
 
   test('progressSig ignores an error note; idleDue is 15 min, then 30 min apart, at most 3', () => {
@@ -305,6 +323,17 @@ describe('queue', () => {
 const CTX = { repoRoot: '/repo', worktree: '/repo/worktrees/goal-01-x', extraDeny: ['\\bplace_order\\b'] }
 
 describe('guard', () => {
+  test('a run never waits inside a turn: long sleeps, CI watches, cron and wake-ups are refused; short sleeps pass', () => {
+    for (const c of ['sleep 300', 'sleep 1m', 'sleep 30 30', 'make test && sleep 120', 'gh run watch 123', 'gh pr checks 7 --watch', 'X=1 sleep 90', 'sleep $((60*5))', 'echo $(sleep 600)']) expect(waitsLong(c)).toBe(true)
+    for (const c of ['sleep 5', 'sleep 0.5', 'npm test', 'gh pr checks 7', 'git commit -m "sleep 600 then gh run watch"', 'echo sleep 600']) expect(waitsLong(c)).toBe(false)
+    for (const tool of ['CronCreate', 'ScheduleWakeup', 'Monitor']) {
+      expect(guardRefusal({ tool }, null, true)).toContain('do not wait or schedule a wake-up')
+      expect(guardRefusal({ tool }, null, false)).toBeUndefined()
+    }
+    expect(guardRefusal({ tool: 'Bash', command: 'sleep 900' }, null, true)).toContain('auto-claude watches CI')
+    expect(guardRefusal({ tool: 'Bash', command: 'sleep 3' }, null, true)).toBeUndefined()
+  })
+
   const cases: Array<[string, boolean]> = [
     ['git push origin main', false],
     ['git push origin HEAD:master', false],
