@@ -72,6 +72,9 @@ function world(on: On, store: Record<string, unknown> = {}) {
     deployExit: 0,
     smokeExit: 0,
     missing: new Set<string>(),
+    // Every `git rebase`, and whether a stacked branch's rebase --onto conflicts.
+    rebases: [] as string[],
+    rebaseFails: false,
     clock: mock.clock(on, { now: 1_000 }),
   }
   const removed = (path: string) => [...w.gone].some(g => path === g || path.startsWith(`${g}/`))
@@ -172,7 +175,9 @@ function world(on: On, store: Record<string, unknown> = {}) {
     if (a.startsWith('gh run list')) return ok(w.runList)
     if (e.argv[0] === 'test' && e.argv[1] === '-d') return ok('', w.gone.has(String(e.argv[2])) ? 1 : 0)
     if (e.argv[0] === 'test' && e.argv[1] === '-e') return ok('', w.missing.has(String(e.argv[2])) ? 1 : 0)
-    if (a.includes('rev-parse --verify')) return ok('', w.branchGone ? 1 : 0)
+    if (a.includes('rev-parse --verify')) return w.branchGone ? ok('', 1) : ok(`tip-of-${String(e.argv.at(-1)).replace(/\^\{commit\}$/, '')}\n`)
+    if (a.includes(' rebase ')) w.rebases.push(a)
+    if (a.includes(' rebase --onto') && w.rebaseFails) return ok('', 1, 'CONFLICT (content): Merge conflict in calc.py')
     if (a.includes('worktree add') && !a.includes('--detach')) {
       w.adds.push(a)
       w.gone.delete(String(e.argv[5]))
@@ -439,7 +444,7 @@ describe('a run, local CI', () => {
     expect((await cmd($, 'status')).text).toContain('no plan was accepted after 3 reminders')
   })
 
-  test('a planning turn that ends without a plan is reminded 2 min later, not 15 (P4)', async ($, on) => {
+  test('a planning turn that ends without a plan is reminded 1 min later, not 15 (P4)', async ($, on) => {
     const w = world(on)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     await cmd($, 'start')
@@ -571,6 +576,99 @@ describe('a run, github CI', () => {
     expect(w.merged).toHaveLength(2)
   })
 
+  test('the session keeps building while a PR waits on CI: the next milestone is stacked on its branch, then rebased off it and shipped once it lands', { timeoutMs: 30_000 }, async ($, on) => {
+    const w = world(on)
+    w.github = true
+    w.checks = '[{"bucket":"pending"}]'
+    await planned($, w)
+    await meet($, w)
+    expect(w.merged).toHaveLength(0)
+    // Milestone 2 started at once, on milestone 1's branch, with the commit it builds on kept.
+    expect(w.adds.at(-1)).toBe(`git -C /repo worktree add ${WT2} -b ${BR2} ${BR1}`)
+    expect(w.prompts.at(-1)).toContain('Milestone #2')
+    // Met while milestone 1 still waits: it waits its turn, unpushed.
+    await meet($, w)
+    await w.clock.advance(TICK)
+    expect(w.pushes.some(p => p.includes(BR2))).toBe(false)
+    expect((await cmd($, 'status')).text).toContain('- stacked: sub() returns a-b')
+    // Milestone 1 lands; milestone 2 drops its commits, then is pushed and landed the same way.
+    w.checks = '[{"bucket":"pass"}]'
+    await w.clock.advance(10_000)
+    expect(w.merged).toHaveLength(2)
+    expect(w.rebases).toContain(`git -C ${WT2} rebase --onto origin/main tip-of-${BR1}`)
+    // Rebased after the session may have pushed it: pushed with a lease.
+    expect(w.pushes.find(p => p.includes(`${BR2}:${BR2}`))).toContain('--force-with-lease')
+    for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
+    expect(w.notifies.at(-1)).toContain('finished: the final check passed after 1 round(s). 2 merged, 0 held')
+  })
+
+  test('a stacked milestone that does not rebase once its parent lands gets a fix goal that rebases it by hand', { timeoutMs: 30_000 }, async ($, on) => {
+    const w = world(on)
+    w.github = true
+    w.checks = '[{"bucket":"pending"}]'
+    await planned($, w)
+    await meet($, w)
+    await meet($, w)
+    w.rebaseFails = true
+    w.checks = '[{"bucket":"pass"}]'
+    await w.clock.advance(TICK)
+    expect(w.merged).toHaveLength(1)
+    expect(w.runs).toContain(`git -C ${WT2} rebase --abort`)
+    const fix = parseQueue(w.files.get(GOALS) ?? '').find(i => i.base !== undefined)
+    expect(fix?.base).toBe(BR2)
+    expect(fix?.condition).toContain(`git rebase --onto origin/main tip-of-${BR1}`)
+    // The fix goal is built next, on milestone 2's branch.
+    expect(w.adds.at(-1)).toContain(`-b goal/03-`)
+    expect(w.adds.at(-1)).toMatch(new RegExp(`${BR2}$`))
+  })
+
+  test('a broken deploy is repaired before a stacked milestone merges on top of it', { timeoutMs: 30_000 }, async ($, on) => {
+    const w = world(on)
+    w.github = true
+    w.checks = '[{"bucket":"pending"}]'
+    await planned($, w, PLAN_DEPLOY)
+    await meet($, w)
+    // Milestone 2 is built and stacked while milestone 1 waits on CI.
+    await meet($, w)
+    w.deployExit = 1
+    w.checks = '[{"bucket":"pass"}]'
+    await w.clock.advance(10_000)
+    // Milestone 1 landed, its deploy failed: milestone 2 stays stacked, the repair is built from main.
+    expect(w.merged).toHaveLength(1)
+    expect(deployRuns(w).filter(r => r.includes('deploy.sh'))).toHaveLength(1)
+    expect((await cmd($, 'status')).text).toContain('- stacked: sub() returns a-b')
+    expect(w.adds.at(-1)).toMatch(/origin\/main$/)
+    expect(w.prompts.at(-1)).toMatch(/deploy/i)
+    // The repair lands first and deploys; only then does milestone 2 go.
+    w.deployExit = 0
+    await meet($, w)
+    expect(w.merged).toHaveLength(3)
+    const order = w.pushes.filter(p => p.includes(' push -u ')).map(p => p.split(' ').find(t => t.includes(':goal/'))?.split(':')[1])
+    expect(order.indexOf(BR2)).toBeGreaterThan(order.findIndex(b => b?.startsWith('goal/03-')))
+    expect((await cmd($, 'status')).text).toContain('3 merged, 0 held')
+  })
+
+  test('a shipping error is not held before the model was asked: the question waits while it builds another milestone', { timeoutMs: 30_000 }, async ($, on) => {
+    const w = world(on)
+    w.github = true
+    w.gitGone = true
+    await planned($, w)
+    await meet($, w)
+    // Milestone 2 is built for 20 min while milestone 1's push keeps failing.
+    await turnStart($)
+    for (let i = 0; i < 40; i++) await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.includes('held: add() returns a+b'))).toBe(false)
+    expect(w.prompts.filter(p => p.includes('[auto-claude] Shipping is stuck'))).toHaveLength(0)
+    await meet($, w)
+    await w.clock.advance(TICK)
+    expect(w.prompts.filter(p => p.includes('[auto-claude] Shipping is stuck'))).toHaveLength(1)
+    // It gets 10 min to act before the hold.
+    for (let i = 0; i < 16; i++) await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.includes('held: add() returns a+b'))).toBe(false)
+    for (let i = 0; i < 6; i++) await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.includes('held: add() returns a+b'))).toBe(true)
+  })
+
   test('only required checks decide: a red check that is not required does not block the merge (P1)', async ($, on) => {
     const w = world(on)
     w.github = true
@@ -646,17 +744,17 @@ describe('a run, github CI', () => {
 })
 
 describe('the watchdog (P2, P4, P5)', () => {
-  test('a milestone whose session sits idle is prompted again at 3, 6 and 12 min, then blocked, and the run goes on', { timeoutMs: 30_000 }, async ($, on) => {
+  test('a milestone whose session sits idle is prompted again at 1, 3 and 6 min, then blocked, and the run goes on', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     await planned($, w)
     const wakes = () => w.prompts.filter(p => p.includes('the session sat idle') && p.includes('Milestone #1'))
     // The model ended its turn without a stop the loop could judge.
     await turnStart($)
     await turnEnd($)
-    await w.clock.advance(2 * MIN)
+    await w.clock.advance(TICK)
     expect(wakes()).toHaveLength(0)
-    // Ticks are 30 s apart: the first one past 3 min of quiet wakes it.
-    await w.clock.advance(MIN + TICK + 1_200)
+    // Ticks are 30 s apart: the first one past 1 min of quiet wakes it.
+    await w.clock.advance(2 * TICK)
     expect(wakes()).toHaveLength(1)
     expect(wakes()[0]).toContain('Milestone #1: add() returns a+b')
     expect(wakes()[0]).toContain('wake 1/3')
@@ -726,20 +824,25 @@ describe('the watchdog (P2, P4, P5)', () => {
     w.gitGone = true
     await planned($, w)
     await meet($, w)
+    // Milestone 2 is built meanwhile, stacked on milestone 1's branch.
+    expect(w.adds.at(-1)).toBe(`git -C /repo worktree add ${WT2} -b ${BR2} ${BR1}`)
+    const asked = () => w.prompts.filter(p => p.includes('[auto-claude] Shipping is stuck'))
     for (let i = 0; i < 5; i++) await w.clock.advance(TICK)
-    const asked = w.prompts.filter(p => p.includes('[auto-claude] Shipping is stuck'))
-    expect(asked).toHaveLength(1)
-    expect(asked[0]).toContain('ENOENT')
-    expect(asked[0]).toContain('Do not merge or deploy')
-    // Ten checks are not enough on their own: the error must also have lasted 15 min.
-    for (let i = 0; i < 6; i++) await w.clock.advance(TICK)
-    expect(w.notifies.some(n => n.includes('held: add() returns a+b'))).toBe(false)
-    for (let i = 0; i < 20; i++) await w.clock.advance(TICK)
-    expect(w.notifies.some(n => n.startsWith('auto-claude (repo): held: add() returns a+b') && n.includes('going on'))).toBe(true)
-    // The run went on to milestone 2, which hits the same wall: the run stops instead of holding every milestone.
-    expect(w.adds.at(-1)).toContain(WT2)
+    // The session is building milestone 2: the diagnosis waits for it.
+    expect(asked()).toHaveLength(0)
     await turnStart($)
     await meet($, w)
+    await w.clock.advance(TICK)
+    expect(asked()).toHaveLength(1)
+    expect(asked()[0]).toContain('ENOENT')
+    expect(asked()[0]).toContain('Do not merge or deploy')
+    // Ten checks are not enough on their own: the error must also have lasted 15 min.
+    for (let i = 0; i < 4; i++) await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.includes('held: add() returns a+b'))).toBe(false)
+    for (let i = 0; i < 26; i++) await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.startsWith('auto-claude (repo): held: add() returns a+b') && n.includes('going on'))).toBe(true)
+    // Milestone 2 goes next, rebased off milestone 1's commits, and hits the same wall: the run stops instead of holding every milestone.
+    expect(w.rebases).toContain(`git -C ${WT2} rebase --onto origin/main tip-of-${BR1}`)
     for (let i = 0; i < 32; i++) await w.clock.advance(TICK)
     expect(w.notifies.at(-1)).toContain('stopped: 2 milestones in a row were held for one cause (push)')
     expect((await cmd($, 'status')).text).toContain('phase stopped')
@@ -765,15 +868,14 @@ describe('the watchdog (P2, P4, P5)', () => {
     expect(w.adds.at(-1)).toContain(WT2)
   })
 
-  test('an idle run is told to the person with what is being done, never asked to check status', { timeoutMs: 30_000 }, async ($, on) => {
+  test('an idle session never rests long and is never asked to check status: woken, then its milestone blocked', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     await planned($, w)
-    // The session does nothing with its milestone: woken at 3 and 6 min, told at 18.
-    for (let i = 0; i < 40; i++) await w.clock.advance(TICK)
-    const idle = w.notifies.filter(n => n.includes('idle '))
-    expect(idle).toHaveLength(1)
-    expect(idle[0]).toContain('the session has done nothing for')
-    expect(idle[0]).toContain('goes on by itself')
+    // The session does nothing with its milestone: woken at 1, 3 and 6 min, blocked at 12, the next one started.
+    for (let i = 0; i < 26; i++) await w.clock.advance(TICK)
+    expect(w.prompts.filter(p => p.includes('the session sat idle'))).toHaveLength(3)
+    expect(w.adds.at(-1)).toContain(WT2)
+    expect(w.prompts.at(-1)).toContain('Milestone #2')
     for (const n of w.notifies) expect(n).not.toContain('/auto-claude status')
   })
 })

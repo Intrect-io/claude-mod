@@ -1,4 +1,4 @@
-import type { AutoRecord, ShipItem } from '../types'
+import type { AutoRecord, ShipItem, ShipState } from '../types'
 
 // The loop's JSONL log as events, from after the last line already read.
 // The loop keeps only its last 2000 lines (loop.ts LOG_MAX_LINES), so once the
@@ -242,19 +242,26 @@ export function ciAction(item: Pick<ShipItem, 'state' | 'since' | 'rerunAt' | 'n
 // hold: give up on the milestone and go on.
 // A hold also needs HOLD_MIN_MS since the error first came: with CI looked at
 // every 10 s, ten checks are under two minutes, and a short GitHub outage must
-// not drop a finished milestone.
+// not drop a finished milestone. Nor is anything held before the model was
+// asked and had ASKED_WAIT_MS to act: the question waits while the session
+// builds another milestone, up to UNASKED_HOLD_MS, then the hold goes ahead.
 export const DIAGNOSE_AT = 5
 export const HOLD_AT = 10
 export const HOLD_MIN_MS = 15 * 60_000
+export const ASKED_WAIT_MS = 10 * 60_000
+export const UNASKED_HOLD_MS = 60 * 60_000
 
-export function shipRemedy(item: Pick<ShipItem, 'note' | 'repeats' | 'tried' | 'noteSince'>, now: number): 'https-push' | 'diagnose' | 'hold' | undefined {
+export function shipRemedy(item: Pick<ShipItem, 'note' | 'repeats' | 'tried' | 'noteSince' | 'askedAt'>, now: number): 'https-push' | 'diagnose' | 'hold' | undefined {
   if (item.note === undefined) return undefined
   const tried = item.tried ?? []
   const repeats = item.repeats ?? 0
   if (/Permission denied \(publickey\)|Host key verification failed|Could not read from remote repository/i.test(item.note) && !tried.includes('https-push')) return 'https-push'
-  if (repeats >= HOLD_AT && now - (item.noteSince ?? now) >= HOLD_MIN_MS) return 'hold'
-  if (repeats >= DIAGNOSE_AT && !tried.includes('diagnose')) return 'diagnose'
-  return undefined
+  if (repeats < DIAGNOSE_AT) return undefined
+  const since = item.noteSince ?? now
+  // A record from before askedAt: the diagnosis went out with its note.
+  const asked = item.askedAt ?? (tried.includes('diagnose') ? since : undefined)
+  if (asked === undefined) return now - since >= UNASKED_HOLD_MS ? 'hold' : 'diagnose'
+  return repeats >= HOLD_AT && now - since >= HOLD_MIN_MS && now - asked >= ASKED_WAIT_MS ? 'hold' : undefined
 }
 
 // The class of a hold's cause: two milestones in a row held for the same class
@@ -280,12 +287,37 @@ export function httpsOf(slug: string): string {
 // A session with a milestone open and no turn for this long is not building it
 // (a dropped prompt, an interrupt, a turn that ended to "wait"): the watchdog
 // prompts it again, backing off, LOOP_WAKES times, then blocks the milestone.
-export const LOOP_QUIET_MS = 3 * 60_000
+// The first wake comes soon: a run never leaves the session resting.
+export const LOOP_QUIET_MS = 60_000
 export const LOOP_WAKES = 3
+const WAKE_AT_MS = [1, 3, 6, 12].map(min => min * 60_000)
 
-// The wait before wake number `wakes + 1`: 3, 6, then 12 min of quiet.
+// The wait before wake number `wakes + 1`: 1, 3, then 6 min of quiet; the
+// milestone is blocked after 12.
 export function wakeDue(quietMs: number, wakes: number): boolean {
-  return quietMs >= LOOP_QUIET_MS * 2 ** Math.min(wakes, 4)
+  return quietMs >= WAKE_AT_MS[Math.min(wakes, WAKE_AT_MS.length - 1)]!
+}
+
+// Milestones built ahead of the PR that is shipping: while its CI runs, the
+// session builds the next ones on its branch instead of sitting idle.
+export const MAX_AHEAD = 2
+const UNFINISHED: ReadonlySet<ShipState> = new Set<ShipState>(['stacked', 'push', 'ci', 'fixing'])
+
+// Ship items not merged or held yet, in the order they ship.
+export function unfinished(ships: readonly ShipItem[]): ShipItem[] {
+  return ships.filter(s => UNFINISHED.has(s.state))
+}
+
+// Where the next milestone starts. Nothing shipping, or a line with its own
+// base (a fix goal): there. Else it is stacked on the branch of the last
+// milestone still shipping, at most MAX_AHEAD deep, and never while the live
+// deploy is broken (its repair goes first). undefined: not yet.
+export function startBase(r: Pick<AutoRecord, 'ships' | 'repair'>, next: { base?: string }, defaultRef: string): { base: string; stacked: boolean } | undefined {
+  const open = unfinished(r.ships)
+  if (next.base !== undefined) return { base: next.base, stacked: false }
+  if (open.length === 0) return { base: defaultRef, stacked: false }
+  if (r.repair !== undefined || open.length > MAX_AHEAD) return undefined
+  return { base: open[open.length - 1]!.branch, stacked: true }
 }
 
 // Waiting on something that has its own clock is not idle: the loop building a

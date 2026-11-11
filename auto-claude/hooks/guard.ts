@@ -95,6 +95,37 @@ export function deploysSomething(command: string): boolean {
   return command.split(/&&|\|\||[;|&\n`()]|\$\(/).some(segment => DEPLOY.test(segment) && !readOnly(segment))
 }
 
+// Waiting inside a turn: a run never rests, and what it waits for (CI, a
+// merge, a deploy) the driver watches itself. A sleep of at least
+// WAIT_MAX_S, or watching CI until it ends, is refused; short sleeps (a
+// check that waits for a server to come up) pass. Judged on tokens per piece.
+export const WAIT_MAX_S = 60
+const UNIT_S: Record<string, number> = { '': 1, s: 1, m: 60, h: 3600, d: 86400 }
+
+function sleepSeconds(tokens: readonly string[]): number {
+  let total = 0
+  for (const t of tokens) {
+    const m = t.match(/^(\d+(?:\.\d+)?)([smhd]?)$/)
+    if (m === null) return Number.POSITIVE_INFINITY
+    total += Number(m[1]) * UNIT_S[m[2] ?? '']!
+  }
+  return total
+}
+
+export function waitsLong(raw: string): boolean {
+  return stripProse(raw)
+    .split(/&&|\|\||[;|&\n`()]|\$\(/)
+    .some(segment => {
+      const tokens = segment.trim().split(/\s+/).filter(t => t !== '' && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t))
+      const [tool, ...rest] = tokens
+      // No literal argument left in its piece: a computed duration, `sleep $((60*5))`.
+      if (tool === 'sleep') return rest.length === 0 || sleepSeconds(rest) >= WAIT_MAX_S
+      if (tool !== 'gh') return false
+      if (rest[0] === 'run' && rest[1] === 'watch') return true
+      return rest[0] === 'pr' && rest[1] === 'checks' && rest.includes('--watch')
+    })
+}
+
 function isSafeRmTarget(target: string, worktree: string): boolean {
   const bare = target.replace(/^['"]|['"]$/g, '')
   if (bare.includes('..') || bare.startsWith('~') || bare.includes('$') || bare === '*' || bare === '.' || bare === '/') {

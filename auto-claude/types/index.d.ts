@@ -1,4 +1,6 @@
-export type ShipState = 'push' | 'ci' | 'fixing' | 'merged' | 'held'
+// stacked: built on the branch of a milestone still shipping; it waits for
+// that one to land (or be held), is rebased onto the default branch, then pushed.
+export type ShipState = 'stacked' | 'push' | 'ci' | 'fixing' | 'merged' | 'held'
 
 export type ShipItem = {
   // The goal-mode queue line this milestone came from.
@@ -23,6 +25,16 @@ export type ShipItem = {
   tried?: string[]
   // When a CI that would not finish was cancelled and run again.
   rerunAt?: number
+  // A stacked milestone: the commit it was started from (its parent's tip
+  // then), so `git rebase --onto <default> <onto>` drops the parent's commits.
+  onto?: string
+  // Rebased by the driver after it was built: pushed with --force-with-lease
+  // (the session may have pushed the branch before the rebase).
+  rebased?: boolean
+  // When the session model was given this item's repeating error (shipRemedy).
+  askedAt?: number
+  // The repair of a broken deploy: it ships ahead of every stacked milestone.
+  repair?: boolean
 }
 
 export type AutoPhase = 'plan' | 'run' | 'final' | 'done' | 'stopped'
@@ -60,6 +72,9 @@ export type AutoRecord = {
   ships: ShipItem[]
   // Fix goals by their queue condition, each naming the headRef it repairs.
   fixes: Record<string, string>
+  // Milestones started ahead, on a branch still shipping: the commit each
+  // branch started from, by branch name.
+  onto?: Record<string, string>
   merges: number
   held: number
   queueEmpty: boolean
@@ -74,6 +89,10 @@ export type AutoRecord = {
   // A merge happened whose deploy has not passed yet: skipped (the command is
   // not in the default branch yet) or failed; the run is not done until it has.
   deployDue?: boolean
+  // The queue condition of the deploy repair under way: until it lands (or is
+  // blocked), stacked milestones are neither started nor shipped, so no merge
+  // deploys on top of what is broken.
+  repair?: string
   // Why milestones were last held, as a cause class (ship.ts causeOf), and how
   // many in a row share it: two in a row stop the run (a cause the whole run shares).
   holdCause?: string
