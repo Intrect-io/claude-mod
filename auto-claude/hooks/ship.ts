@@ -81,6 +81,17 @@ export function mergeable(json: string): { open: boolean; merged: boolean; confl
   }
 }
 
+// Checks that are red only because they were cancelled (the driver's own
+// re-run cancels what was queued): pending, while the re-run takes over.
+export function onlyCancelled(json: string): boolean {
+  try {
+    const rows = JSON.parse(json) as Array<{ bucket?: string }>
+    return Array.isArray(rows) && rows.some(r => r.bucket === 'cancel') && !rows.some(r => r.bucket === 'fail')
+  } catch {
+    return false
+  }
+}
+
 // gh's answer to --required on a repository without required checks.
 export function noRequired(r: { exitCode: number; stdout: string; stderr: string }): boolean {
   return r.exitCode !== 0 && /no required checks/i.test(`${r.stdout}\n${r.stderr}`)
@@ -229,15 +240,19 @@ export function ciAction(item: Pick<ShipItem, 'state' | 'since' | 'rerunAt' | 'n
 // diagnose: the session model gets the error and what was tried, to fix what
 // it can (gh auth, a remote, a branch).
 // hold: give up on the milestone and go on.
+// A hold also needs HOLD_MIN_MS since the error first came: with CI looked at
+// every 10 s, ten checks are under two minutes, and a short GitHub outage must
+// not drop a finished milestone.
 export const DIAGNOSE_AT = 5
 export const HOLD_AT = 10
+export const HOLD_MIN_MS = 15 * 60_000
 
-export function shipRemedy(item: Pick<ShipItem, 'note' | 'repeats' | 'tried'>): 'https-push' | 'diagnose' | 'hold' | undefined {
+export function shipRemedy(item: Pick<ShipItem, 'note' | 'repeats' | 'tried' | 'noteSince'>, now: number): 'https-push' | 'diagnose' | 'hold' | undefined {
   if (item.note === undefined) return undefined
   const tried = item.tried ?? []
   const repeats = item.repeats ?? 0
   if (/Permission denied \(publickey\)|Host key verification failed|Could not read from remote repository/i.test(item.note) && !tried.includes('https-push')) return 'https-push'
-  if (repeats >= HOLD_AT) return 'hold'
+  if (repeats >= HOLD_AT && now - (item.noteSince ?? now) >= HOLD_MIN_MS) return 'hold'
   if (repeats >= DIAGNOSE_AT && !tried.includes('diagnose')) return 'diagnose'
   return undefined
 }

@@ -9,7 +9,7 @@ import { deployMerged } from './deploy-run'
 import { bootstrapRepo } from './bootstrap'
 import { ensureLines, FILES, fetchRemote, LOCAL, out, readText, refOf, repoRoot, run, tell } from './io'
 import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, guardRefusal, LOOP_EXCLUDES, LOOP_POLICY, loopView, MIN_CHECKS_TO_DEFER, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop } from './loop'
-import { capReached, causeOf, ciAction, diagnose, httpsOf, idleDue, inFlight, isWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, summary, wakeDue } from './ship'
+import { capReached, causeOf, ciAction, diagnose, httpsOf, idleDue, inFlight, isWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, summary, wakeDue } from './ship'
 import type { StallFacts } from './ship'
 import type { Caps } from './ship'
 
@@ -199,10 +199,12 @@ async function rerunCi($: EngineInterface, wt: string, repo: string[], headRef: 
   } catch {
     runs = []
   }
+  const flags = repo.map(a => `'${a.replace(/'/g, '')}'`).join(' ')
   for (const ci of Array.isArray(runs) ? runs : []) {
-    if (ci.databaseId === undefined || ci.status === 'completed') continue
-    await run($, ['gh', 'run', 'cancel', String(ci.databaseId), ...repo], wt)
-    await run($, ['gh', 'run', 'rerun', String(ci.databaseId), ...repo], wt)
+    if (typeof ci.databaseId !== 'number' || ci.status === 'completed') continue
+    // gh refuses to re-run a run that is still cancelling: wait (up to 60 s) for it to complete.
+    const id = String(ci.databaseId)
+    await run($, ['bash', '-lc', `gh run cancel ${id} ${flags}; for i in $(seq 30); do [ "$(gh run view ${id} ${flags} --json status -q .status)" = completed ] && break; sleep 2; done; gh run rerun ${id} ${flags}`], wt, 90_000)
   }
 }
 
@@ -234,12 +236,12 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
     const target = (item.tried ?? []).includes('https-push') && slug !== undefined ? httpsOf(slug) : r.remote
     const pushed = await run($, ['git', '-C', wt, 'push', '-u', target, `${item.branch}:${item.headRef}`, ...(item.branch !== item.headRef ? ['--force-with-lease'] : [])], wt)
     if (pushed.exitCode !== 0) return { r, item: update({ note: `push failed: ${out(pushed)}` }) }
-    if (item.pr !== undefined) return { r, item: update({ state: 'ci', since: now, note: undefined }) }
+    if (item.pr !== undefined) return { r, item: update({ state: 'ci', since: now, note: undefined, rerunAt: undefined }) }
     const made = await run($, ['gh', 'pr', 'create', ...repo, '--head', item.headRef, '--base', r.defaultBranch, '--title', item.goal.slice(0, 120), '--body', `Milestone of an auto-claude run.\n\nCheck: \`${item.check ?? '-'}\`\n\nPlan: .claude/auto-plan.md (local to the run).`], wt)
     const pr = prNumber(made.stdout + made.stderr)
     if (pr === undefined) return { r, item: update({ note: `gh pr create failed: ${out(made)}` }) }
     await tell($, r, `opened PR #${pr}: ${item.goal.slice(0, 80)}`)
-    return { r, item: update({ state: 'ci', pr, since: now, note: undefined }) }
+    return { r, item: update({ state: 'ci', pr, since: now, note: undefined, rerunAt: undefined }) }
   }
 
   let failure: string | undefined
@@ -273,6 +275,8 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
     if (noRequired(asked)) asked = await run($, ['gh', 'pr', 'checks', String(item.pr), ...repo, '--json', 'bucket'], wt)
     const checks = parseChecks(asked.stdout)
     if (checks === 'pending') return { r, item }
+    // The runs the driver cancelled to re-run them read as cancelled for a while.
+    if (checks === 'red' && item.rerunAt !== undefined && onlyCancelled(asked.stdout)) return { r, item }
     // Asked right after the PR was opened, GitHub has usually not registered
     // its checks yet: that is pending too, until the grace runs out.
     if (checks === 'none' && now - item.since < NO_CI_GRACE_MS) return { r, item }
@@ -350,9 +354,7 @@ async function deployFailed($: EngineInterface, r: AutoRecord, spec: DeploySpec,
   const fails = (r.deployFails ?? 0) + 1
   const next: AutoRecord = { ...r, deployFails: fails, deployDue: true }
   if (fails >= MAX_DEPLOY_FAILS) return stopRun($, next, `${why}; ${fails} deploys failed in a row, so nothing more is merged on top of what is live`)
-  const plan = (await readText($, FILES(r.root).plan)) ?? ''
-  const check = finalCheckOf(plan) ?? 'true'
-  await appendQueue($, r.root, deployFixLine(spec.command, spec.smoke, why, check, refOf(r)))
+  await appendQueue($, r.root, deployFixLine(spec.command, spec.smoke, why, refOf(r)))
   await tell($, next, `${why}; a milestone that repairs the deploy goes first (deploy failure ${fails}/${MAX_DEPLOY_FAILS})`)
   return next
 }
@@ -444,7 +446,9 @@ async function shipSteps($: EngineInterface, r: AutoRecord): Promise<AutoRecord>
     const step = await advance($, r, item)
     if (!step.r.on) return step.r
     const same = step.item.note !== undefined && step.item.note === item.note && step.item.state === item.state
-    const treated = await treat($, step.r, { ...step.item, repeats: same ? (item.repeats ?? 0) + 1 : 0 })
+    const now = await $.clock.now()
+    const noteSince = step.item.note === undefined ? undefined : same ? (item.noteSince ?? now) : now
+    const treated = await treat($, step.r, { ...step.item, repeats: same ? (item.repeats ?? 0) + 1 : 0, noteSince }, now)
     r = { ...treated.r, ships: treated.r.ships.map(s => (s.headRef === item.headRef ? treated.item : s)) }
     // Waiting (CI pending, an error to retry): the next tick looks again.
     if (treated.item.state === item.state) break
@@ -453,8 +457,8 @@ async function shipSteps($: EngineInterface, r: AutoRecord): Promise<AutoRecord>
 }
 
 // An error that keeps coming back is treated, not just retried.
-async function treat($: EngineInterface, r: AutoRecord, item: ShipItem): Promise<{ r: AutoRecord; item: ShipItem }> {
-  const remedy = shipRemedy(item)
+async function treat($: EngineInterface, r: AutoRecord, item: ShipItem, now: number): Promise<{ r: AutoRecord; item: ShipItem }> {
+  const remedy = shipRemedy(item, now)
   if (remedy === 'https-push') {
     $.ui.toast('auto-claude: the SSH remote refused the push; pushing over https instead')
     return { r, item: { ...item, tried: [...(item.tried ?? []), 'https-push'] } }
@@ -673,7 +677,7 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string, bu
   }
   const hasOrigin = (await run($, ['git', '-C', root, 'remote'], root)).stdout.split('\n').some(s => s.trim() === 'origin')
   let remote = 'origin'
-  let defaultBranch = 'main'
+  let defaultBranch: string
   let mode: 'github' | 'local' = 'local'
   if (hasOrigin) {
     await run($, ['git', '-C', root, 'fetch', '-q', remote], root)
@@ -742,6 +746,8 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string, bu
     ...(deploy === undefined ? {} : { deploy, deploys: 0 }),
   }
   activeRoot = root
+  // A milestone left open by an earlier run belongs to that run's plan.
+  await stopLoop($, root, true)
   await writeRecord($, r)
   clearSessionGoal($)
   if (buildOnly) {
@@ -930,6 +936,8 @@ export const register: Register = (on, options) => {
     const r = root === undefined ? undefined : await readRecord($, root)
     if (r === undefined || !r.on) return { result: `No auto-claude run is on; /${COMMAND} start first.` }
     if (r.buildOnly === true) return { result: 'This run builds the queue only; it takes no plan.' }
+    // Only a plan being made is accepted: a milestone's turn cannot re-fix what the run deploys.
+    if (r.phase !== 'plan') return { result: `The plan was accepted already (phase ${r.phase}); keep building the milestone.` }
     const f = FILES(r.root)
     const fixed = r.deploy?.source === 'file'
     const verdict = validatePlan(await readText($, f.plan), await readText($, f.queue), r.round === 1, fixed)

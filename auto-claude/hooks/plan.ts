@@ -158,12 +158,15 @@ export function planNudgeText(nudge: number, max: number, errors: readonly strin
 }
 
 // The queue line for repairing a deploy that failed after a merge: built from
-// the default branch (the milestone's branch is merged and gone), judged by
-// the final check, since the deploy itself is the driver's to run again.
-export function deployFixLine(command: string, smoke: string | undefined, failure: string, check: string, base: string): string {
+// the default branch (the milestone's branch is merged and gone). It states
+// what is true on its own branch, the cause found and fixed; the deploy itself
+// is the driver's to run again after the merge, and that is the proof. No
+// check the branch could pass stands for it (the final check passes only once
+// the whole goal is met), so the evaluator judges it from the transcript.
+export function deployFixLine(command: string, smoke: string | undefined, failure: string, base: string): string {
   const cause = failure.replace(/\s+/g, ' ').slice(0, 200)
-  const proof = smoke !== undefined ? `\`${smoke}\` passes after \`${command}\`` : `\`${command}\` succeeds`
-  return `- [ ] Deploying works again: ${proof} from a fresh checkout of the default branch; it failed with: ${cause} :: check: ${check} :: base: ${base}`
+  const proof = smoke !== undefined ? `\`${command}\` and its smoke check \`${smoke}\`` : `\`${command}\``
+  return `- [ ] The cause of the failed deploy is found and fixed on this branch, with real command output showing both (auto-claude runs ${proof} again after the merge); it failed with: ${cause} :: base: ${base}`
 }
 
 // The queue line for repairing a PR whose CI failed or that no longer merges.

@@ -6,7 +6,7 @@ import { checkBash, checkPath, deploysSomething, uncommitted } from './guard'
 import { maxBranchSeq } from './loop'
 import { deployFixLine, deployOf, finalCheckOf, fixLine, kickoffText, POLICY, validatePlan } from './plan'
 import { markItem, nextPending, parseQueue, slugify, summarize } from './queue'
-import { capReached, causeOf, ciAction, httpsOf, idleDue, inFlight, isWaiting, mergeable, noRequired, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, wakeDue } from './ship'
+import { capReached, causeOf, ciAction, httpsOf, idleDue, inFlight, isWaiting, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, wakeDue } from './ship'
 
 const PLAN = '## Goal\nadd and sub work\n\nFinal check: `python3 -m unittest -q`\nDeploy: `bash scripts/deploy.sh`\nSmoke check: `curl -fsS http://localhost:8080/health`\nCodeQL: python\n\n## Milestones\n1. add\n2. sub\n\n## Decisions\n'
 const QUEUE = '- [ ] add() returns a+b :: check: python3 -m unittest -q test_add\n- [ ] sub() returns a-b :: check: python3 -m unittest -q test_sub\n'
@@ -91,10 +91,13 @@ describe('plan', () => {
     const line = fixLine('add() returns a+b', 7, 'CI failed', 'pytest -q', 'goal/01-add')
     expect(parseQueue(line)[0]).toMatchObject({ check: 'pytest -q', base: 'goal/01-add' })
     expect(line).toContain('PR #7')
-    const d = parseQueue(deployFixLine('bash deploy.sh', 'curl -f x', 'the smoke check exited 7', 'make test', 'origin/main'))[0]
-    expect(d).toMatchObject({ check: 'make test', base: 'origin/main' })
-    expect(d?.condition).toContain('`curl -f x` passes after `bash deploy.sh`')
+    // What is true on its own branch, judged by the evaluator: the final check passes only once the whole goal is met.
+    const d = parseQueue(deployFixLine('bash deploy.sh', 'curl -f x', 'the smoke check exited 7', 'origin/main'))[0]
+    expect(d).toMatchObject({ check: undefined, base: 'origin/main' })
+    expect(d?.condition).toContain('cause of the failed deploy is found and fixed on this branch')
+    expect(d?.condition).toContain('runs `bash deploy.sh` and its smoke check `curl -f x` again after the merge')
     expect(d?.condition).toContain('the smoke check exited 7')
+    expect(validatePlan(PLAN, '- [ ] a :: check: x\n- [ ] b :: check: y\n', false).ok).toBe(true)
   })
 })
 
@@ -160,15 +163,21 @@ describe('ship', () => {
     expect(capReached({ merges: 0, startedAt: 0 }, { maxRounds: 3, maxMerges: 20, maxHours: 1 }, 3600_001)).toContain('time cap')
   })
 
-  test('a shipping error that repeats: https once for a refused SSH key, the model at 5, hold at 10 (P2)', () => {
+  test('a shipping error that repeats: https once for a refused SSH key, the model at 5, hold at 10 checks and 15 min (P2)', () => {
     const note = 'push failed: git@github.com: Permission denied (publickey).'
-    expect(shipRemedy({ note, repeats: 0 })).toBe('https-push')
-    expect(shipRemedy({ note, repeats: 1, tried: ['https-push'] })).toBeUndefined()
-    expect(shipRemedy({ note: 'gh pr create failed: Head sha can\'t be blank', repeats: 4 })).toBeUndefined()
-    expect(shipRemedy({ note: 'gh pr create failed: Head sha can\'t be blank', repeats: 5 })).toBe('diagnose')
-    expect(shipRemedy({ note: 'x', repeats: 7, tried: ['diagnose'] })).toBeUndefined()
-    expect(shipRemedy({ note: 'x', repeats: 10, tried: ['diagnose'] })).toBe('hold')
-    expect(shipRemedy({ repeats: 30 })).toBeUndefined()
+    expect(shipRemedy({ note, repeats: 0 }, 0)).toBe('https-push')
+    expect(shipRemedy({ note, repeats: 1, tried: ['https-push'] }, 0)).toBeUndefined()
+    const gh = "gh pr create failed: Head sha can't be blank"
+    expect(shipRemedy({ note: gh, repeats: 4 }, 0)).toBeUndefined()
+    expect(shipRemedy({ note: gh, repeats: 5 }, 0)).toBe('diagnose')
+    expect(shipRemedy({ note: 'x', repeats: 7, tried: ['diagnose'] }, 0)).toBeUndefined()
+    // Ten fast CI looks are under two minutes: a short outage is not held.
+    expect(shipRemedy({ note: 'x', repeats: 10, tried: ['diagnose'], noteSince: 0 }, 2 * MIN)).toBeUndefined()
+    expect(shipRemedy({ note: 'x', repeats: 10, tried: ['diagnose'], noteSince: 0 }, 15 * MIN)).toBe('hold')
+    expect(shipRemedy({ repeats: 30 }, 0)).toBeUndefined()
+    // The runs the driver cancelled to re-run them are not a red CI.
+    expect(onlyCancelled('[{"bucket":"cancel"},{"bucket":"pass"}]')).toBe(true)
+    expect(onlyCancelled('[{"bucket":"cancel"},{"bucket":"fail"}]')).toBe(false)
   })
 
   test('a CI that does not finish is re-run once after 90 min (30 min when every run is still queued), then held', () => {
@@ -317,6 +326,15 @@ describe('guard', () => {
     ['fly status && fly logs', true],
     ['wrangler tail', true],
     ['kubectl get pods && kubectl apply -f x.yaml', false],
+    // A read-only look cannot carry a write: a single &, a substitution, backticks.
+    ['kubectl get pods & kubectl delete ns x', false],
+    ['kubectl get $(kubectl delete ns x)', false],
+    ['kubectl get `kubectl delete ns x`', false],
+    ['kubectl get pods --output yaml; helm rollback api 3', false],
+    ['KUBECONFIG=/tmp/k kubectl -n api describe pod api-1', true],
+    ['kubectl get deploy/api -o yaml | kubectl apply -f -', false],
+    // Long inputs are judged in linear time (CodeQL js/redos on the regex this replaced).
+    [`kubectl ${'-a b '.repeat(5000)}get pods`, true],
     ['rm -rf build', true],
     ['rm -rf /repo/worktrees/goal-01-x/build', true],
     ['rm -rf /repo/src', false],

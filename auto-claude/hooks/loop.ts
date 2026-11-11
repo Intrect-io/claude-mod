@@ -156,10 +156,13 @@ export async function loopView($: EngineInterface): Promise<LoopView | null> {
   return read($, viewAtom)
 }
 
-// Ends the loop's part of a run: no goal judged, no guards. The worktree and branch stay.
-export async function stopLoop($: EngineInterface, root: string): Promise<void> {
+// Ends the loop's part of a run: no goal judged, no guards. The milestone
+// being built stays open, so a resume picks it up where it was (dropping it
+// left the run counting a start that never ended, and waiting on it forever);
+// `drop` forgets it, for a new run. Its worktree and branch stay either way.
+export async function stopLoop($: EngineInterface, root: string, drop = false): Promise<void> {
   const rec = await readLoop($, root)
-  if (rec !== undefined) await writeLoop($, { ...rec, current: undefined, retries: 0, wakes: 0 })
+  if (rec !== undefined && drop) await writeLoop($, { ...rec, current: undefined, retries: 0, wakes: 0 })
   await update($, goalAtom, () => null)
   await update($, viewAtom, () => null)
 }
@@ -316,7 +319,7 @@ export function guardRefusal(e: Record<string, unknown>, view: LoopView | null, 
   if (runOn || view !== null) {
     if (tool === 'AskUserQuestion') return `auto-claude run: nobody can answer. Decide with a stated assumption (the recommended or safest option), or call ${DEFER_TOOL_ID} for an external blocker.`
     if (tool === 'EnterPlanMode') return 'auto-claude run: plan mode would hold the run; plan inline and keep working.'
-    if (tool === 'ProposeGoal') return 'auto-claude run: the loop sets each milestone as the goal itself; a session goal would block it.'
+    if (tool === 'ProposeGoal' || tool === 'mcp__goal-mode__set_goal') return 'auto-claude run: the loop sets each milestone as the goal itself; a session goal would block it.'
   }
   if (view === null) return undefined
   if (tool === 'Bash' && typeof e.command === 'string') return checkBash(e.command, view)

@@ -17,6 +17,8 @@ export type ShipItem = {
   note?: string
   // Ticks the same note came back in a row (an error that does not clear).
   repeats?: number
+  // When the current note first came (repeats counted from then).
+  noteSince?: number
   // Remedies already tried on this item (ship.ts remedy), by name.
   tried?: string[]
   // When a CI that would not finish was cancelled and run again.

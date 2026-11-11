@@ -11,10 +11,6 @@ export type GuardContext = {
 
 const DEPLOY =
   /\b(kubectl|helm)\b|\bterraform\s+apply\b|\bdocker\s+push\b|\bgcloud\b[^\n;&|]*\bdeploy\b|\bfly(ctl)?\s+deploy\b|\bvercel\b|\bwrangler\s+(deploy|publish)\b/
-// Read-only looks at what is deployed: the driver deploys, but the model may
-// read a cluster or service to debug a failed smoke check.
-const READ_ONLY_OPS =
-  /^\s*(?:\S+=\S*\s+)*(?:(?:kubectl|helm)\s+(?:-\S+\s+\S+\s+)*(?:get|logs|describe|top|version|status|list|history|explain|api-resources)\b|fly(?:ctl)?\s+(?:status|logs|releases)\b|wrangler\s+(?:tail|whoami|deployments\s+list)\b|gcloud\b[^\n]*\b(?:describe|list)\b(?![^\n]*\bdeploy\b))/
 const RESET_HARD = /\bgit\b[^\n;&|]*\breset\b[^\n;&|]*--hard\b/
 const SUDO = /(^|[\s;&|(])sudo\s/
 const PUSH = /\bgit\b[^\n;&|]*\bpush\b[^\n;&|]*/g
@@ -74,9 +70,29 @@ export function checkBash(raw: string, ctx: GuardContext): string | undefined {
   return undefined
 }
 
-// A command whose every deploy-looking segment is a read-only look is allowed.
+// Read-only looks at what is deployed: the driver deploys, but the model may
+// read a cluster or service to debug a failed smoke check. Judged on tokens,
+// not one regex (a nested-repetition regex here was a ReDoS, CodeQL js/redos).
+const READS = new Set(['get', 'logs', 'describe', 'top', 'version', 'status', 'list', 'history', 'explain', 'api-resources', 'releases', 'tail', 'whoami'])
+const WRITES = new Set(['apply', 'delete', 'create', 'replace', 'patch', 'scale', 'rollout', 'edit', 'set', 'label', 'annotate', 'cordon', 'drain', 'taint', 'exec', 'cp', 'run', 'expose', 'autoscale', 'install', 'upgrade', 'uninstall', 'rollback', 'deploy', 'publish', 'secret', 'push'])
+
+function readOnly(segment: string): boolean {
+  const tokens = segment.trim().split(/\s+/).filter(t => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t))
+  const tool = tokens[0] ?? ''
+  const verbs = tokens.slice(1).filter(t => !t.startsWith('-'))
+  // The first verb that reads or writes decides; any write at all refuses.
+  if (verbs.some(v => WRITES.has(v))) return false
+  if (tool === 'kubectl' || tool === 'helm') return verbs.some(v => READS.has(v))
+  if (tool === 'fly' || tool === 'flyctl' || tool === 'wrangler') return READS.has(verbs[0] ?? '') || (verbs[0] === 'deployments' && verbs[1] === 'list')
+  if (tool === 'gcloud') return verbs.some(v => v === 'describe' || v === 'list')
+  return false
+}
+
+// A command whose every deploy-looking piece is a read-only look is allowed.
+// Pieces are split at every separator, a single & and a command substitution
+// included, so `kubectl get $(kubectl delete ns x)` is two pieces.
 export function deploysSomething(command: string): boolean {
-  return command.split(/&&|\|\||[;|\n]/).some(segment => DEPLOY.test(segment) && !READ_ONLY_OPS.test(segment))
+  return command.split(/&&|\|\||[;|&\n`()]|\$\(/).some(segment => DEPLOY.test(segment) && !readOnly(segment))
 }
 
 function isSafeRmTarget(target: string, worktree: string): boolean {

