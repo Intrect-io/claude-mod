@@ -193,7 +193,8 @@ async function hold($: EngineInterface, r: AutoRecord, item: ShipItem, note: str
   const cause = causeOf(note)
   const streak = r.holdCause === cause ? (r.holdStreak ?? 0) + 1 : 1
   await tell($, r, `held: ${item.goal.slice(0, 60)}${item.pr !== undefined ? ` (PR #${item.pr})` : ''}: ${note.slice(0, 160)}; going on with the next milestone`)
-  return { r: { ...r, held: r.held + 1, holdCause: cause, holdStreak: streak }, item: { ...item, state: 'held', note } }
+  // A held repair frees the stacked milestones; their deploys count toward the stop.
+  return { r: { ...r, held: r.held + 1, holdCause: cause, holdStreak: streak, ...(item.repair === true ? { repair: undefined } : {}) }, item: { ...item, state: 'held', note } }
 }
 
 // GitHub's runs of a PR's branch, cancelled and run again once when its CI
@@ -241,7 +242,7 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
     if (r.ciMode === 'local') return { r, item: update({ state: 'ci' }) }
     // An SSH remote that refused (no key in an unattended shell) is pushed over https instead.
     const target = (item.tried ?? []).includes('https-push') && slug !== undefined ? httpsOf(slug) : r.remote
-    const pushed = await run($, ['git', '-C', wt, 'push', '-u', target, `${item.branch}:${item.headRef}`, ...(item.branch !== item.headRef ? ['--force-with-lease'] : [])], wt)
+    const pushed = await run($, ['git', '-C', wt, 'push', '-u', target, `${item.branch}:${item.headRef}`, ...(item.branch !== item.headRef || item.rebased === true ? ['--force-with-lease'] : [])], wt)
     if (pushed.exitCode !== 0) return { r, item: update({ note: `push failed: ${out(pushed)}` }) }
     if (item.pr !== undefined) return { r, item: update({ state: 'ci', since: now, note: undefined, rerunAt: undefined }) }
     const made = await run($, ['gh', 'pr', 'create', ...repo, '--head', item.headRef, '--base', r.defaultBranch, '--title', item.goal.slice(0, 120), '--body', `Milestone of an auto-claude run.\n\nCheck: \`${item.check ?? '-'}\`\n\nPlan: .claude/auto-plan.md (local to the run).`], wt)
@@ -323,7 +324,7 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
       await run($, ['git', '-C', r.root, 'worktree', 'remove', path], r.root)
     }
     const landed = item.pr !== undefined ? `PR #${item.pr}` : `into ${r.defaultBranch}`
-    let next: AutoRecord = { ...r, merges: r.merges + 1, holdStreak: 0, holdCause: undefined }
+    let next: AutoRecord = { ...r, merges: r.merges + 1, holdStreak: 0, holdCause: undefined, ...(item.repair === true ? { repair: undefined } : {}) }
     await tell($, next, `merged ${landed}: ${item.goal.slice(0, 80)}`)
     const merged = update({ state: 'merged', note: undefined })
     if (r.deploy !== undefined) next = await deployAfter($, next, r.deploy, landed)
@@ -361,9 +362,10 @@ async function deployFailed($: EngineInterface, r: AutoRecord, spec: DeploySpec,
   const fails = (r.deployFails ?? 0) + 1
   const next: AutoRecord = { ...r, deployFails: fails, deployDue: true }
   if (fails >= MAX_DEPLOY_FAILS) return stopRun($, next, `${why}; ${fails} deploys failed in a row, so nothing more is merged on top of what is live`)
-  await appendQueue($, r.root, deployFixLine(spec.command, spec.smoke, why, refOf(r)))
+  const line = deployFixLine(spec.command, spec.smoke, why, refOf(r))
+  await appendQueue($, r.root, line)
   await tell($, next, `${why}; a milestone that repairs the deploy goes first (deploy failure ${fails}/${MAX_DEPLOY_FAILS})`)
-  return next
+  return { ...next, repair: parseQueue(line)[0]!.condition }
 }
 
 async function finalCheck($: EngineInterface, r: AutoRecord, caps: Caps): Promise<AutoRecord> {
@@ -450,8 +452,9 @@ async function shipSteps($: EngineInterface, r: AutoRecord): Promise<AutoRecord>
   for (let steps = 0; steps < MAX_STEPS && r.on; steps++) {
     let item = inFlight(r.ships)
     if (item === undefined) {
-      // The milestone ahead landed or was held: the first stacked one goes next.
-      const waiting = r.ships.find(s => s.state === 'stacked')
+      // The milestone ahead landed or was held: the first stacked one goes next,
+      // unless the deploy is being repaired (nothing merges on top of it).
+      const waiting = r.repair === undefined ? r.ships.find(s => s.state === 'stacked') : undefined
       if (waiting === undefined) break
       const moved = await unstack($, r, waiting)
       r = { ...moved.r, ships: moved.r.ships.map(s => (s.headRef === waiting.headRef ? moved.item : s)) }
@@ -486,7 +489,7 @@ async function unstack($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
   const rebased = await run($, ['git', '-C', wt, ...args], wt)
   const now = await $.clock.now()
   const { onto: _done, ...rest } = item
-  if (rebased.exitCode === 0) return { r, item: { ...rest, state: 'push', since: now } }
+  if (rebased.exitCode === 0) return { r, item: { ...rest, state: 'push', since: now, rebased: true } }
   await run($, ['git', '-C', wt, 'rebase', '--abort'], wt)
   const how = onto !== undefined ? `git rebase --onto ${refOf(r)} ${onto}` : `git rebase ${refOf(r)}`
   const failure = `it was built on a milestone that has since landed or been held, and does not rebase onto ${r.defaultBranch}; run ${how} and resolve the conflicts: ${out(rebased).slice(0, 120)}`
@@ -503,7 +506,7 @@ async function treat($: EngineInterface, r: AutoRecord, item: ShipItem, now: num
     return { r, item: { ...item, tried: [...(item.tried ?? []), 'https-push'] } }
   }
   if (remedy === 'diagnose') {
-    const asked = { ...item, tried: [...(item.tried ?? []), 'diagnose'] }
+    const asked = { ...item, tried: [...(item.tried ?? []), 'diagnose'], askedAt: now }
     return { r, item: (await askModel($, r, asked)) ? asked : item }
   }
   if (remedy === 'hold') return hold($, r, item, `stuck at ${item.state} for ${item.repeats} checks: ${item.note ?? ''}`)
@@ -610,6 +613,8 @@ async function readEvents($: EngineInterface, r: AutoRecord): Promise<AutoRecord
       if (r.buildOnly !== true) r = await metToShip($, r, e.goal, e.branch)
     } else if (e.event === 'blocked' || e.event === 'deferred') {
       r = { ...r, held: r.held + 1, finished: r.finished + 1 }
+      // A repair that could not be built: the stacked milestones go on, and their deploys count toward the stop.
+      if (e.goal !== undefined && e.goal === r.repair) r = { ...r, repair: undefined }
       const parent: string | undefined = e.goal === undefined ? undefined : r.fixes[e.goal]
       if (parent !== undefined) r = { ...r, ships: r.ships.map((s): ShipItem => (s.headRef === parent ? { ...s, state: 'held', note: 'its fix goal was blocked' } : s)) }
       await tell($, r, `${e.event}: ${(e.goal ?? '').slice(0, 80)}${e.reason !== undefined ? ` (${e.reason.slice(0, 100)})` : ''}; going on`)
@@ -631,8 +636,10 @@ async function metToShip($: EngineInterface, r: AutoRecord, goal: string, branch
   // waits its turn, and is rebased onto the default branch before its push.
   const onto: string | undefined = r.onto?.[branch]
   const { [branch]: _taken, ...rest } = r.onto ?? {}
-  const state = onto !== undefined || unfinished(r.ships).length > 0 ? 'stacked' : 'push'
-  return { ...r, onto: rest, ships: [...r.ships, { goal, headRef: branch, branch, worktree: wt, check, state, red: 0, since: await $.clock.now(), ...(onto !== undefined ? { onto } : {}) }] }
+  // A deploy repair, built on the default branch, ships ahead of them all.
+  const repair = goal === r.repair
+  const state = !repair && (onto !== undefined || unfinished(r.ships).length > 0) ? 'stacked' : 'push'
+  return { ...r, onto: rest, ships: [...r.ships, { goal, headRef: branch, branch, worktree: wt, check, state, red: 0, since: await $.clock.now(), ...(onto !== undefined ? { onto } : {}), ...(repair ? { repair: true } : {}) }] }
 }
 
 // A shipping error that keeps coming back goes to the session model with what

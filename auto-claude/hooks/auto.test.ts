@@ -596,7 +596,8 @@ describe('a run, github CI', () => {
     await w.clock.advance(10_000)
     expect(w.merged).toHaveLength(2)
     expect(w.rebases).toContain(`git -C ${WT2} rebase --onto origin/main tip-of-${BR1}`)
-    expect(w.pushes.some(p => p.includes(`${BR2}:${BR2}`))).toBe(true)
+    // Rebased after the session may have pushed it: pushed with a lease.
+    expect(w.pushes.find(p => p.includes(`${BR2}:${BR2}`))).toContain('--force-with-lease')
     for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
     expect(w.notifies.at(-1)).toContain('finished: the final check passed after 1 round(s). 2 merged, 0 held')
   })
@@ -621,16 +622,51 @@ describe('a run, github CI', () => {
     expect(w.adds.at(-1)).toMatch(new RegExp(`${BR2}$`))
   })
 
-  test('nothing is stacked while the deploy is broken: its repair goes first', { timeoutMs: 30_000 }, async ($, on) => {
+  test('a broken deploy is repaired before a stacked milestone merges on top of it', { timeoutMs: 30_000 }, async ($, on) => {
     const w = world(on)
     w.github = true
-    w.deployExit = 1
+    w.checks = '[{"bucket":"pending"}]'
     await planned($, w, PLAN_DEPLOY)
     await meet($, w)
-    // Milestone 1 landed and its deploy failed: the repair line, from main, comes before milestone 2.
+    // Milestone 2 is built and stacked while milestone 1 waits on CI.
+    await meet($, w)
+    w.deployExit = 1
+    w.checks = '[{"bucket":"pass"}]'
+    await w.clock.advance(10_000)
+    // Milestone 1 landed, its deploy failed: milestone 2 stays stacked, the repair is built from main.
     expect(w.merged).toHaveLength(1)
+    expect(deployRuns(w).filter(r => r.includes('deploy.sh'))).toHaveLength(1)
+    expect((await cmd($, 'status')).text).toContain('- stacked: sub() returns a-b')
     expect(w.adds.at(-1)).toMatch(/origin\/main$/)
     expect(w.prompts.at(-1)).toMatch(/deploy/i)
+    // The repair lands first and deploys; only then does milestone 2 go.
+    w.deployExit = 0
+    await meet($, w)
+    expect(w.merged).toHaveLength(3)
+    const order = w.pushes.filter(p => p.includes(' push -u ')).map(p => p.split(' ').find(t => t.includes(':goal/'))?.split(':')[1])
+    expect(order.indexOf(BR2)).toBeGreaterThan(order.findIndex(b => b?.startsWith('goal/03-')))
+    expect((await cmd($, 'status')).text).toContain('3 merged, 0 held')
+  })
+
+  test('a shipping error is not held before the model was asked: the question waits while it builds another milestone', { timeoutMs: 30_000 }, async ($, on) => {
+    const w = world(on)
+    w.github = true
+    w.gitGone = true
+    await planned($, w)
+    await meet($, w)
+    // Milestone 2 is built for 20 min while milestone 1's push keeps failing.
+    await turnStart($)
+    for (let i = 0; i < 40; i++) await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.includes('held: add() returns a+b'))).toBe(false)
+    expect(w.prompts.filter(p => p.includes('[auto-claude] Shipping is stuck'))).toHaveLength(0)
+    await meet($, w)
+    await w.clock.advance(TICK)
+    expect(w.prompts.filter(p => p.includes('[auto-claude] Shipping is stuck'))).toHaveLength(1)
+    // It gets 10 min to act before the hold.
+    for (let i = 0; i < 16; i++) await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.includes('held: add() returns a+b'))).toBe(false)
+    for (let i = 0; i < 6; i++) await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.includes('held: add() returns a+b'))).toBe(true)
   })
 
   test('only required checks decide: a red check that is not required does not block the merge (P1)', async ($, on) => {

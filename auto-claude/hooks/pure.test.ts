@@ -175,6 +175,11 @@ describe('ship', () => {
     // Ten fast CI looks are under two minutes: a short outage is not held.
     expect(shipRemedy({ note: 'x', repeats: 10, tried: ['diagnose'], noteSince: 0 }, 2 * MIN)).toBeUndefined()
     expect(shipRemedy({ note: 'x', repeats: 10, tried: ['diagnose'], noteSince: 0 }, 15 * MIN)).toBe('hold')
+    // Never held before the model was asked (it was busy building): asked first, then given 10 min; held unasked only after an hour.
+    expect(shipRemedy({ note: 'x', repeats: 40, noteSince: 0 }, 30 * MIN)).toBe('diagnose')
+    expect(shipRemedy({ note: 'x', repeats: 40, noteSince: 0, askedAt: 30 * MIN }, 35 * MIN)).toBeUndefined()
+    expect(shipRemedy({ note: 'x', repeats: 40, noteSince: 0, askedAt: 30 * MIN }, 40 * MIN)).toBe('hold')
+    expect(shipRemedy({ note: 'x', repeats: 120, noteSince: 0 }, 60 * MIN)).toBe('hold')
     expect(shipRemedy({ repeats: 30 }, 0)).toBeUndefined()
     // The runs the driver cancelled to re-run them are not a red CI.
     expect(onlyCancelled('[{"bucket":"cancel"},{"bucket":"pass"}]')).toBe(true)
@@ -222,8 +227,9 @@ describe('ship', () => {
     expect(startBase({ ships: [ship('a', 'ci'), ship('b', 'stacked')] }, {}, 'origin/main')).toEqual({ base: 'b', stacked: true })
     expect(MAX_AHEAD).toBe(2)
     expect(startBase({ ships: [ship('a', 'ci'), ship('b', 'stacked'), ship('c', 'stacked')] }, {}, 'origin/main')).toBeUndefined()
-    // A broken deploy: its repair goes first, nothing piles on.
-    expect(startBase({ ships: [ship('a', 'ci')], deployFails: 1 }, {}, 'origin/main')).toBeUndefined()
+    // A deploy under repair: the repair goes first, nothing piles on.
+    expect(startBase({ ships: [ship('a', 'stacked')], repair: 'repair it' }, {}, 'origin/main')).toBeUndefined()
+    expect(startBase({ ships: [ship('a', 'stacked')], repair: 'repair it' }, { base: 'origin/main' }, 'origin/main')).toEqual({ base: 'origin/main', stacked: false })
     expect(unfinished([ship('a', 'merged'), ship('b', 'fixing'), ship('c', 'stacked')]).map(s => s.headRef)).toEqual(['b', 'c'])
     expect(inFlight([ship('c', 'stacked')])).toBeUndefined()
   })

@@ -242,19 +242,26 @@ export function ciAction(item: Pick<ShipItem, 'state' | 'since' | 'rerunAt' | 'n
 // hold: give up on the milestone and go on.
 // A hold also needs HOLD_MIN_MS since the error first came: with CI looked at
 // every 10 s, ten checks are under two minutes, and a short GitHub outage must
-// not drop a finished milestone.
+// not drop a finished milestone. Nor is anything held before the model was
+// asked and had ASKED_WAIT_MS to act: the question waits while the session
+// builds another milestone, up to UNASKED_HOLD_MS, then the hold goes ahead.
 export const DIAGNOSE_AT = 5
 export const HOLD_AT = 10
 export const HOLD_MIN_MS = 15 * 60_000
+export const ASKED_WAIT_MS = 10 * 60_000
+export const UNASKED_HOLD_MS = 60 * 60_000
 
-export function shipRemedy(item: Pick<ShipItem, 'note' | 'repeats' | 'tried' | 'noteSince'>, now: number): 'https-push' | 'diagnose' | 'hold' | undefined {
+export function shipRemedy(item: Pick<ShipItem, 'note' | 'repeats' | 'tried' | 'noteSince' | 'askedAt'>, now: number): 'https-push' | 'diagnose' | 'hold' | undefined {
   if (item.note === undefined) return undefined
   const tried = item.tried ?? []
   const repeats = item.repeats ?? 0
   if (/Permission denied \(publickey\)|Host key verification failed|Could not read from remote repository/i.test(item.note) && !tried.includes('https-push')) return 'https-push'
-  if (repeats >= HOLD_AT && now - (item.noteSince ?? now) >= HOLD_MIN_MS) return 'hold'
-  if (repeats >= DIAGNOSE_AT && !tried.includes('diagnose')) return 'diagnose'
-  return undefined
+  if (repeats < DIAGNOSE_AT) return undefined
+  const since = item.noteSince ?? now
+  // A record from before askedAt: the diagnosis went out with its note.
+  const asked = item.askedAt ?? (tried.includes('diagnose') ? since : undefined)
+  if (asked === undefined) return now - since >= UNASKED_HOLD_MS ? 'hold' : 'diagnose'
+  return repeats >= HOLD_AT && now - since >= HOLD_MIN_MS && now - asked >= ASKED_WAIT_MS ? 'hold' : undefined
 }
 
 // The class of a hold's cause: two milestones in a row held for the same class
@@ -305,11 +312,11 @@ export function unfinished(ships: readonly ShipItem[]): ShipItem[] {
 // base (a fix goal): there. Else it is stacked on the branch of the last
 // milestone still shipping, at most MAX_AHEAD deep, and never while the live
 // deploy is broken (its repair goes first). undefined: not yet.
-export function startBase(r: Pick<AutoRecord, 'ships' | 'deployFails'>, next: { base?: string }, defaultRef: string): { base: string; stacked: boolean } | undefined {
+export function startBase(r: Pick<AutoRecord, 'ships' | 'repair'>, next: { base?: string }, defaultRef: string): { base: string; stacked: boolean } | undefined {
   const open = unfinished(r.ships)
   if (next.base !== undefined) return { base: next.base, stacked: false }
   if (open.length === 0) return { base: defaultRef, stacked: false }
-  if ((r.deployFails ?? 0) > 0 || open.length > MAX_AHEAD) return undefined
+  if (r.repair !== undefined || open.length > MAX_AHEAD) return undefined
   return { base: open[open.length - 1]!.branch, stacked: true }
 }
 
