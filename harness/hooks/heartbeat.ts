@@ -10,7 +10,7 @@ import type { PromptHook } from './state'
 // because it fired during collaboration (memory feedback_heartbeat_vs_collab,
 // 2026-04-26), so here it starts only on `/harness heartbeat start`, fires only
 // after the user has been idle a whole interval with no turn running, and
-// never while goal-mode's loop is driving the same repo. Each fire asks for
+// never while auto-claude's loop is driving the same repo. Each fire asks for
 // the heartbeat-loop skill with the facts gathered here; the skill decides the work.
 
 const heartbeatAtom = atom({ plugin: 'harness', key: 'heartbeat' } as const, INITIAL_HEARTBEAT, { shape: 'heartbeat-1' })
@@ -35,7 +35,7 @@ export function parseInterval(text: string): number | undefined {
 export function holdReason(s: HeartbeatState, now: number, goalLoopActive: boolean): string | undefined {
   if (!s.on) return 'off'
   if (s.busy) return 'a turn is running'
-  if (goalLoopActive) return "goal-mode's loop is active in this repo"
+  if (goalLoopActive) return "auto-claude's loop is active in this repo"
   if (now - s.lastUserAt < s.intervalMs) return 'the user was active within the interval'
   if (now - s.lastFireAt < s.intervalMs) return 'fired within the interval'
 
@@ -148,7 +148,7 @@ export async function heartbeatCommand($: EngineInterface, args: readonly string
   if (action === 'start') {
     const ms = parseInterval(interval)
     if (ms === undefined) return `Interval "${interval}" is not readable or under a minute; e.g. 5m, 90s.`
-    if (await goalLoopActive($, now)) return "goal-mode's loop is active in this repo; the heartbeat would fight it for prompts. Stop that loop first."
+    if (await goalLoopActive($, now)) return "auto-claude's loop is active in this repo; the heartbeat would fight it for prompts. Stop that loop first."
     const s = await update($, heartbeatAtom, v => ({ ...v, on: true, intervalMs: ms, lastUserAt: now, lastFireAt: 0, busy: false, firing: false }))
     await segment($, heartbeatPiece(s, now))
 

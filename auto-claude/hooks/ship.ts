@@ -1,7 +1,7 @@
 import type { AutoRecord, ShipItem } from '../types'
 
 // The loop's JSONL log as events, from after the last line already read.
-// goal-mode keeps only its last 2000 lines (LOOP_LOG_MAX_LINES), so once the
+// The loop keeps only its last 2000 lines (loop.ts LOG_MAX_LINES), so once the
 // log is full its line count stops growing: a line offset alone then reads
 // nothing new, ever. The cursor is the last line read (each carries a ts),
 // looked for backwards from where it was; `offset` alone is the fallback for
@@ -14,7 +14,7 @@ export function readLog(text: string, offset: number, last?: string): { entries:
   if (last !== undefined) {
     // The line moves only towards the start when the log is trimmed.
     const at = lines.lastIndexOf(last, Math.min(offset, lines.length) - 1)
-    // Not found in a log shorter than what was read: goal-mode rewrites the
+    // Not found in a log shorter than what was read: the loop rewrites the
     // whole file on each append, so this is a read in the middle of that
     // write. Nothing is read and the cursor stays; the next tick sees it whole.
     // (A log cleared by hand reads the same way, until the caller decides it
@@ -49,16 +49,12 @@ export function readLog(text: string, offset: number, last?: string): { entries:
   return { entries, offset: cursor, last: cursorLine }
 }
 
-// goal-loop.gate as goal-mode reads it: starts still allowed, undefined for none.
-export function gateCredit(text: string | undefined): number | undefined {
-  if (text === undefined || text.trim() === '') return undefined
-  const n = Number.parseInt(text.trim(), 10)
-  return Number.isFinite(n) && n >= 0 ? n : undefined
-}
-
 export type Checks = 'pending' | 'green' | 'red' | 'none'
 
-// `gh pr checks <n> --json bucket`: an array of { bucket: pass|fail|pending|skipping|cancel }.
+// `gh pr checks <n> --required --json bucket`: an array of { bucket: pass|fail|pending|skipping|cancel }.
+// Only required checks decide (measured in vega-agent: a failing check that was
+// not required read as a red CI 6679 ticks in a row, for 16 h); a repository
+// with no required checks makes gh fail, and every check counts then.
 export function parseChecks(json: string): Checks {
   let rows: Array<{ bucket?: string }>
   try {
@@ -83,6 +79,11 @@ export function mergeable(json: string): { open: boolean; merged: boolean; confl
   } catch {
     return { open: false, merged: false, conflict: false, unknown: true }
   }
+}
+
+// gh's answer to --required on a repository without required checks.
+export function noRequired(r: { exitCode: number; stdout: string; stderr: string }): boolean {
+  return r.exitCode !== 0 && /no required checks/i.test(`${r.stdout}\n${r.stderr}`)
 }
 
 export function prNumber(output: string): number | undefined {
@@ -121,8 +122,8 @@ export type StallFacts = {
   // The session asking (/auto-claude status), and whether the record's owner may be stale.
   sessionId?: string
   staleMs: number
-  // .claude/goal-loop.gate as goal-mode reads it.
-  credit?: number
+  // How long the session has had no turn while a milestone is being built (undefined: a turn runs, or none is open).
+  quietMs?: number
   // What the plan files lack, while planning.
   planErrors: readonly string[]
   maxNudges: number
@@ -155,16 +156,12 @@ export function diagnose(r: AutoRecord, f: StallFacts): string | undefined {
   if (item !== undefined && item.note !== undefined && (item.repeats ?? 0) >= 1) {
     return `shipping stuck at ${item.state}${item.pr !== undefined ? ` (PR #${item.pr})` : ''}: the same error ${(item.repeats ?? 0) + 1} checks in a row: ${item.note.slice(0, 200)}`
   }
-  const idle = r.finished >= r.started && (item === undefined || item.state === 'fixing')
-  // One loop on whose start the next tick has not read yet is no stall: it
-  // takes a second ask (the watchdog's) to say the grant is not being taken.
-  if (r.phase === 'run' && idle && (f.credit ?? 0) > 0 && (r.kicks ?? 0) >= 2) {
-    const reply = (r.kickReply ?? 'no reply').replace(/\s+/g, ' ').slice(0, 200)
-    return `a granted start is not taken: /goal-mode loop on ran ${r.kicks}× (last ${r.kickedAt !== undefined ? ago(f.now, r.kickedAt) : 'at an unknown time'}) and answered: ${reply}`
+  if (r.phase === 'run' && r.started > r.finished && f.quietMs !== undefined && f.quietMs >= LOOP_QUIET_MS) {
+    return `the session has done nothing for ${Math.round(f.quietMs / 60_000)} min while a milestone is open; the watchdog prompts it again`
   }
   const stuck = r.phase === 'run' ? ciStuck(r, f.now) : undefined
   if (stuck !== undefined) {
-    return `PR #${stuck.pr ?? '?'} has waited ${stuck.minutes} min for CI to finish or GitHub to decide it can merge (a queued check with no runner?); gh pr checks ${stuck.pr ?? ''} shows which`
+    return `PR #${stuck.pr ?? '?'} has waited ${stuck.minutes} min for CI to finish or GitHub to decide it can merge (a queued check with no runner?)`
   }
   if (r.phase === 'run' && f.idleMs !== undefined && f.idleMs >= IDLE_NUDGE_MS && !isWaiting(r, f.now)) {
     return `idle ${Math.round(f.idleMs / 60_000)} min: nothing was started, shipped or merged`
@@ -202,17 +199,85 @@ export function progressSig(r: Pick<AutoRecord, 'started' | 'finished' | 'merges
 // a self-hosted runner that is offline stays pending for good.
 export const CI_STUCK_MS = 90 * 60_000
 
-// The in-flight PR waiting past CI_STUCK_MS, with how long, else undefined.
+// Every run of the PR still queued (none started) this long means no runner
+// will take it: no need to wait the whole CI_STUCK_MS.
+export const CI_QUEUED_MS = 30 * 60_000
+
+// The in-flight PR waiting past CI_STUCK_MS (since it was opened or its CI
+// last re-run), with how long, else undefined.
 export function ciStuck(r: Pick<AutoRecord, 'ships'>, now: number): { pr?: number; minutes: number } | undefined {
   const item = inFlight(r.ships)
-  if (item?.state !== 'ci' || item.note !== undefined || now - item.since < CI_STUCK_MS) return undefined
+  if (item?.state !== 'ci' || item.note !== undefined) return undefined
+  const from = item.rerunAt ?? item.since
+  if (now - from < CI_STUCK_MS) return undefined
   return { pr: item.pr, minutes: Math.round((now - item.since) / 60_000) }
 }
 
+// What to do about a PR whose CI does not finish: re-run it once (cancelling
+// what is queued), then hold it. `allQueued`: gh run list shows every run still queued.
+export function ciAction(item: Pick<ShipItem, 'state' | 'since' | 'rerunAt' | 'note'>, now: number, allQueued: boolean): 'rerun' | 'hold' | undefined {
+  if (item.state !== 'ci' || item.note !== undefined) return undefined
+  const from = item.rerunAt ?? item.since
+  const waited = now - from
+  if (waited < CI_STUCK_MS && !(allQueued && waited >= CI_QUEUED_MS)) return undefined
+  return item.rerunAt === undefined ? 'rerun' : 'hold'
+}
+
+// A shipping error that keeps coming back: what is tried, in order.
+// https-push: an SSH remote refused (a key not loaded in an unattended shell);
+// the push goes to the https URL of the same repository once.
+// diagnose: the session model gets the error and what was tried, to fix what
+// it can (gh auth, a remote, a branch).
+// hold: give up on the milestone and go on.
+export const DIAGNOSE_AT = 5
+export const HOLD_AT = 10
+
+export function shipRemedy(item: Pick<ShipItem, 'note' | 'repeats' | 'tried'>): 'https-push' | 'diagnose' | 'hold' | undefined {
+  if (item.note === undefined) return undefined
+  const tried = item.tried ?? []
+  const repeats = item.repeats ?? 0
+  if (/Permission denied \(publickey\)|Host key verification failed|Could not read from remote repository/i.test(item.note) && !tried.includes('https-push')) return 'https-push'
+  if (repeats >= HOLD_AT) return 'hold'
+  if (repeats >= DIAGNOSE_AT && !tried.includes('diagnose')) return 'diagnose'
+  return undefined
+}
+
+// The class of a hold's cause: two milestones in a row held for the same class
+// is a problem of the whole run (no CI runner, gh not logged in), and the run
+// stops instead of holding every milestone after them.
+export function causeOf(note: string): string {
+  if (/waited \d+ min for CI|CI did not finish/i.test(note)) return 'ci-stuck'
+  if (/publickey|authenticat|auth login|HTTP 40[13]|credential/i.test(note)) return 'auth'
+  if (/Head sha can't be blank|Head ref must be a branch|could not resolve to a Repository/i.test(note)) return 'gh-repo'
+  if (/CI failed/i.test(note)) return 'ci-red'
+  if (/conflict/i.test(note)) return 'conflict'
+  if (/deploy/i.test(note)) return 'deploy'
+  if (/worktree|branch .* gone/i.test(note)) return 'worktree'
+  if (/push/i.test(note)) return 'push'
+  return 'other'
+}
+
+// The https URL of a GitHub repository, for a push an SSH remote refused.
+export function httpsOf(slug: string): string {
+  return `https://github.com/${slug}.git`
+}
+
+// A session with a milestone open and no turn for this long is not building it
+// (a dropped prompt, an interrupt, a turn that ended to "wait"): the watchdog
+// prompts it again, backing off, LOOP_WAKES times, then blocks the milestone.
+export const LOOP_QUIET_MS = 3 * 60_000
+export const LOOP_WAKES = 3
+
+// The wait before wake number `wakes + 1`: 3, 6, then 12 min of quiet.
+export function wakeDue(quietMs: number, wakes: number): boolean {
+  return quietMs >= LOOP_QUIET_MS * 2 ** Math.min(wakes, 4)
+}
+
 // Waiting on something that has its own clock is not idle: the loop building a
-// goal, or a PR's CI pending with nothing wrong, for up to CI_STUCK_MS.
-export function isWaiting(r: Pick<AutoRecord, 'started' | 'finished' | 'ships'>, now: number): boolean {
-  if (r.started > r.finished) return true
+// goal (while the session works on it), or a PR's CI pending with nothing
+// wrong, for up to CI_STUCK_MS.
+export function isWaiting(r: Pick<AutoRecord, 'started' | 'finished' | 'ships'>, now: number, quietMs?: number): boolean {
+  if (r.started > r.finished) return quietMs === undefined || quietMs < LOOP_QUIET_MS
   const item = inFlight(r.ships)
   return item?.state === 'ci' && item.note === undefined && ciStuck(r, now) === undefined
 }

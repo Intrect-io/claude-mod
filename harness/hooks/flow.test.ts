@@ -372,13 +372,13 @@ describe('phase 3', () => {
     expect(submitted).toHaveLength(1)
   })
 
-  test("heartbeat refuses to start while goal-mode's loop is active", async ($, on) => {
+  test("heartbeat refuses to start while auto-claude's loop is active", async ($, on) => {
     world(on)
     mock.clock(on, { now: 1_000_000 })
     on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: 999_000, isLink: false } }))
     on('ui.status', () => ({ value: undefined }))
     await start($)
-    expect((await command($, 'heartbeat start 5m')).text).toContain('goal-mode')
+    expect((await command($, 'heartbeat start 5m')).text).toContain("auto-claude's loop")
   })
 
   test('commit_preflight reports branch, files, PR and issue IDs', async ($, on) => {

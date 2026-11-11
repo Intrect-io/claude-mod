@@ -1,0 +1,382 @@
+import { describe, expect, test } from 'claude-code/testing'
+
+import { countSarif, parseDeploy, scriptsOf, specOfPlan } from './deploy'
+import { parseVerdict, transcriptTail } from './evaluator'
+import { checkBash, checkPath, deploysSomething, uncommitted } from './guard'
+import { maxBranchSeq } from './loop'
+import { deployFixLine, deployOf, finalCheckOf, fixLine, kickoffText, POLICY, validatePlan } from './plan'
+import { markItem, nextPending, parseQueue, slugify, summarize } from './queue'
+import { capReached, causeOf, ciAction, httpsOf, idleDue, inFlight, isWaiting, mergeable, noRequired, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, wakeDue } from './ship'
+
+const PLAN = '## Goal\nadd and sub work\n\nFinal check: `python3 -m unittest -q`\nDeploy: `bash scripts/deploy.sh`\nSmoke check: `curl -fsS http://localhost:8080/health`\nCodeQL: python\n\n## Milestones\n1. add\n2. sub\n\n## Decisions\n'
+const QUEUE = '- [ ] add() returns a+b :: check: python3 -m unittest -q test_add\n- [ ] sub() returns a-b :: check: python3 -m unittest -q test_sub\n'
+const MIN = 60_000
+
+describe('plan', () => {
+  test('the queue grammar (generated from shared/queue.ts), :: base: and notes included', () => {
+    expect(parseQueue('- [ ] a :: check: x :: base: goal/01-a\n- [x] b <!-- done -->\n- [!] c :: check: y')).toEqual([
+      { line: 0, mark: ' ', condition: 'a', check: 'x', base: 'goal/01-a' },
+      { line: 1, mark: 'x', condition: 'b', check: undefined, note: 'done' },
+      { line: 2, mark: '!', condition: 'c', check: 'y' },
+    ])
+  })
+
+  test('a plan needs a final check and checked milestones', () => {
+    expect(finalCheckOf(PLAN)).toBe('python3 -m unittest -q')
+    expect(finalCheckOf('- **Final check**: make test')).toBe('make test')
+    expect(validatePlan(PLAN, QUEUE, true)).toMatchObject({ ok: true, finalCheck: 'python3 -m unittest -q' })
+    const bad = validatePlan('## Goal\nx', '- [ ] only one\n', true)
+    expect(bad.ok).toBe(false)
+    expect(!bad.ok && bad.errors.join(' ')).toContain('no "Final check')
+    expect(!bad.ok && bad.errors.join(' ')).toContain('at least 2')
+    expect(!bad.ok && bad.errors.join(' ')).toContain('without a check')
+    expect(validatePlan(PLAN, `${QUEUE}- [ ] add() returns a+b :: check: z\n`, true).ok).toBe(false)
+    // A later round needs only one new milestone.
+    expect(validatePlan(PLAN, '- [x] a :: check: x\n- [ ] b :: check: y\n', false).ok).toBe(true)
+    expect(validatePlan(PLAN, '- [ ] a :: check: x :: base: main\n- [ ] b :: check: y\n', true).ok).toBe(false)
+    // Shipping and deploying are not a milestone's end state.
+    const shipped = validatePlan(PLAN, '- [ ] add works, merged to main :: check: x\n- [ ] b :: check: y\n', true)
+    expect(!shipped.ok && shipped.errors.join(' ')).toContain('merging, pushing, PRs and deploying happen after')
+    expect(validatePlan(PLAN, '- [ ] the API is deployed to fly :: check: x\n- [ ] b :: check: y\n', true).ok).toBe(false)
+    // Writing the deploy script is a milestone; being deployed is not.
+    expect(validatePlan(PLAN, '- [ ] scripts/deploy.sh deploys the API to fly :: check: x\n- [ ] b :: check: y\n', true).ok).toBe(true)
+  })
+
+  test('a plan says how the run deploys (P6): command, smoke check and CodeQL, or none with a reason', () => {
+    expect(deployOf(PLAN)).toEqual({ deploy: { kind: 'command', command: 'bash scripts/deploy.sh', smoke: 'curl -fsS http://localhost:8080/health', codeql: ['python'] }, errors: [] })
+    const noDeploy = PLAN.replace(/Deploy:.*\n/, '')
+    expect(validatePlan(noDeploy, QUEUE, true)).toMatchObject({ ok: false })
+    expect((validatePlan(noDeploy, QUEUE, true) as { errors: string[] }).errors.join(' ')).toContain('no "Deploy:')
+    // .claude/auto-deploy.json decides instead: no Deploy line needed.
+    expect(validatePlan(noDeploy, QUEUE, true, true).ok).toBe(true)
+    // None needs its reason.
+    const none = (d: string) => PLAN.replace(/Deploy:.*\n/, `Deploy: ${d}\n`).replace(/Smoke check:.*\n/, '').replace(/CodeQL:.*\n/, '')
+    expect(validatePlan(none('none'), QUEUE, true).ok).toBe(false)
+    expect(validatePlan(none('none (a library; nothing runs anywhere)'), QUEUE, true)).toMatchObject({ ok: true, deploy: { kind: 'none', reason: 'a library; nothing runs anywhere' } })
+    // A command needs its smoke check and its CodeQL line.
+    const noSmoke = deployOf(PLAN.replace(/Smoke check:.*\n/, ''))
+    expect(noSmoke.errors.join(' ')).toContain('Smoke check')
+    const noCodeql = deployOf(PLAN.replace(/CodeQL:.*\n/, ''))
+    expect(noCodeql.errors.join(' ')).toContain('CodeQL')
+    expect(deployOf(PLAN.replace('CodeQL: python', 'CodeQL: none (no code)')).deploy).toMatchObject({ codeql: [] })
+    expect(deployOf(PLAN.replace('CodeQL: python', 'CodeQL: none')).errors.join(' ')).toContain('needs its reason')
+    expect(deployOf(PLAN.replace('CodeQL: python', 'CodeQL: python, javascript')).deploy).toMatchObject({ codeql: ['python', 'javascript'] })
+  })
+
+  test('the kickoff aims at the end state, live, and asks nobody (P6)', () => {
+    const k = kickoffText('finish the CLI', 'origin/main')
+    expect(k).toContain('Their aim: finish the CLI')
+    expect(k).toContain('long-term end state')
+    expect(k).toContain('from origin/main')
+    expect(k).toContain('decide every choice yourself')
+    expect(k).toContain('merged, deployed and smoke-checked')
+    expect(k).toContain('Never plan "the person deploys')
+    expect(k).toContain('Deploy: <one shell command>')
+    expect(k).not.toContain('Plan no deploy')
+    // A committed deploy file decides instead.
+    const fixed = kickoffText('', 'origin/main', false, 'make ship')
+    expect(fixed).toContain('auto-deploy.json is committed')
+    expect(fixed).not.toContain('Deploy: <one shell command>')
+  })
+
+  test('the policy keeps the model from handing the run back to the person (P4, P5)', () => {
+    expect(POLICY).toContain('never ask the person to run /auto-claude')
+    expect(POLICY).toContain('just end the turn')
+    expect(POLICY).toContain('never call ProposeGoal or /goal')
+    expect(POLICY).toContain('mcp__auto-claude__defer_goal')
+    expect(POLICY).not.toContain('goal-mode')
+  })
+
+  test('a fix line builds on the failing branch with the milestone\'s check; a deploy fix on the default branch', () => {
+    const line = fixLine('add() returns a+b', 7, 'CI failed', 'pytest -q', 'goal/01-add')
+    expect(parseQueue(line)[0]).toMatchObject({ check: 'pytest -q', base: 'goal/01-add' })
+    expect(line).toContain('PR #7')
+    const d = parseQueue(deployFixLine('bash deploy.sh', 'curl -f x', 'the smoke check exited 7', 'make test', 'origin/main'))[0]
+    expect(d).toMatchObject({ check: 'make test', base: 'origin/main' })
+    expect(d?.condition).toContain('`curl -f x` passes after `bash deploy.sh`')
+    expect(d?.condition).toContain('the smoke check exited 7')
+  })
+})
+
+describe('ship', () => {
+  test('log tail reads from the offset and survives a trimmed log', () => {
+    const log = '{"event":"start","branch":"goal/01-a"}\n{"event":"met","goal":"a","branch":"goal/01-a"}\nnot json\n'
+    expect(readLog(log, 0).entries.map(e => e.event)).toEqual(['start', 'met'])
+    // A last line that does not parse may be torn: the cursor stays before it.
+    expect(readLog(log, 2)).toEqual({ entries: [], offset: 2, last: '{"event":"met","goal":"a","branch":"goal/01-a"}' })
+    expect(readLog(log, 99).entries).toHaveLength(2)
+  })
+
+  test('the log is followed by its last line read, so a trimmed log neither stalls nor replays', () => {
+    const line = (i: number) => JSON.stringify({ ts: `t${i}`, event: 'start', branch: `b${i}` })
+    const text = (from: number, to: number) => `${Array.from({ length: to - from }, (_, k) => line(from + k)).join('\n')}\n`
+    const first = readLog(text(0, 5), 0)
+    expect(first.last).toBe(line(4))
+    expect(readLog(text(2, 7), first.offset, first.last).entries.map(e => e.branch)).toEqual(['b5', 'b6'])
+    expect(readLog(text(0, 5), 5, line(4)).entries).toEqual([])
+    expect(readLog(text(10, 15), 5, line(4)).entries).toHaveLength(5)
+  })
+
+  test('a log read while the loop rewrites it (a prefix, a torn last line) replays nothing and loses nothing', () => {
+    const line = (i: number) => JSON.stringify({ ts: `t${i}`, event: 'start', branch: `b${i}` })
+    const text = (from: number, to: number) => `${Array.from({ length: to - from }, (_, k) => line(from + k)).join('\n')}\n`
+    const prefix = readLog(text(0, 3), 5, line(4))
+    expect(prefix.entries).toEqual([])
+    expect(prefix.last).toBe(line(4))
+    const full = text(0, 6)
+    const torn = readLog(full.slice(0, full.length - 10), 5, line(4))
+    expect(torn.entries).toEqual([])
+    expect(torn.last).toBe(line(4))
+    expect(readLog(full, torn.offset, torn.last).entries.map(e => e.branch)).toEqual(['b5'])
+  })
+
+  test('checks, mergeability and PR numbers; gh without required checks (P1)', () => {
+    expect(parseChecks('[{"bucket":"pass"},{"bucket":"skipping"}]')).toBe('green')
+    expect(parseChecks('[{"bucket":"pass"},{"bucket":"pending"}]')).toBe('pending')
+    expect(parseChecks('[{"bucket":"fail"}]')).toBe('red')
+    expect(parseChecks('')).toBe('none')
+    expect(noRequired({ exitCode: 1, stdout: '', stderr: "no required checks reported on the 'goal/01-a' branch" })).toBe(true)
+    expect(noRequired({ exitCode: 1, stdout: '', stderr: 'HTTP 502' })).toBe(false)
+    expect(noRequired({ exitCode: 0, stdout: '[]', stderr: '' })).toBe(false)
+    expect(mergeable('{"state":"OPEN","mergeable":"CONFLICTING"}')).toEqual({ open: true, merged: false, conflict: true, unknown: false })
+    expect(mergeable('{"state":"MERGED","mergeable":"UNKNOWN"}')).toEqual({ open: false, merged: true, conflict: false, unknown: false })
+    expect(prNumber('https://github.com/o/r/pull/42\n')).toBe(42)
+  })
+
+  test('gh is aimed at the pushed remote\'s repository, whatever the URL form', () => {
+    expect(repoSlug('git@github.com:o/r.git\n')).toBe('o/r')
+    expect(repoSlug('https://github.com/o/r.git')).toBe('o/r')
+    expect(repoSlug('https://github.com/o/r')).toBe('o/r')
+    expect(repoSlug('ssh://git@github.com/o/r.git')).toBe('o/r')
+    expect(repoSlug('https://example.com/o/r.git')).toBeUndefined()
+    expect(httpsOf('o/r')).toBe('https://github.com/o/r.git')
+  })
+
+  test('one milestone ships at a time; caps stop the run', () => {
+    const s = (state: 'push' | 'ci' | 'merged' | 'held', headRef: string) => ({ goal: headRef, headRef, branch: headRef, state, red: 0, since: 0 })
+    expect(inFlight([s('merged', 'a'), s('ci', 'b'), s('push', 'c')])?.headRef).toBe('b')
+    expect(inFlight([s('merged', 'a'), s('held', 'b')])).toBeUndefined()
+    expect(capReached({ merges: 20, startedAt: 0 }, { maxRounds: 3, maxMerges: 20, maxHours: 24 }, 1)).toContain('merge cap')
+    expect(capReached({ merges: 0, startedAt: 0 }, { maxRounds: 3, maxMerges: 20, maxHours: 1 }, 3600_001)).toContain('time cap')
+  })
+
+  test('a shipping error that repeats: https once for a refused SSH key, the model at 5, hold at 10 (P2)', () => {
+    const note = 'push failed: git@github.com: Permission denied (publickey).'
+    expect(shipRemedy({ note, repeats: 0 })).toBe('https-push')
+    expect(shipRemedy({ note, repeats: 1, tried: ['https-push'] })).toBeUndefined()
+    expect(shipRemedy({ note: 'gh pr create failed: Head sha can\'t be blank', repeats: 4 })).toBeUndefined()
+    expect(shipRemedy({ note: 'gh pr create failed: Head sha can\'t be blank', repeats: 5 })).toBe('diagnose')
+    expect(shipRemedy({ note: 'x', repeats: 7, tried: ['diagnose'] })).toBeUndefined()
+    expect(shipRemedy({ note: 'x', repeats: 10, tried: ['diagnose'] })).toBe('hold')
+    expect(shipRemedy({ repeats: 30 })).toBeUndefined()
+  })
+
+  test('a CI that does not finish is re-run once after 90 min (30 min when every run is still queued), then held', () => {
+    const item = { state: 'ci' as const, since: 0 }
+    expect(ciAction(item, 89 * MIN, false)).toBeUndefined()
+    expect(ciAction(item, 90 * MIN, false)).toBe('rerun')
+    expect(ciAction(item, 31 * MIN, true)).toBe('rerun')
+    expect(ciAction({ ...item, rerunAt: 90 * MIN }, 150 * MIN, false)).toBeUndefined()
+    expect(ciAction({ ...item, rerunAt: 90 * MIN }, 180 * MIN, false)).toBe('hold')
+    expect(ciAction({ ...item, note: 'push failed' }, 500 * MIN, true)).toBeUndefined()
+  })
+
+  test('hold causes are classed, so one cause holding two milestones in a row stops the run', () => {
+    expect(causeOf('CI did not finish: waited 180 min, re-run once')).toBe('ci-stuck')
+    expect(causeOf('stuck at push for 10 checks: push failed: Permission denied (publickey)')).toBe('auth')
+    expect(causeOf("gh pr create failed: Head sha can't be blank")).toBe('gh-repo')
+    expect(causeOf('after 3 failures: CI failed (gh pr checks --required)')).toBe('ci-red')
+    expect(causeOf('its worktree /x and branch goal/01 are gone')).toBe('worktree')
+  })
+
+  test('a milestone open in a quiet session is woken at 3, 6 and 12 min of quiet; quiet is not waiting (P4, P5)', () => {
+    expect(wakeDue(2 * MIN, 0)).toBe(false)
+    expect(wakeDue(3 * MIN, 0)).toBe(true)
+    expect(wakeDue(5 * MIN, 1)).toBe(false)
+    expect(wakeDue(6 * MIN, 1)).toBe(true)
+    expect(wakeDue(12 * MIN, 2)).toBe(true)
+    const building = { started: 1, finished: 0, ships: [] }
+    expect(isWaiting(building, 0)).toBe(true)
+    expect(isWaiting(building, 0, 2 * MIN)).toBe(true)
+    expect(isWaiting(building, 0, 3 * MIN)).toBe(false)
+  })
+
+  test('progressSig ignores an error note; idleDue is 15 min, then 30 min apart, at most 3', () => {
+    const ship = { goal: 'g', headRef: 'a', branch: 'a', state: 'push' as const, red: 0, since: 0 }
+    const base = { started: 1, finished: 1, merges: 0, held: 0 }
+    expect(progressSig({ ...base, ships: [ship] })).toBe(progressSig({ ...base, ships: [{ ...ship, note: 'push failed' }] }))
+    expect(progressSig({ ...base, ships: [ship] })).not.toBe(progressSig({ ...base, ships: [{ ...ship, state: 'ci' as const }] }))
+    const r = { on: true, phase: 'run' as const, movedAt: 0 }
+    expect(idleDue({ ...r }, 14 * MIN)).toBeUndefined()
+    expect(idleDue({ ...r }, 15 * MIN)).toBe(1)
+    expect(idleDue({ ...r, idleNudges: 1, idleNudgedAt: 15 * MIN }, 44 * MIN)).toBeUndefined()
+    expect(idleDue({ ...r, idleNudges: 1, idleNudgedAt: 15 * MIN }, 45 * MIN)).toBe(2)
+    expect(idleDue({ ...r, idleNudges: 3, idleNudgedAt: 75 * MIN }, 500 * MIN)).toBeUndefined()
+    expect(idleDue({ ...r, phase: 'plan' }, 500 * MIN)).toBeUndefined()
+  })
+})
+
+describe('deploy', () => {
+  test('the deploy file names a command, optional CodeQL languages, a smoke check and a bounded timeout', () => {
+    expect(parseDeploy('{"command": "bash scripts/deploy.sh"}')).toEqual({ command: 'bash scripts/deploy.sh', codeql: [], timeoutMs: 600_000, source: 'file' })
+    expect(parseDeploy('{"command": "make ship", "codeql": "python", "timeoutSec": 60, "smoke": "curl -f x"}')).toEqual({ command: 'make ship', codeql: ['python'], timeoutMs: 60_000, smoke: 'curl -f x', source: 'file' })
+    expect(parseDeploy('{"command": "x", "codeql": ["python", "javascript"], "timeoutSec": 9999}')).toMatchObject({ codeql: ['python', 'javascript'], timeoutMs: 600_000 })
+    expect(parseDeploy('{"codeql": "python"}')).toHaveProperty('error')
+    expect(parseDeploy('{"command": "x", "codeql": "py thon"}')).toHaveProperty('error')
+    expect(parseDeploy('{"command": "x", "smoke": 3}')).toHaveProperty('error')
+    expect(parseDeploy('not json')).toHaveProperty('error')
+    expect(specOfPlan({ kind: 'command', command: 'bash d.sh', smoke: 's', codeql: [] })).toEqual({ command: 'bash d.sh', codeql: [], timeoutMs: 600_000, smoke: 's', source: 'plan' })
+  })
+
+  test('the files a deploy command names, which must be on the default branch before it runs', () => {
+    expect(scriptsOf('bash scripts/deploy.sh')).toEqual(['scripts/deploy.sh'])
+    expect(scriptsOf('./deploy && python3 ops/smoke.py --x')).toEqual(['./deploy', 'ops/smoke.py'])
+    expect(scriptsOf('fly deploy --remote-only')).toEqual([])
+    expect(scriptsOf('bash /opt/global.sh')).toEqual([])
+  })
+
+  test('SARIF errors are counted by their own level, else their rule\'s default', () => {
+    const sarif = JSON.stringify({
+      runs: [
+        {
+          tool: { driver: { rules: [{ id: 'py/clear-text-logging-sensitive-data', defaultConfiguration: { level: 'error' } }, { id: 'py/log-injection' }] } },
+          results: [
+            { ruleId: 'py/clear-text-logging-sensitive-data', locations: [{ physicalLocation: { artifactLocation: { uri: 'broker.py' }, region: { startLine: 12 } } }] },
+            { ruleId: 'py/log-injection' },
+            { ruleId: 'py/log-injection', level: 'note' },
+          ],
+        },
+      ],
+    })
+    expect(countSarif(sarif)).toEqual({ errors: 1, warnings: 1, top: ['py/clear-text-logging-sensitive-data broker.py:12'] })
+    expect(countSarif('{')).toBeUndefined()
+  })
+})
+
+const QUEUE_DOC = `# goals
+
+- [x] old goal <!-- done 2026-10-24T10:00Z goal/01-old, 0 failed checks -->
+- [ ] add()가 a + b를 반환한다 :: check: pytest -q tests/test_a.py
+- [!] blocked one <!-- blocked: no creds -->
+- [ ] plain goal without check
+not a goal line
+`
+
+describe('queue', () => {
+  test('parses marks, conditions, checks and notes', async () => {
+    const items = parseQueue(QUEUE_DOC)
+    expect(items.map(item => item.mark)).toEqual(['x', ' ', '!', ' '])
+    expect(items[1]?.condition).toBe('add()가 a + b를 반환한다')
+    expect(items[1]?.check).toBe('pytest -q tests/test_a.py')
+    expect(items[0]?.note).toContain('goal/01-old')
+    expect(items[3]?.check).toBeUndefined()
+    expect(nextPending(items)?.condition).toBe('add()가 a + b를 반환한다')
+    expect(summarize(items)).toEqual({ done: 1, blocked: 1, pending: 2, total: 4 })
+  })
+
+  test('marks the pending line by its condition and keeps the check', async () => {
+    const marked = markItem(QUEUE_DOC, 'add()가 a + b를 반환한다', 'x', 'done --> now')
+    const items = parseQueue(marked)
+    expect(items[1]?.mark).toBe('x')
+    expect(items[1]?.check).toBe('pytest -q tests/test_a.py')
+    expect(items[1]?.note).toBe('done - -> now')
+    expect(nextPending(items)?.condition).toBe('plain goal without check')
+    expect(nextPending(parseQueue('- [ ] milestone 3 :: check: x\n- [ ] fix PR #2 :: check: y :: base: goal/02-b\n'))?.condition).toBe('fix PR #2')
+    expect(markItem(QUEUE_DOC, 'nope', '!', 'x')).toBe(QUEUE_DOC)
+  })
+
+  test('slugify keeps ascii words and falls back to "goal"; seq starts above the branches there are', async () => {
+    expect(slugify('Fix add() in counter.py')).toBe('fix-add-in-counter-py')
+    expect(slugify('한글만 있는 목표')).toBe('goal')
+    expect(maxBranchSeq('goal/03-a\ngoal/17-b\nfeature/x\ngoal/x\n')).toBe(17)
+    expect(maxBranchSeq('')).toBe(0)
+  })
+})
+
+const CTX = { repoRoot: '/repo', worktree: '/repo/worktrees/goal-01-x', extraDeny: ['\\bplace_order\\b'] }
+
+describe('guard', () => {
+  const cases: Array<[string, boolean]> = [
+    ['git push origin main', false],
+    ['git push origin HEAD:master', false],
+    ['git push --force origin goal/01-x', false],
+    ['git push -f origin goal/01-x', false],
+    ['git push origin +goal/01-x', false],
+    ['git push', false],
+    ['git push -u origin goal/01-x', true],
+    ['cd /repo/worktrees/goal-01-x && git push -u origin goal/01-main-fix', true],
+    ['git reset --hard HEAD~1', false],
+    ['sudo rm x', false],
+    ['kubectl apply -f x.yaml', false],
+    ['helm upgrade api ./chart', false],
+    ['wrangler deploy', false],
+    ['fly deploy', false],
+    // Read-only looks at what is deployed, to debug a smoke check.
+    ['kubectl get pods -n api', true],
+    ['kubectl -n api logs deploy/api --tail 50 | grep ERROR', true],
+    ['fly status && fly logs', true],
+    ['wrangler tail', true],
+    ['kubectl get pods && kubectl apply -f x.yaml', false],
+    ['rm -rf build', true],
+    ['rm -rf /repo/worktrees/goal-01-x/build', true],
+    ['rm -rf /repo/src', false],
+    ['rm -rf ../other', false],
+    ['rm -fr ~/x', false],
+    ['rm -r -f $HOME/x', false],
+    ['rm -r build', true],
+    ['python place_order.py', false],
+    ['pytest -q && git commit -am "fix"', true],
+    [`git add counter.py && git commit -q -m "Fix mul()\n\nAssumption: the goal asked to 'git push origin main', but the loop rules\nforbid it." && pytest -q`, true],
+    [`git commit -F - <<'EOF'\ndo not run git push --force here\nEOF\n`, true],
+    ['gh pr create --title "x" --body "never sudo rm here"', true],
+    ['bash -c "git push origin main"', false],
+    [`git commit -m "ok" && git push origin main`, false],
+  ]
+  for (const [command, allowed] of cases) {
+    test(`${allowed ? 'allows' : 'refuses'}: ${command}`, async () => {
+      expect(checkBash(command, CTX) === undefined).toBe(allowed)
+    })
+  }
+
+  test('deploysSomething looks at each segment', () => {
+    expect(deploysSomething('kubectl get pods')).toBe(false)
+    expect(deploysSomething('echo hi; kubectl delete pod x')).toBe(true)
+  })
+
+  test('uncommitted ignores cache artifacts but not tracked changes or new sources', async () => {
+    expect(uncommitted('?? __pycache__/\n?? .pytest_cache/\n?? src/a.pyc\n?? node_modules/\n')).toEqual([])
+    expect(uncommitted(' M counter.py\n?? __pycache__/\n')).toEqual([' M counter.py'])
+    expect(uncommitted('?? new_module.py\n')).toEqual(['?? new_module.py'])
+    expect(uncommitted(' M build/config.py\n')).toEqual([' M build/config.py'])
+  })
+
+  test('edits stay in the worktree; outside the repository is free', async () => {
+    expect(checkPath('/repo/worktrees/goal-01-x/a.py', CTX)).toBeUndefined()
+    expect(checkPath('/repo/a.py', CTX)).toBeDefined()
+    expect(checkPath('/repo/.claude/goals.md', CTX)).toBeDefined()
+    expect(checkPath('/repo/worktrees/goal-02-y/a.py', CTX)).toBeDefined()
+    expect(checkPath('/tmp/scratch.txt', CTX)).toBeUndefined()
+  })
+})
+
+describe('evaluator', () => {
+  test('parseVerdict reads the JSON line and rejects anything else', async () => {
+    expect(parseVerdict('{"met": true, "reason": "2 passed"}')).toEqual({ kind: 'met', reason: '2 passed' })
+    expect(parseVerdict('noise {"met": false, "reason": "x"} noise')).toEqual({ kind: 'unmet', reason: 'x' })
+    expect(parseVerdict('no json')).toMatchObject({ kind: 'unparsable' })
+    expect(parseVerdict('{"met": "yes"}')).toMatchObject({ kind: 'unparsable' })
+  })
+
+  test('transcriptTail keeps tool calls and their outputs', async () => {
+    const jsonl = [
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'fix add' } }),
+      JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Bash', input: { command: 'pytest -q' } }] } }),
+      JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: [{ type: 'text', text: '2 passed' }] }] } }),
+      'garbage',
+    ].join('\n')
+    const tail = transcriptTail(jsonl)
+    expect(tail).toContain('[user] fix add')
+    expect(tail).toContain('[tool_use Bash] {"command":"pytest -q"}')
+    expect(tail).toContain('[tool_result] 2 passed')
+  })
+})

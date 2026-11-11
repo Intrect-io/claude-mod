@@ -345,7 +345,7 @@ describe('workflow', () => {
     const s = { on: true, intervalMs: 60_000, lastUserAt: 0, lastFireAt: 0, busy: false, firing: false }
     expect(holdReason(s, 120_000, false)).toBeUndefined()
     expect(holdReason({ ...s, busy: true }, 120_000, false)).toContain('turn')
-    expect(holdReason(s, 120_000, true)).toContain('goal-mode')
+    expect(holdReason(s, 120_000, true)).toContain("auto-claude's loop")
     expect(holdReason({ ...s, lastUserAt: 100_000 }, 120_000, false)).toContain('user')
     expect(holdReason({ ...s, on: false }, 120_000, false)).toBe('off')
     expect(fireTag('[fire focus: STO-3 step 2/4]\n작업')).toBe('[fire focus: STO-3 step 2/4]')

@@ -91,11 +91,11 @@ Nudges once per turn when the final message:
 
   `~/.claude/commands/commit.md` v5 calls it first; the model writes only the message.
 - **Heartbeat:** `/harness heartbeat start [5m] | stop | status`. It never starts by itself.
-  - A fire needs all of these: a whole interval with no user prompt, no running turn, and goal-mode's loop not active in the repo (`.claude/goal-loop.log` touched within 15 minutes).
+  - A fire needs all of these: a whole interval with no user prompt, no running turn, and auto-claude's loop not active in the repo (`.claude/goal-loop.log` touched within 15 minutes).
   - A fire asks for the heartbeat-loop skill and attaches facts: branch, uncommitted files, running agents and the previous fire's tag.
   - It was once retired as a Stop hook because it fired during collaboration. These conditions are its answer to that.
 
 ## Limits
 
 - Regexes over command strings catch mistakes, not evasion. Hooks fail open.
-- Cross-plugin ordering (goal-mode's Stop vs this one) is not controlled; plugins cannot order each other.
+- Cross-plugin ordering (auto-claude's Stop vs this one) is not controlled; plugins cannot order each other.

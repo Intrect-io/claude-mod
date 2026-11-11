@@ -1,4 +1,4 @@
-// Loop-mode guards: pure checks on a tool call while an unattended loop runs.
+// Loop-mode guards: pure checks on a tool call while an auto-claude loop goal runs.
 // Each returns the refusal text, or undefined to let the call through.
 // Regexes are a second line of defence; worktree isolation and the push rules
 // are the first.
@@ -10,7 +10,11 @@ export type GuardContext = {
 }
 
 const DEPLOY =
-  /\b(kubectl|helm)\b|\bterraform\s+apply\b|\bdocker\s+push\b|\bgcloud\b[^\n;&|]*\bdeploy\b|\bfly(ctl)?\s+deploy\b|\bvercel\b/
+  /\b(kubectl|helm)\b|\bterraform\s+apply\b|\bdocker\s+push\b|\bgcloud\b[^\n;&|]*\bdeploy\b|\bfly(ctl)?\s+deploy\b|\bvercel\b|\bwrangler\s+(deploy|publish)\b/
+// Read-only looks at what is deployed: the driver deploys, but the model may
+// read a cluster or service to debug a failed smoke check.
+const READ_ONLY_OPS =
+  /^\s*(?:\S+=\S*\s+)*(?:(?:kubectl|helm)\s+(?:-\S+\s+\S+\s+)*(?:get|logs|describe|top|version|status|list|history|explain|api-resources)\b|fly(?:ctl)?\s+(?:status|logs|releases)\b|wrangler\s+(?:tail|whoami|deployments\s+list)\b|gcloud\b[^\n]*\b(?:describe|list)\b(?![^\n]*\bdeploy\b))/
 const RESET_HARD = /\bgit\b[^\n;&|]*\breset\b[^\n;&|]*--hard\b/
 const SUDO = /(^|[\s;&|(])sudo\s/
 const PUSH = /\bgit\b[^\n;&|]*\bpush\b[^\n;&|]*/g
@@ -44,7 +48,7 @@ export function checkBash(raw: string, ctx: GuardContext): string | undefined {
   }
   if (RESET_HARD.test(command)) return 'Autonomous loop: git reset --hard is refused; commit or revert instead.'
   if (SUDO.test(command)) return 'Autonomous loop: sudo is refused.'
-  if (DEPLOY.test(command)) return 'Autonomous loop: deploy and cluster commands are refused.'
+  if (deploysSomething(command)) return 'Autonomous loop: deploy and cluster commands are refused (auto-claude deploys after each merge; read-only looks such as kubectl get/logs are allowed).'
 
   for (const rm of command.matchAll(RM_RF)) {
     const flags = rm[2] ?? ''
@@ -68,6 +72,11 @@ export function checkBash(raw: string, ctx: GuardContext): string | undefined {
   }
 
   return undefined
+}
+
+// A command whose every deploy-looking segment is a read-only look is allowed.
+export function deploysSomething(command: string): boolean {
+  return command.split(/&&|\|\||[;|\n]/).some(segment => DEPLOY.test(segment) && !READ_ONLY_OPS.test(segment))
 }
 
 function isSafeRmTarget(target: string, worktree: string): boolean {
