@@ -15,7 +15,7 @@ import { checkAgentWorktree, checkMemorySecret, checkSystemPython, checkTradingO
 import { kstNow, statusCounts } from './commands'
 import { splitPorcelain } from './commit'
 import { fireTag, holdReason, parseInterval } from './heartbeat'
-import { createdIssueId, hasIssue, isExemptPath, isWorkCommand } from './linear-flow'
+import { createdIssueId, hasIssue, isDroppedState, isExemptPath, isStartedState, isWorkCommand, runOwnsRepo } from './linear-flow'
 import { grantAllowsLinear, grantVerdict, senderName } from './grant'
 import { gcSignature, gcSummary } from './memory-gc'
 import { checkListIssues, checkSaveComment, checkSaveIssue, isLinearRequest, withoutReminders } from './linear-guard'
@@ -400,5 +400,26 @@ describe('linear flow', () => {
     expect(createdIssueId('no id here', undefined)).toBeUndefined()
     expect(hasIssue({ opened: [], claimed: [] })).toBe(false)
     expect(hasIssue({ opened: [], claimed: ['AX-1'] })).toBe(true)
+  })
+})
+
+describe('linear flow states and auto-claude runs', () => {
+  test('only a started state takes an issue up; cancel and duplicate drop it', () => {
+    expect(isStartedState('In Progress')).toBe(true)
+    expect(isStartedState('started')).toBe(true)
+    expect(isStartedState('In Review')).toBe(true)
+    expect(isStartedState('Todo')).toBe(false)
+    expect(isStartedState(undefined)).toBe(false)
+    expect(isDroppedState('Canceled')).toBe(true)
+    expect(isDroppedState('Duplicate')).toBe(true)
+    expect(isDroppedState('Done')).toBe(false)
+  })
+
+  test('an auto-claude run owns the repo while it is on and ticked within 15 min', () => {
+    expect(runOwnsRepo(JSON.stringify({ on: true, at: 1_000 }), 1_000 + 60_000)).toBe(true)
+    expect(runOwnsRepo(JSON.stringify({ on: true, at: 1_000 }), 1_000 + 16 * 60_000)).toBe(false)
+    expect(runOwnsRepo(JSON.stringify({ on: false, at: 1_000 }), 1_000)).toBe(false)
+    expect(runOwnsRepo('not json', 0)).toBe(false)
+    expect(runOwnsRepo(undefined, 0)).toBe(false)
   })
 })

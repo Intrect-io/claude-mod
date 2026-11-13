@@ -1158,3 +1158,82 @@ describe('a directory with no git repository', () => {
     expect(w.runs.some(a => a.includes(' init'))).toBe(false)
   })
 })
+
+describe('Linear sync', () => {
+  // A fake Linear behind $.mcp.call: issues, comments and every write.
+  function linear(on: On, w: W) {
+    const l = {
+      issues: [{ id: 'KT-1', title: 'add() is wrong', updatedAt: '2026-11-13T10:00:00Z', status: 'Todo', statusType: 'unstarted' }] as Array<Record<string, string>>,
+      comments: {} as Record<string, Array<{ body: string; createdAt: string }>>,
+      writes: [] as string[],
+    }
+    w.files.set('/home/.claude/linear.json', JSON.stringify({ repo_mapping: { repo: { team: 'T', projectName: 'Repo' } } }))
+    const text = (v: unknown) => ({ value: { content: [{ type: 'text' as const, text: JSON.stringify(v) }], isError: false } })
+    on('mcp.call', (_, e) => {
+      const a = e.args
+      if (e.tool === 'list_issues') return text({ issues: l.issues.filter(i => i.statusType === a.state), hasNextPage: false })
+      if (e.tool === 'list_comments') return text({ comments: l.comments[String(a.issueId)] ?? [] })
+      if (e.tool === 'get_issue') return text(l.issues.find(i => i.id === a.id) ?? {})
+      if (e.tool === 'save_issue') {
+        l.writes.push(`state ${String(a.id)} ${String(a.state)}`)
+        const issue = l.issues.find(i => i.id === a.id)
+        // A write moves updatedAt, as Linear does.
+        if (issue !== undefined) Object.assign(issue, { updatedAt: '2026-11-13T11:00:00Z', statusType: a.state === 'completed' ? 'completed' : 'started' })
+        return text(issue ?? {})
+      }
+      if (e.tool === 'save_comment') {
+        l.writes.push(`comment ${String(a.issueId)} ${String(a.body)}`)
+        ;(l.comments[String(a.issueId)] ??= []).push({ body: String(a.body), createdAt: '2026-11-13T11:00:00Z' })
+        return text({ id: 'c' })
+      }
+      return { value: { content: [{ type: 'text' as const, text: 'unknown tool' }], isError: true } }
+    })
+    return l
+  }
+
+  test('the planning prompt lists open issues; a milestone naming one moves it to started, and its merge to Done with evidence', async ($, on) => {
+    const w = world(on)
+    const l = linear(on, w)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start')
+    await w.clock.advance(200)
+    expect(w.prompts[0]).toContain('Linear project "Repo" has 1 open issue(s)')
+    expect(w.prompts[0]).toContain('KT-1 [Todo] add() is wrong')
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set(GOALS, QUEUE.replace('- [ ] add()', '- [ ] [KT-1] add()'))
+    await ready($)
+    await w.clock.advance(1_200)
+    await w.clock.advance(TICK)
+    expect(l.writes).toContain('state KT-1 started')
+
+    await meet($, w)
+    await w.clock.advance(TICK)
+    expect(l.writes).toContain('state KT-1 completed')
+    expect(l.writes.find(x => x.startsWith('comment KT-1'))).toContain('[auto-claude] Merged into main')
+    expect((await cmd($, 'status')).text).toContain('linear: project Repo')
+  })
+
+  test('an issue opened or commented on mid-run is queued as a milestone; the driver\'s own comments are not changes', async ($, on) => {
+    const w = world(on)
+    const l = linear(on, w)
+    await planned($, w)
+    // A new issue, and a person's comment on the one the plan saw.
+    l.issues.push({ id: 'KT-2', title: 'sub() needs docs', updatedAt: '2026-11-13T12:00:00Z', status: 'Todo', statusType: 'unstarted' })
+    l.comments['KT-1'] = [{ body: 'also handle floats', createdAt: '2026-11-13T12:30:00Z' }, { body: '[auto-claude] noise', createdAt: '2026-11-13T13:00:00Z' }]
+    await w.clock.advance(11 * MIN)
+    const queue = w.files.get(GOALS) ?? ''
+    expect(queue).toContain('- [ ] [KT-2] sub() needs docs: what Linear KT-2 asks is resolved on this branch')
+    expect(queue).toContain('- [ ] [KT-1] add() is wrong: the comments and changes on KT-1 since 2026-11-13T10:00:00Z are handled')
+    // The lines parse back to one condition each, with no check.
+    expect(parseQueue(queue).filter(i => i.condition.startsWith('[KT-')).every(i => i.check === undefined)).toBe(true)
+    // Nothing new: the next sync queues nothing more.
+    await w.clock.advance(11 * MIN)
+    expect(parseQueue(w.files.get(GOALS) ?? '').filter(i => i.condition.startsWith('[KT-')).length).toBe(2)
+  })
+
+  test('a repository mapped to no project syncs nothing and says so', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    expect((await cmd($, 'status')).text).toContain('linear: off')
+  })
+})

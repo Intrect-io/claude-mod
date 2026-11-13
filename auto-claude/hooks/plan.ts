@@ -111,7 +111,7 @@ function deployRules(fixed: string | undefined): string[] {
   ]
 }
 
-export function kickoffText(hint: string, base: string, noRemote = false, fixedDeploy?: string): string {
+export function kickoffText(hint: string, base: string, noRemote = false, fixedDeploy?: string, linearBrief?: string): string {
   return [
     '[auto-claude] The person started an autonomous run of this repository. Plan it now; build nothing yet.',
     hint !== '' ? `Their aim: ${hint}` : 'No aim was given: finish what this repository is evidently for.',
@@ -120,13 +120,14 @@ export function kickoffText(hint: string, base: string, noRemote = false, fixedD
     '1. .claude/auto-plan.md: ## Goal (the end state, with its quality bar), a line `Final check: <one shell command that passes only when the whole goal is met>`, the deploy lines below, ## Milestones (ordered, why each), ## Decisions (empty for now).',
     `2. .claude/goals.md: one line per milestone, in order: \`- [ ] <milestone end state> :: check: <shell command that proves it>\`. Each milestone is one reviewable PR, built in its own worktree from ${base} after the earlier milestones are merged, so each check must pass from such a checkout. State only what is true on the milestone's own branch: never \"merged\", \"pushed\", \"PR opened\" or \"deployed\" (that happens after it is met).`,
     ...deployRules(fixedDeploy),
+    ...(linearBrief !== undefined ? [linearBrief] : []),
     `Then call mcp__auto-claude__${READY_TOOL}. It checks the files and starts the run: auto-claude builds each milestone in a worktree, pushes it, opens a PR, waits for CI, merges when green and deploys.`,
     'Nobody is watching: decide every choice yourself (the recommended or safest option), write each decision with its reason under ## Decisions, and ask only for credentials, payment or an irreversible step.',
     ...(noRemote ? [`This repository has no remote: each milestone lands in ${base} in this checkout, judged by its own check, with no PR and no CI. If the repository is empty or nearly so, make the first milestone its scaffold (README, manifest, test setup, one passing test) with a check that proves it runs.`] : []),
   ].join('\n')
 }
 
-export function replanText(round: number, finalCheck: string, output: string): string {
+export function replanText(round: number, finalCheck: string, output: string, linearBrief?: string): string {
   return [
     `[auto-claude] Round ${round}: the queue is done, but the final check still fails.`,
     `Final check: ${finalCheck}`,
@@ -134,6 +135,7 @@ export function replanText(round: number, finalCheck: string, output: string): s
     '```',
     output.slice(-3000),
     '```',
+    ...(linearBrief !== undefined ? [linearBrief] : []),
     'Find what is still missing for the goal in .claude/auto-plan.md and append new milestone lines to .claude/goals.md (leave done and blocked lines as they are). Note the reason under ## Decisions. Keep the Deploy, Smoke check and CodeQL lines (change them only with a decision that says why).',
     `Then call mcp__auto-claude__${READY_TOOL}; the run continues with them. Decide yourself; nobody is watching.`,
   ].join('\n')
@@ -146,6 +148,7 @@ export const POLICY = [
   '- When you are waiting on something (CI, the next milestone, a merge), just end the turn: auto-claude carries on by itself and prompts you when there is work. Never end a turn asking the person to check status.',
   '- auto-claude sets each milestone as the goal itself: never call ProposeGoal or /goal during the run (a session goal would hold the loop).',
   '- An irreversible step (deleting data, credentials, payment, a new public release) is never taken: call mcp__auto-claude__defer_goal with the reason instead.',
+  '- Linear issues named at the start of a milestone ("[AX-12] ...") are the driver\'s to move and comment on: read them, never change their state or comment on them.',
 ].join('\n')
 
 // The reminder for a run still waiting on its plan, with what the files lack.

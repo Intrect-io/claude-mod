@@ -492,4 +492,27 @@ describe('linear flow', () => {
     expect((await $.tool.call({ tool: 'Write', file_path: '/repo/a.py', content: 'x\n' })).deny).toBeUndefined()
     expect((await $.classic.Stop(STOP)).block).toBeUndefined()
   })
+
+  test('a label edit is not a claim; a cancelled issue is not demanded Done', async ($, on) => {
+    world(on, FLOW)
+    await start($)
+    await prompt($, 'QQQ-8 정리해줘')
+    await save($, { id: 'QQQ-8', priority: 2 })
+    expect((await $.tool.call({ tool: 'Write', file_path: '/repo/a.py', content: 'x\n' })).deny).toContain('Linear flow')
+    await save($, { id: 'QQQ-8', state: 'In Progress' })
+    await $.tool.call({ tool: 'AskUserQuestion', questions: [] })
+    await save($, { id: 'QQQ-8', state: 'Canceled' })
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
+  })
+
+  test('while an auto-claude run owns the repo, nothing is gated or blocked', async ($, on) => {
+    const w = world(on, FLOW)
+    w.files.set('/repo/.claude/auto-claude.on', JSON.stringify({ on: true, phase: 'run', at: Date.now() }))
+    await start($)
+    await prompt($, '[auto-claude loop] Milestone #1')
+    expect((await $.tool.call({ tool: 'Write', file_path: '/repo/worktrees/goal-01/a.py', content: 'x\n' })).deny).toBeUndefined()
+    expect((await $.tool.call({ tool: 'Bash', command: 'git commit -m "m1"' })).deny).toBeUndefined()
+    w.files.set('/repo/.claude/auto-claude.on', JSON.stringify({ on: false, phase: 'done', at: Date.now() }))
+    expect((await $.tool.call({ tool: 'Write', file_path: '/repo/a.py', content: 'x\n' })).deny).toContain('Linear flow')
+  })
 })

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
+import { lineIssues, MAX_FOLLOW_UPS, planSync } from './linear'
 
 import { countSarif, parseDeploy, scriptsOf, specOfPlan } from './deploy'
 import { parseVerdict, transcriptTail } from './evaluator'
@@ -431,5 +432,24 @@ describe('evaluator', () => {
     expect(tail).toContain('[user] fix add')
     expect(tail).toContain('[tool_use Bash] {"command":"pytest -q"}')
     expect(tail).toContain('[tool_result] 2 passed')
+  })
+})
+
+describe('Linear sync rules', () => {
+  test('issue IDs come from the start of a condition only', async () => {
+    expect(lineIssues('[AX-1][AX-2] two at once')).toEqual(['AX-1', 'AX-2'])
+    expect(lineIssues('fix AX-1 later')).toEqual([])
+  })
+
+  test('changes on issues in flight wait for the merge; pending lines absorb them; follow-ups are capped', async () => {
+    const issue = (id: string, updatedAt: string) => ({ id, title: id, updatedAt, statusType: 'unstarted' })
+    const issues = [issue('A-1', 't2'), issue('A-2', 't2'), issue('A-3', 't2'), issue('A-4', 't2'), { ...issue('A-5', 't2'), statusType: 'completed' }]
+    const seen = { 'A-1': 't1', 'A-2': 't1', 'A-3': 't1', 'A-4': 't1' }
+    const got = planSync(issues, {}, seen, new Set(['A-2']), new Set(['A-1']), { 'A-4': MAX_FOLLOW_UPS })
+    expect(got.append.map(i => i.id)).toEqual(['A-3'])
+    expect(got.seen['A-1']).toBe('t1')
+    expect(got.seen['A-2']).toBe('t2')
+    expect(got.seen['A-4']).toBe('t2')
+    expect(got.seen['A-5']).toBeUndefined()
   })
 })
