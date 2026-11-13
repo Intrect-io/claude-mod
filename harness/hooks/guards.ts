@@ -9,9 +9,9 @@ import { DEFAULT_TOGGLES, INITIAL_LINT, INITIAL_SHIP } from './state'
 import type { ToolCallHook } from './state'
 
 const envAtom = atom({ plugin: 'harness', key: 'env' } as const, {}, { shape: 'env-1' })
-const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT_TOGGLES, { shape: 'toggles-2' })
+const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT_TOGGLES, { shape: 'toggles-3' })
 const lintAtom = atom({ plugin: 'harness', key: 'lint' } as const, INITIAL_LINT, { shape: 'lint-1' })
-const shipAtom = atom({ plugin: 'harness', key: 'ship' } as const, INITIAL_SHIP, { shape: 'ship-2' })
+const shipAtom = atom({ plugin: 'harness', key: 'ship' } as const, INITIAL_SHIP, { shape: 'ship-3' })
 // The venv note was given in this session: once is enough (it rode every
 // Python call, measured 2026-10-29, saying the same thing each time).
 const venvNotedAtom = atom({ plugin: 'harness', key: 'venvNoted' } as const, false, { shape: 'venv-noted-1' })

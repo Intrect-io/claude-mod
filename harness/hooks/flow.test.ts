@@ -16,6 +16,8 @@ type World = {
   // Extra process answers a test adds: stdout for an argv, or undefined to fall through.
   proc?: (argv: readonly string[]) => string | undefined
   logs: string[]
+  // What a Linear save_issue (create) answers with.
+  created?: string
 }
 
 // The engine beneath the plugin: tools answer with what they were given, so a
@@ -27,7 +29,9 @@ function world(on: On, store: Record<string, unknown> = {}): World {
     w.logs.push(String(e.text))
     return { value: undefined }
   })
-  mock.store(on, store)
+  // The Linear flow is opt-in per test: the older tests edit files with no issue open.
+  const stored = store.toggles as Record<string, unknown> | undefined
+  mock.store(on, { ...store, toggles: { linearFlow: false, ...stored } })
   mock.env(on, { HOME: '/Users/u', TMPDIR: '/var/folders/xx/T/' })
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -62,6 +66,7 @@ function world(on: On, store: Record<string, unknown> = {}): World {
   on('tool.call', (_, e) => {
     const input = e as unknown as { command?: string }
     w.ran.push(input.command ?? e.tool)
+    if (e.tool === 'mcp__linear-server__save_issue' && w.created !== undefined && !('id' in e)) return { result: w.created }
     return { result: input.command ?? 'ok' }
   })
 
@@ -405,7 +410,7 @@ describe('phase 3', () => {
   })
 
   test('session.start draws the normal status (no row) and session.end clears the piece by the ending id', async ($, on) => {
-    const w = world(on)
+    const w = world(on, { toggles: { linearFlow: true } })
     on('session.id', () => ({ value: 'live' }))
     on('session.end', (_, e) => ({ sessionId: e.sessionId }))
     const statuses: unknown[] = []
@@ -428,5 +433,63 @@ describe('phase 3', () => {
     expect(first.context?.join(' ')).toContain('inside the platform venv')
     expect(second.context?.join(' ') ?? '').not.toContain('inside the platform venv')
     expect(w.ran.filter(r => r.startsWith('source /Users/u/dev/mlx_env/bin/activate && '))).toHaveLength(2)
+  })
+})
+
+describe('linear flow', () => {
+  const FLOW = { toggles: { linearFlow: true, reportLint: false } }
+  const save = ($: Engine, input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__linear-server__save_issue', ...input })
+
+  test('a change is refused until an issue is opened, then allowed; paths outside the project are exempt', async ($, on) => {
+    const w = world(on, FLOW)
+    w.created = '[{"type":"text","text":"{\\"id\\":\\"QQQ-5\\",\\"title\\":\\"x\\"}"}]'
+    await start($)
+    await prompt($, '테스트 고쳐줘')
+    const refused = await $.tool.call({ tool: 'Write', file_path: '/repo/a.py', content: 'x\n' })
+    expect(refused.deny).toContain('Linear flow')
+    expect((await $.tool.call({ tool: 'Bash', command: 'git commit -m "x"' })).deny).toContain('Linear flow')
+    expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).deny).toBeUndefined()
+    expect((await $.tool.call({ tool: 'Write', file_path: '/Users/u/.claude/projects/-x/memory/a.md', content: 'x\n' })).deny).toBeUndefined()
+    expect((await $.tool.call({ tool: 'Write', file_path: '/tmp/scratch.py', content: 'x\n' })).deny).toBeUndefined()
+
+    expect((await save($, { title: 'x', team: 'T' })).deny).toBeUndefined()
+    expect((await $.tool.call({ tool: 'Write', file_path: '/repo/a.py', content: 'x\n' })).deny).toBeUndefined()
+    expect(w.ran).toContain('ls')
+  })
+
+  test('an opened issue blocks the stop until it is Done', async ($, on) => {
+    world(on, FLOW).created = '{"identifier":"QQQ-5"}'
+    await start($)
+    await prompt($, '고쳐줘')
+    await save($, { title: 'x', team: 'T' })
+    await $.tool.call({ tool: 'Write', file_path: '/repo/a.py', content: 'x\n' })
+
+    const blocked = await $.classic.Stop(STOP)
+    expect(blocked.block).toContain('QQQ-5')
+    await save($, { id: 'QQQ-5', state: 'Done' })
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
+  })
+
+  test('picking up an existing issue counts; after two blocks the stop passes with a toast', async ($, on) => {
+    const w = world(on, FLOW)
+    await start($)
+    await prompt($, 'QQQ-7 진행해줘')
+    expect((await $.tool.call({ tool: 'Write', file_path: '/repo/a.py', content: 'x\n' })).deny).toContain('Linear flow')
+    await save($, { id: 'QQQ-7', state: 'In Progress' })
+    expect((await $.tool.call({ tool: 'Write', file_path: '/repo/a.py', content: 'x\n' })).deny).toBeUndefined()
+
+    expect((await $.classic.Stop(STOP)).block).toContain('QQQ-7')
+    expect((await $.classic.Stop(STOP)).block).toContain('QQQ-7')
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
+    expect(w.toasts.join(' ')).toContain('QQQ-7')
+  })
+
+  test('off: nothing is required; subagent stops are left alone', async ($, on) => {
+    world(on, FLOW)
+    await start($)
+    await command($, 'off linear-flow')
+    await prompt($, '고쳐줘')
+    expect((await $.tool.call({ tool: 'Write', file_path: '/repo/a.py', content: 'x\n' })).deny).toBeUndefined()
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
   })
 })

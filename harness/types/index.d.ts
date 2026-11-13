@@ -3,6 +3,8 @@ export type Toggles = {
   shipGate: boolean
   reportLint: boolean
   repoSize: boolean
+  // Linear flow: work needs an issue, and the issue ends Done.
+  linearFlow: boolean
 }
 
 export type GuardEnv = {
@@ -25,6 +27,10 @@ export type ShipState = {
   // The user asked for Linear work in this session (CLAUDE.md §1.5).
   linearRequested: boolean
   pending: PendingIssue[]
+  // Linear flow: issues this session created, existing ones it picked up, and those moved to Done.
+  opened: string[]
+  claimed: string[]
+  doneIds: string[]
   stopBlocks: number
   prListed: boolean
   codeqlRan: boolean

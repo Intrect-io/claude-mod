@@ -4,6 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { PendingIssue } from '../types'
 import { mergedWorktreeNote } from './extra-guards'
 import { grantAllowsLinear, readGrant } from './grant'
+import { createdIssueId, hasIssue, isExemptPath, isWorkCommand, missingIssueMessage, openIssuesMessage } from './linear-flow'
 import { heartbeatOn } from './heartbeat'
 import { checkListIssues, checkSaveComment, checkSaveIssue, isLinearRequest, repoTeam, withoutReminders } from './linear-guard'
 import type { LinearFacts } from './linear-guard'
@@ -11,8 +12,8 @@ import { commandWords, programOf, segments, stripProse } from './shell'
 import { DEFAULT_TOGGLES, INITIAL_LINT, INITIAL_SHIP } from './state'
 import type { PromptHook, StopHook } from './state'
 
-const shipAtom = atom({ plugin: 'harness', key: 'ship' } as const, INITIAL_SHIP, { shape: 'ship-2' })
-const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT_TOGGLES, { shape: 'toggles-2' })
+const shipAtom = atom({ plugin: 'harness', key: 'ship' } as const, INITIAL_SHIP, { shape: 'ship-3' })
+const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT_TOGGLES, { shape: 'toggles-3' })
 const lintAtom = atom({ plugin: 'harness', key: 'lint' } as const, INITIAL_LINT, { shape: 'lint-1' })
 const envAtom = atom({ plugin: 'harness', key: 'env' } as const, {}, { shape: 'env-1' })
 
@@ -155,6 +156,11 @@ export function registerShipGate(on: On): void {
     if (!toggles.shipGate) return next(e)
     const command = e.command
 
+    if (isWorkCommand(command)) {
+      const missing = await missingIssue($, 'this git/PR command')
+      if (missing !== undefined) return { deny: missing }
+    }
+
     if (isReleaseCommand(command)) {
       const ship = await read($, shipAtom)
       const missing = [
@@ -181,17 +187,37 @@ export function registerShipGate(on: On): void {
     return ran
   })
 
+  for (const tool of ['Edit', 'Write', 'NotebookEdit'] as const) {
+    on('tool.call', { tool }, async ($, e, next) => {
+      const input = e as unknown as { file_path?: unknown; notebook_path?: unknown }
+      const path = input.file_path ?? input.notebook_path
+      const env = await read($, envAtom)
+      if (typeof path === 'string' && isExemptPath(path, env.home, env.tmpdir)) return next(e)
+      const missing = await missingIssue($, tool)
+
+      return missing === undefined ? next(e) : { deny: missing }
+    })
+  }
+
   on('tool.call', { tool: 'mcp__linear-server__save_issue' }, async ($, e, next) => {
     const refusal = await linearRefusal($, facts => checkSaveIssue(e as unknown as Record<string, unknown>, facts))
     if (refusal !== undefined) return { deny: refusal }
     const ran = await next(e)
+    if (ran.deny !== undefined || ran.isError === true) return ran
     const input = e as unknown as { id?: unknown; state?: unknown }
-    if (ran.deny === undefined && ran.isError !== true && typeof input.id === 'string' && isDoneState(input.state)) {
+    if (typeof input.id === 'string') {
       const id = input.id
+      const done = isDoneState(input.state)
       await update($, shipAtom, ship => ({
         ...ship,
-        pending: ship.pending.map(issue => (issue.id === id ? { ...issue, done: true } : issue)),
+        pending: done ? ship.pending.map(issue => (issue.id === id ? { ...issue, done: true } : issue)) : ship.pending,
+        doneIds: done ? [...new Set([...ship.doneIds, id.toUpperCase()])] : ship.doneIds.filter(item => item !== id.toUpperCase()),
+        // Any non-Done update is the agent picking an existing issue up.
+        claimed: done || ship.opened.includes(id.toUpperCase()) ? ship.claimed : [...new Set([...ship.claimed, id.toUpperCase()])],
       }))
+    } else {
+      const created = createdIssueId(ran, await issuePatterns($))
+      if (created !== undefined) await update($, shipAtom, ship => ({ ...ship, opened: [...new Set([...ship.opened, created])] }))
     }
 
     return ran
@@ -223,13 +249,25 @@ export function registerShipGate(on: On): void {
   })
 }
 
+// Linear flow: a change needs an issue this session opened or picked up.
+async function missingIssue($: EngineInterface, what: string): Promise<string | undefined> {
+  if (!(await read($, togglesAtom)).linearFlow) return undefined
+  const ship = await read($, shipAtom)
+  if (hasIssue(ship)) return undefined
+  const env = await read($, envAtom)
+
+  return missingIssueMessage(what, await repoTeam($, env.home))
+}
+
 // The Linear guards run under the guards toggle, before the ship gate's own
 // bookkeeping of the same calls.
 async function linearRefusal($: EngineInterface, check: (facts: LinearFacts) => string | undefined): Promise<string | undefined> {
-  if (!(await read($, togglesAtom)).guards) return undefined
+  const toggles = await read($, togglesAtom)
+  if (!toggles.guards) return undefined
   const ship = await read($, shipAtom)
   const lint = await read($, lintAtom)
   const requested =
+    toggles.linearFlow ||
     ship.linearRequested || (await heartbeatOn($)) || grantAllowsLinear(await readGrant($, (await read($, envAtom)).home), Date.now())
 
   return check({ requested, mentioned: ship.mentioned, askUsed: lint.askUsed })
@@ -245,13 +283,15 @@ export async function shipStop($: EngineInterface, e: Parameters<StopHook>[1], n
     // Entries tracked before the pattern filter existed (or under another linear.json) are re-checked here.
     const linear = new Set(linearIds(ship.pending.map(issue => issue.id), await issuePatterns($)))
     const open = unresolved(ship.pending.filter(issue => linear.has(issue.id)))
-    if (open.length === 0) {
+    // Linear flow: issues this session opened or picked up end Done.
+    const unclosed = toggles.linearFlow ? [...new Set([...ship.opened, ...ship.claimed])].filter(id => !ship.doneIds.includes(id.toUpperCase())) : []
+    if (open.length === 0 && unclosed.length === 0) {
       if (ship.pending.length > 0) await update($, shipAtom, s => ({ ...s, pending: [] }))
 
       return below
     }
     if (ship.stopBlocks >= MAX_STOP_BLOCKS) {
-      $.ui.toast(`Ship gate: still not closed in Linear: ${open.map(issue => issue.id).join(', ')}`)
+      $.ui.toast(`Ship gate: still not closed in Linear: ${[...open.map(issue => issue.id), ...unclosed].join(', ')}`)
 
       return below
     }
@@ -260,11 +300,16 @@ export async function shipStop($: EngineInterface, e: Parameters<StopHook>[1], n
     return {
       ...below,
       block: [
-        'Ship gate (rules/linear-grooming.md §5): a merged PR closes its issues in the same turn.',
-        ...open.map(
-          issue =>
-            `- ${issue.id} (PR ${issue.pr}): ${[issue.done ? undefined : 'move to Done (save_issue state)', issue.commented ? undefined : 'add an evidence comment with the commit hash (save_comment)'].filter(Boolean).join(' and ')}`,
-        ),
+        ...(open.length === 0
+          ? []
+          : [
+              'Ship gate (rules/linear-grooming.md §5): a merged PR closes its issues in the same turn.',
+              ...open.map(
+                issue =>
+                  `- ${issue.id} (PR ${issue.pr}): ${[issue.done ? undefined : 'move to Done (save_issue state)', issue.commented ? undefined : 'add an evidence comment with the commit hash (save_comment)'].filter(Boolean).join(' and ')}`,
+              ),
+            ]),
+        ...(unclosed.length === 0 ? [] : [openIssuesMessage(unclosed)]),
       ].join('\n'),
     }
 }
