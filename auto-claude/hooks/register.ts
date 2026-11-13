@@ -10,8 +10,8 @@ import { bootstrapRepo } from './bootstrap'
 import { ensureLines, FILES, fetchRemote, LOCAL, out, readText, refOf, repoRoot, run, tell } from './io'
 import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, guardRefusal, LOOP_EXCLUDES, LOOP_POLICY, loopView, MIN_CHECKS_TO_DEFER, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop } from './loop'
 import { capReached, causeOf, ciAction, diagnose, httpsOf, idleDue, inFlight, isWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, summary, unfinished, wakeDue } from './ship'
-import { nextPending } from './queue'
-import { baseline, lineIssues, onHeld, onMerged, onStart, projectOf, readChanges, SYNC_MS } from './linear'
+import { markItem, nextPending } from './queue'
+import { baseline, getIssue, isOpen, lineIssues, onHeld, onMerged, onStart, projectOf, readChanges, SYNC_MS } from './linear'
 import type { StallFacts } from './ship'
 import type { Caps } from './ship'
 
@@ -91,14 +91,44 @@ async function linearSets($: EngineInterface, r: AutoRecord): Promise<{ pending:
 }
 
 // Linear changes since the last look become queue lines; `force` skips the timer.
+// A run started before this version (or before its repo was mapped) adopts the
+// project here, covered from now on.
 async function linearSync($: EngineInterface, r: AutoRecord, force = false): Promise<{ r: AutoRecord; added: number }> {
-  if (r.linear === undefined || r.buildOnly === true) return { r, added: 0 }
+  if (r.buildOnly === true || r.phase !== 'run') return { r, added: 0 }
   const now = await $.clock.now()
+  if (r.linear === undefined) {
+    const project = await projectOf($, r.root)
+    if (project === undefined) return { r, added: 0 }
+    const got = await baseline($, project, now)
+    await tell($, r, `Linear: syncing project ${project} from now on`)
+    return { r: { ...r, linear: got.sync }, added: 0 }
+  }
   if (!force && now - (r.linear.syncedAt ?? 0) < SYNC_MS) return { r, added: 0 }
   const sets = await linearSets($, r)
-  const got = await readChanges($, r.linear, sets.pending, sets.active, now)
+  const queue = parseQueue((await readText($, FILES(r.root).queue)) ?? '')
+  const runIds = new Set(queue.flatMap(i => lineIssues(i.condition)))
+  const got = await readChanges($, r.linear, sets.pending, sets.active, now, runIds)
+  // A line whose issue was closed while it waited is blocked, not built.
+  if (got.open !== undefined) {
+    for (const id of sets.pending) {
+      if (got.open.has(id)) continue
+      const issue = await getIssue($, id).catch(() => undefined)
+      if (issue === undefined || isOpen(issue)) continue
+      const text = (await readText($, FILES(r.root).queue)) ?? ''
+      let marked = text
+      for (const item of parseQueue(text)) {
+        if (item.mark === ' ' && lineIssues(item.condition).includes(id)) marked = markItem(marked, item.condition, '!', `Linear ${id} was closed (${issue.status ?? issue.statusType ?? 'closed'}) before this was built`)
+      }
+      if (marked !== text) {
+        await $.fs.write(FILES(r.root).queue, marked)
+        await tell($, r, `Linear ${id} was closed; its pending milestone is blocked`)
+      }
+    }
+  }
   for (const line of got.lines) await appendQueue($, r.root, line)
   if (got.lines.length > 0) await tell($, r, `Linear: ${got.lines.length} changed issue(s) queued as milestones`)
+  // A failing sync is told once, when it starts failing.
+  if (got.sync.error !== undefined && r.linear.error === undefined) await tell($, r, `Linear sync failed: ${got.sync.error}; retried every ${SYNC_MS / 60_000} min`)
   return { r: { ...r, linear: got.sync }, added: got.lines.length }
 }
 
@@ -363,8 +393,10 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
     await tell($, next, `merged ${landed}: ${item.goal.slice(0, 80)}`)
     const ids = lineIssues(item.goal)
     if (next.linear !== undefined && ids.length > 0) {
+      // The merged tip, fetched first: the local ref still points before the merge.
+      await fetchRemote($, r, r.root)
       const sha = (await run($, ['git', '-C', r.root, 'rev-parse', '--short', refOf(r)], r.root, 15_000)).stdout.trim()
-      const done = await onMerged($, next.linear, ids, `Merged ${landed}${sha !== '' ? ` (${r.defaultBranch} at ${sha} before this tick's fetch)` : ''}: ${item.goal.slice(0, 160)}`)
+      const done = await onMerged($, next.linear, ids, `Merged ${landed}${sha !== '' ? ` (${r.defaultBranch} at ${sha})` : ''}: ${item.goal.slice(0, 160)}`)
       for (const line of done.lines) await appendQueue($, r.root, line)
       next = { ...next, linear: done.sync }
     }
@@ -855,6 +887,9 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string, bu
     ...(buildOnly ? { buildOnly: true } : {}),
     ...(deploy === undefined ? {} : { deploy, deploys: 0 }),
   }
+  // The Linear baseline first: a tick between two writes would lose it.
+  const kick = buildOnly ? {} : await linearKickoff($, root)
+  if (kick.linear !== undefined) r.linear = kick.linear
   activeRoot = root
   // A milestone left open by an earlier run belongs to that run's plan.
   await stopLoop($, root, true)
@@ -864,8 +899,6 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string, bu
     $.clock.after(100, () => void tickNow?.())
     return `auto-claude building the queue in ${root}: one worktree per pending line, judged by its check; nothing is pushed, merged or deployed.${clearedNote(stop)}`
   }
-  const kick = await linearKickoff($, root)
-  if (kick.linear !== undefined) await writeRecord($, { ...r, linear: kick.linear })
   const text = kickoffText(hint, refOf({ remote, defaultBranch }), remote === LOCAL, deploy?.command, kick.brief)
   $.clock.after(100, () => {
     $.prompt.submit({ text }).catch(() => $.ui.toast('auto-claude: the planning prompt was not submitted; send any message to start.'))
@@ -1111,7 +1144,8 @@ export const register: Register = (on, options) => {
       if ('error' in stop) return { text: `Not resumed: ${stop.error}.` }
       const now = await $.clock.now()
       const phase = r.phase === 'done' || r.phase === 'stopped' || r.phase === 'final' ? (r.pausedPhase ?? 'run') : r.phase
-      // A run still planning gets its prompt again.
+      // A run still planning gets its prompt again, with Linear read before the record is written.
+      const kick = phase === 'plan' ? await linearKickoff($, r.root) : {}
       const next: AutoRecord = {
         ...r,
         on: true,
@@ -1122,14 +1156,13 @@ export const register: Register = (on, options) => {
         holdStreak: 0,
         deployFails: 0,
         ...(phase === 'plan' ? { phaseAt: now, nudges: 0 } : {}),
+        ...(kick.linear !== undefined ? { linear: kick.linear } : {}),
       }
       activeRoot = r.root
       orphanTold = undefined
       await writeRecord($, next)
       clearSessionGoal($)
       if (phase === 'plan') {
-        const kick = await linearKickoff($, r.root)
-        if (kick.linear !== undefined) await writeRecord($, { ...next, linear: kick.linear })
         const text = kickoffText(r.hint, refOf(r), r.remote === LOCAL, r.deploy?.source === 'file' ? r.deploy.command : undefined, kick.brief)
         $.clock.after(100, () => {
           $.prompt.submit({ text }).catch(() => $.ui.toast('auto-claude: the planning prompt was not submitted; send any message to start.'))

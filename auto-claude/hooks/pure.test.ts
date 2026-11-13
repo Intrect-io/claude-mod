@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { lineIssues, MAX_FOLLOW_UPS, planSync } from './linear'
+import { baselineSeen, lineIssues, MAX_FOLLOW_UPS, planSync } from './linear'
 
 import { countSarif, parseDeploy, scriptsOf, specOfPlan } from './deploy'
 import { parseVerdict, transcriptTail } from './evaluator'
@@ -452,4 +452,14 @@ describe('Linear sync rules', () => {
     expect(got.seen['A-4']).toBe('t2')
     expect(got.seen['A-5']).toBeUndefined()
   })
+})
+
+test('a comment written before the run started is not a change, whichever issues a scan reads', () => {
+  const now = Date.parse('2026-11-13T15:00:00Z')
+  const issues = Array.from({ length: 30 }, (_, n) => ({ id: `A-${n}`, title: 't', updatedAt: '2026-11-01T00:00:00Z', statusType: 'backlog' }))
+  const seen = baselineSeen(issues, now)
+  const old = Object.fromEntries(issues.map(i => [i.id, [{ body: 'old note', createdAt: '2026-11-10T00:00:00Z' }]]))
+  expect(planSync(issues, old, seen, new Set(), new Set()).append).toEqual([])
+  const fresh = { 'A-29': [{ body: 'new ask', createdAt: '2026-11-13T15:05:00Z' }] }
+  expect(planSync(issues, fresh, seen, new Set(), new Set()).append.map(i => i.id)).toEqual(['A-29'])
 })

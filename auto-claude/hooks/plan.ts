@@ -148,7 +148,7 @@ export const POLICY = [
   '- When you are waiting on something (CI, the next milestone, a merge), just end the turn: auto-claude carries on by itself and prompts you when there is work. Never end a turn asking the person to check status.',
   '- auto-claude sets each milestone as the goal itself: never call ProposeGoal or /goal during the run (a session goal would hold the loop).',
   '- An irreversible step (deleting data, credentials, payment, a new public release) is never taken: call mcp__auto-claude__defer_goal with the reason instead.',
-  '- Linear issues named at the start of a milestone ("[AX-12] ...") are the driver\'s to move and comment on: read them, never change their state or comment on them.',
+  '- Linear issues named at the start of a milestone ("[AX-12] ...") are the driver\'s to move and comment on: read them, never change their state or comment on them, and never create Linear issues during a run (a new issue in the project becomes a milestone of this run).',
 ].join('\n')
 
 // The reminder for a run still waiting on its plan, with what the files lack.

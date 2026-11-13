@@ -169,7 +169,7 @@ export async function listComments($: EngineInterface, id: string): Promise<Line
 export async function getIssue($: EngineInterface, id: string): Promise<LinearIssue | undefined> {
   const i = (await call($, 'get_issue', { id, fields: ['id', 'title', 'updatedAt', 'status', 'statusType'] })) as Record<string, unknown>
   return typeof i?.id === 'string' && typeof i.updatedAt === 'string'
-    ? { id: i.id, title: String(i.title ?? ''), updatedAt: i.updatedAt, statusType: typeof i.statusType === 'string' ? i.statusType : undefined }
+    ? { id: i.id, title: String(i.title ?? ''), updatedAt: i.updatedAt, statusType: typeof i.statusType === 'string' ? i.statusType : undefined, status: typeof i.status === 'string' ? i.status : undefined }
     : undefined
 }
 
@@ -189,10 +189,14 @@ export async function readChanges(
   pending: ReadonlySet<string>,
   active: ReadonlySet<string>,
   now: number,
-): Promise<{ sync: LinearSync; lines: string[] }> {
+  runIds: ReadonlySet<string> = new Set(),
+): Promise<{ sync: LinearSync; lines: string[]; open?: Set<string> }> {
   try {
     const issues = await listOpen($, sync.project)
-    const tracked = new Set([...pending, ...active, ...Object.keys(sync.seen)])
+    // Comments are read for the most recently changed issues and every issue
+    // this run has a line for; an older issue's new comment waits until the
+    // issue itself changes (comments do not move updatedAt).
+    const tracked = new Set([...pending, ...active, ...runIds])
     const scan = issues.filter((issue, at) => at < COMMENT_SCAN || tracked.has(issue.id))
     const comments: Record<string, LinearComment[]> = {}
     for (const issue of scan) comments[issue.id] = await listComments($, issue.id)
@@ -200,10 +204,17 @@ export async function readChanges(
     const lines = planned.append.map(issue => issueLine(issue, sync.seen[issue.id] !== undefined, sync.seen[issue.id]))
     const followUps = { ...(sync.followUps ?? {}) }
     for (const issue of planned.append) if (sync.seen[issue.id] !== undefined) followUps[issue.id] = (followUps[issue.id] ?? 0) + 1
-    return { sync: { ...sync, seen: planned.seen, followUps, syncedAt: now, error: undefined }, lines }
+    return { sync: { ...sync, seen: planned.seen, followUps, syncedAt: now, error: undefined }, lines, open: new Set(issues.map(issue => issue.id)) }
   } catch (error) {
     return { sync: { ...sync, syncedAt: now, error: String(error).slice(0, 200) }, lines: [] }
   }
+}
+
+export function baselineSeen(issues: readonly Pick<LinearIssue, 'id' | 'updatedAt'>[], now: number): Record<string, string> {
+  const at = new Date(now).toISOString()
+  const seen: Record<string, string> = {}
+  for (const issue of issues) seen[issue.id] = issue.updatedAt > at ? issue.updatedAt : at
+  return seen
 }
 
 // The run starts covering every open issue as it is now: the planning prompt
@@ -211,9 +222,9 @@ export async function readChanges(
 export async function baseline($: EngineInterface, project: string, now: number): Promise<{ sync: LinearSync; brief: string }> {
   try {
     const issues = await listOpen($, project)
-    const seen: Record<string, string> = {}
-    for (const issue of issues.slice(0, COMMENT_SCAN)) seen[issue.id] = stampOf(issue, await listComments($, issue.id))
-    for (const issue of issues.slice(COMMENT_SCAN)) seen[issue.id] = issue.updatedAt
+    // Covered up to now: comments written before the run started are not
+    // changes, whichever issues the later scans happen to read.
+    const seen = baselineSeen(issues, now)
     return { sync: { project, seen, syncedAt: now }, brief: issueBrief(issues, project) }
   } catch (error) {
     const why = String(error).slice(0, 200)
@@ -234,6 +245,9 @@ async function restamp($: EngineInterface, sync: LinearSync, id: string): Promis
 export async function onStart($: EngineInterface, sync: LinearSync, ids: readonly string[]): Promise<LinearSync> {
   for (const id of ids) {
     try {
+      const issue = await getIssue($, id)
+      // Closed while the line waited (cancelled, done elsewhere): never reopened.
+      if (issue === undefined || !isOpen(issue)) continue
       await setState($, id, 'started')
       sync = await restamp($, sync, id)
     } catch (error) {
@@ -252,6 +266,10 @@ export async function onMerged($: EngineInterface, sync: LinearSync, ids: readon
     try {
       const issue = await getIssue($, id)
       if (issue === undefined) continue
+      if (!isOpen(issue)) {
+        await comment($, id, `${evidence}. The issue was already ${issue.status ?? issue.statusType ?? 'closed'}, so its state is left as it is.`)
+        continue
+      }
       const stamp = stampOf(issue, await listComments($, id))
       const covered = sync.seen[id]
       const ups = sync.followUps?.[id] ?? 0

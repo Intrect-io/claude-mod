@@ -1231,6 +1231,35 @@ describe('Linear sync', () => {
     expect(parseQueue(w.files.get(GOALS) ?? '').filter(i => i.condition.startsWith('[KT-')).length).toBe(2)
   })
 
+  test('a pending line whose issue was closed is blocked, and a closed issue is never moved to started', async ($, on) => {
+    const w = world(on)
+    const l = linear(on, w)
+    l.issues.push({ id: 'KT-3', title: 'sub', updatedAt: '2026-11-13T10:00:00Z', status: 'Todo', statusType: 'unstarted' })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start')
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set(GOALS, QUEUE.replace('- [ ] sub()', '- [ ] [KT-3] sub()'))
+    await ready($)
+    await w.clock.advance(1_200)
+    // The person cancels KT-3 while milestone 1 is built.
+    Object.assign(l.issues[1]!, { statusType: 'canceled', status: 'Canceled' })
+    await w.clock.advance(11 * MIN)
+    expect(w.files.get(GOALS)).toMatch(/- \[!\] \[KT-3\] sub\(\).*Linear KT-3 was closed \(Canceled\)/)
+    expect(l.writes.filter(x => x.startsWith('state KT-3'))).toEqual([])
+  })
+
+  test('a run that started without Linear adopts the project on a tick once the repo is mapped', async ($, on) => {
+    const w = world(on)
+    linear(on, w)
+    const mapping = w.files.get('/home/.claude/linear.json')!
+    w.files.delete('/home/.claude/linear.json')
+    await planned($, w)
+    expect((await cmd($, 'status')).text).toContain('linear: off')
+    w.files.set('/home/.claude/linear.json', mapping)
+    await w.clock.advance(TICK)
+    expect((await cmd($, 'status')).text).toContain('linear: project Repo')
+  })
+
   test('a repository mapped to no project syncs nothing and says so', async ($, on) => {
     const w = world(on)
     await planned($, w)

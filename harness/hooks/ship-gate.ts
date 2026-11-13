@@ -284,8 +284,10 @@ async function linearRefusal($: EngineInterface, check: (facts: LinearFacts) => 
   if (!toggles.guards) return undefined
   const ship = await read($, shipAtom)
   const lint = await read($, lintAtom)
+  // While an auto-claude run owns the repository, a new issue would become a
+  // milestone of that run: creating one needs the user's request again.
   const requested =
-    toggles.linearFlow ||
+    (toggles.linearFlow && !(await autoClaudeRun($))) ||
     ship.linearRequested || (await heartbeatOn($)) || grantAllowsLinear(await readGrant($, (await read($, envAtom)).home), Date.now())
 
   return check({ requested, mentioned: ship.mentioned, askUsed: lint.askUsed })

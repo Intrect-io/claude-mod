@@ -512,6 +512,7 @@ describe('linear flow', () => {
     await prompt($, '[auto-claude loop] Milestone #1')
     expect((await $.tool.call({ tool: 'Write', file_path: '/repo/worktrees/goal-01/a.py', content: 'x\n' })).deny).toBeUndefined()
     expect((await $.tool.call({ tool: 'Bash', command: 'git commit -m "m1"' })).deny).toBeUndefined()
+    expect((await $.tool.call({ tool: 'mcp__linear-server__save_issue', title: 'x', team: 'T' })).deny).toContain('§1.5')
     w.files.set('/repo/.claude/auto-claude.on', JSON.stringify({ on: false, phase: 'done', at: Date.now() }))
     expect((await $.tool.call({ tool: 'Write', file_path: '/repo/a.py', content: 'x\n' })).deny).toContain('Linear flow')
   })
