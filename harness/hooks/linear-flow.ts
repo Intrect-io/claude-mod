@@ -78,3 +78,27 @@ export function createdIssueId(result: unknown, patterns: readonly string[] | un
 
   return tests.length === 0 ? any[0] : any.find(id => tests.some(test => test.test(id)))
 }
+
+// A save_issue state that means the agent took the issue up (In Progress, In
+// Review, started). A label or priority edit, or a state given as an ID, is not.
+export function isStartedState(state: unknown): boolean {
+  return typeof state === 'string' && /\b(progress|started|review|doing|active)\b/i.test(state)
+}
+
+export function isDroppedState(state: unknown): boolean {
+  return typeof state === 'string' && /cancel|duplicate/i.test(state)
+}
+
+// auto-claude's signal file (<repo>/.claude/auto-claude.on), written on each
+// tick of a run: a run that is on and ticked within RUN_FRESH_MS owns the repo.
+export const RUN_FRESH_MS = 15 * 60_000
+
+export function runOwnsRepo(text: string | undefined, now: number): boolean {
+  if (text === undefined) return false
+  try {
+    const v = JSON.parse(text) as { on?: unknown; at?: unknown }
+    return v.on === true && typeof v.at === 'number' && now - v.at < RUN_FRESH_MS
+  } catch {
+    return false
+  }
+}

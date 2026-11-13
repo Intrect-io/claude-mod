@@ -37,6 +37,16 @@ export type ShipItem = {
   repair?: boolean
 }
 
+// The run's Linear sync (hooks/linear.ts): the project, the change stamp each
+// issue is covered up to, and follow-up lines queued per issue.
+export type LinearSync = {
+  project: string
+  seen: Record<string, string>
+  followUps?: Record<string, number>
+  syncedAt?: number
+  error?: string
+}
+
 export type AutoPhase = 'plan' | 'run' | 'final' | 'done' | 'stopped'
 
 export type AutoRecord = {
@@ -106,6 +116,8 @@ export type AutoRecord = {
   movedAt?: number
   idleNudges?: number
   idleNudgedAt?: number
+  // Linear sync; unset when the repository maps to no project.
+  linear?: LinearSync
 }
 
 // A goal of the loop: one queue line being built in its own worktree.
