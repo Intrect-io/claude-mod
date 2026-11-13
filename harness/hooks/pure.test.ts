@@ -15,6 +15,7 @@ import { checkAgentWorktree, checkMemorySecret, checkSystemPython, checkTradingO
 import { kstNow, statusCounts } from './commands'
 import { splitPorcelain } from './commit'
 import { fireTag, holdReason, parseInterval } from './heartbeat'
+import { createdIssueId, hasIssue, isExemptPath, isWorkCommand } from './linear-flow'
 import { grantAllowsLinear, grantVerdict, senderName } from './grant'
 import { gcSignature, gcSummary } from './memory-gc'
 import { checkListIssues, checkSaveComment, checkSaveIssue, isLinearRequest, withoutReminders } from './linear-guard'
@@ -367,5 +368,37 @@ describe('linearIds', () => {
   })
   test('anchored: AX-1 does not match inside MAX-1', () => {
     expect(linearIds(['MAX-1'], patterns)).toEqual([])
+  })
+})
+
+describe('linear flow', () => {
+  test('work commands: commit, push and PR create, not prose or reads', () => {
+    expect(isWorkCommand('git commit -m "x"')).toBe(true)
+    expect(isWorkCommand('cd r && git push origin main')).toBe(true)
+    expect(isWorkCommand('gh pr create --title t')).toBe(true)
+    expect(isWorkCommand('git status && git diff')).toBe(false)
+    expect(isWorkCommand('echo "git commit later"')).toBe(false)
+    expect(isWorkCommand('git log -1 --format=%s')).toBe(false)
+  })
+
+  test('exempt paths: user config, scratch and trash', () => {
+    expect(isExemptPath('/Users/u/.claude/projects/p/memory/a.md', '/Users/u', undefined)).toBe(true)
+    expect(isExemptPath('/tmp/x.py', '/Users/u', undefined)).toBe(true)
+    expect(isExemptPath('/var/folders/T/x', '/Users/u', '/var/folders/T/')).toBe(true)
+    expect(isExemptPath('/repo/trash/old.py', '/Users/u', undefined)).toBe(true)
+    expect(isExemptPath('/repo/src/a.py', '/Users/u', undefined)).toBe(false)
+  })
+
+  test('the created issue ID comes from the identifier field, else a pattern match', () => {
+    expect(createdIssueId('{"id":"uuid","identifier":"AX-12","title":"see HSG-01"}', undefined)).toBe('AX-12')
+    expect(createdIssueId({ identifier: 'KT-3' }, undefined)).toBe('KT-3')
+    // The live Linear MCP shape (measured 2026-11-13).
+    const live = [{ type: 'text', text: '{"id":"AX-2212","uuid":"4f59","title":"t","description":"relates to HSG-01"}' }]
+    expect(createdIssueId(live, ['AX-\\d+'])).toBe('AX-2212')
+    expect(createdIssueId(live, undefined)).toBe('AX-2212')
+    expect(createdIssueId('created HSG-01 and AX-9', ['AX-\\d+'])).toBe('AX-9')
+    expect(createdIssueId('no id here', undefined)).toBeUndefined()
+    expect(hasIssue({ opened: [], claimed: [] })).toBe(false)
+    expect(hasIssue({ opened: [], claimed: ['AX-1'] })).toBe(true)
   })
 })

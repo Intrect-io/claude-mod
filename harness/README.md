@@ -5,7 +5,7 @@ The user's own Claude harness as one mod (formerly `house-rules`). It covers thr
 - session tooling that used to be shell hooks and prose commands;
 - workflow automation for `/commit` and the heartbeat loop.
 
-Each rule feature can be switched with `/harness on|off guards|ship-gate|report-lint|repo-size`. The choice is kept across sessions. `/harness status` shows the current state.
+Each rule feature can be switched with `/harness on|off guards|ship-gate|report-lint|repo-size|linear-flow`. The choice is kept across sessions. `/harness status` shows the current state.
 
 Design rule: a check that is deterministic and unambiguous **refuses**. A heuristic one only adds a **note** for the model, and is promoted once false positives have been measured.
 
@@ -46,6 +46,15 @@ Refuses or rewrites a single tool call.
 **ask-default**
 - When an AskUserQuestion auto-continues unanswered, the model is told to take each question's `(Recommended)` option.
 - If that option is irreversible, it takes the safe hold option instead.
+
+## linear-flow (on)
+
+Since 2026-11-13 an agent works under a Linear issue, and the issue ends Done. This replaces the "only on request" rule of CLAUDE.md §1.5 for creating issues and comments (cancel/split still need the user's approval).
+
+- **Open first:** `Edit`, `Write`, `NotebookEdit`, `git commit`, `git push` and `gh pr create` are refused until the session has an issue: one it created (`save_issue` with no `id`) or an existing one it picked up (`save_issue` with an `id` and a non-Done state, e.g. In Progress). Editing under `~/.claude/`, `/tmp`, `$TMPDIR` or a `trash/` folder is not project work and is exempt. The refusal says how to search for duplicates, open the issue, and which team `~/.claude/linear.json` maps the repo to.
+- **Done before stop:** the turn may not stop while an issue the session opened or picked up is not Done. The Stop is blocked up to twice (the ship-gate counter), then only a toast. An issue the user merely names is not tracked until the agent picks it up.
+- **Issue ID:** read from the `identifier` field of the `save_issue` result.
+- **Off:** `/harness off linear-flow` (kept across sessions) brings back the "only on request" behaviour. Do that when Linear is unavailable, or the refusal would deadlock the session.
 
 ## repo-size (on)
 
