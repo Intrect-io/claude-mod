@@ -7,8 +7,8 @@ import { checkBash, checkPath, deploysSomething, uncommitted, waitsLong } from '
 import { guardRefusal, maxBranchSeq } from './loop'
 import type { ShipState } from '../types'
 import { deployFixLine, deployOf, finalCheckOf, fixLine, kickoffText, POLICY, validatePlan } from './plan'
-import { markItem, nextPending, parseQueue, slugify, summarize } from './queue'
-import { capReached, causeOf, ciAction, httpsOf, idleDue, inFlight, isWaiting, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, unfinished, MAX_AHEAD, wakeDue } from './ship'
+import { markItem, nextPending, parseDuration, parseQueue, requeueItem, slugify, summarize, waitingItems } from './queue'
+import { capReached, onlyWaiting, causeOf, ciAction, httpsOf, idleDue, inFlight, isWaiting, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, unfinished, MAX_AHEAD, wakeDue } from './ship'
 
 const PLAN = '## Goal\nadd and sub work\n\nFinal check: `python3 -m unittest -q`\nDeploy: `bash scripts/deploy.sh`\nSmoke check: `curl -fsS http://localhost:8080/health`\nCodeQL: python\n\n## Milestones\n1. add\n2. sub\n\n## Decisions\n'
 const QUEUE = '- [ ] add() returns a+b :: check: python3 -m unittest -q test_add\n- [ ] sub() returns a-b :: check: python3 -m unittest -q test_sub\n'
@@ -462,4 +462,65 @@ test('a comment written before the run started is not a change, whichever issues
   expect(planSync(issues, old, seen, new Set(), new Set()).append).toEqual([])
   const fresh = { 'A-29': [{ body: 'new ask', createdAt: '2026-11-13T15:05:00Z' }] }
   expect(planSync(issues, fresh, seen, new Set(), new Set()).append.map(i => i.id)).toEqual(['A-29'])
+})
+
+describe('waits (:: after:)', () => {
+  const WAITING = '- [ ] record the cache :: check: pytest -q :: after: grep -q "CACHE DONE" ~/data/c.log :: alive: tmux has-session -t c :: within: 12h\n- [ ] b :: check: y\n'
+
+  test('a waiting line parses its after, alive and within; the condition and check stay as they were', () => {
+    expect(parseQueue(WAITING)[0]).toEqual({ line: 0, mark: ' ', condition: 'record the cache', check: 'pytest -q', after: 'grep -q "CACHE DONE" ~/data/c.log', alive: 'tmux has-session -t c', withinMs: 12 * 3_600_000 })
+    expect(parseQueue('- [ ] a :: check: x :: after: test -f y :: base: goal/03-a <!-- waiting -->')[0]).toEqual({ line: 0, mark: ' ', condition: 'a', check: 'x', after: 'test -f y', base: 'goal/03-a', note: 'waiting' })
+    expect(parseDuration('90m')).toBe(90 * MIN)
+    expect(parseDuration('2d')).toBe(2 * 86_400_000)
+    expect(parseDuration('soon')).toBeUndefined()
+  })
+
+  test('a waiting line starts only once ready; by default never', () => {
+    const items = parseQueue(WAITING)
+    expect(nextPending(items)?.condition).toBe('b')
+    expect(nextPending(items, i => i.after === undefined || i.condition === 'record the cache')?.condition).toBe('record the cache')
+    expect(waitingItems(items, i => i.after === undefined).map(i => i.condition)).toEqual(['record the cache'])
+    // A waiting line with a base goes first once ready, like a fix goal.
+    const based = parseQueue('- [ ] b :: check: y\n- [ ] a :: check: x :: after: true :: base: goal/03-a\n')
+    expect(nextPending(based)?.condition).toBe('b')
+    expect(nextPending(based, () => true)?.condition).toBe('a')
+  })
+
+  test('requeueItem puts a line back to wait on the branch built so far; markItem still finds it', () => {
+    const text = requeueItem('- [ ] a :: check: x\n- [ ] b :: check: y\n', 'a', { after: 'grep -q DONE\n  log', alive: 'tmux has-session -t t', within: '8h' }, 'goal/03-a', 'waiting since now: cache -->')
+    const item = parseQueue(text)[0]!
+    expect(item).toMatchObject({ mark: ' ', condition: 'a', check: 'x', after: 'grep -q DONE log', alive: 'tmux has-session -t t', withinMs: 8 * 3_600_000, base: 'goal/03-a' })
+    expect(item.note).toContain('cache - ->')
+    expect(parseQueue(markItem(text, 'a', 'x', 'done'))[0]).toMatchObject({ mark: 'x', condition: 'a' })
+  })
+
+  test('a prose start condition is refused at planning; a line put back to wait may keep its base', () => {
+    const prose = validatePlan(PLAN, '- [ ] (start only after ~/data/c.log shows "DONE") record it :: check: x\n- [ ] b :: check: y\n', true)
+    expect(!prose.ok && prose.errors.join(' ')).toContain(':: after:')
+    expect(validatePlan(PLAN, '- [ ] (start only after ~/data/c.log shows "DONE") record it :: check: x :: after: grep -q DONE ~/data/c.log\n- [ ] b :: check: y\n', true).ok).toBe(true)
+    expect(validatePlan(PLAN, '- [ ] a :: check: x :: after: test -f y :: base: goal/03-a\n- [ ] b :: check: y\n', false).ok).toBe(true)
+    expect(validatePlan(PLAN, '- [ ] a :: check: x :: base: goal/03-a\n- [ ] b :: check: y\n', false).ok).toBe(false)
+    // The prefixes measured in ArtifactNet; an end state that only mentions an order is not a wait.
+    expect(validatePlan(PLAN, '- [ ] (round 2; GPU parts start only when no other heavy job holds vela) x :: check: x\n- [ ] b :: check: y\n', true).ok).toBe(false)
+    expect(validatePlan(PLAN, '- [ ] the server starts only after migrations finish :: check: x\n- [ ] b :: check: y\n', true).ok).toBe(true)
+  })
+
+  test('only waiting is not idle, and waiting time is left out of the time cap up to its own cap', () => {
+    const r = { started: 2, finished: 2, ships: [], waitCount: 1 }
+    expect(onlyWaiting(r)).toBe(true)
+    expect(isWaiting(r, 0)).toBe(true)
+    expect(onlyWaiting({ ...r, started: 3 })).toBe(false)
+    expect(onlyWaiting({ ...r, waitCount: 0 })).toBe(false)
+    const caps = { maxRounds: 3, maxMerges: 20, maxHours: 24, maxWaitHours: 72 }
+    const H = 3_600_000
+    expect(capReached({ merges: 0, startedAt: 0, waitedMs: 10 * H }, caps, 30 * H)).toBeUndefined()
+    expect(capReached({ merges: 0, startedAt: 0, waitedMs: 10 * H }, caps, 34 * H)).toContain('not counting 10 h of waiting')
+    expect(capReached({ merges: 0, startedAt: 0, waitedMs: 200 * H }, caps, 96 * H)).toContain('time cap')
+  })
+
+  test('every text that steers the model names wait_until for compute, not defer', () => {
+    expect(POLICY).toContain('wait_until')
+    expect(guardRefusal({ tool: 'Monitor' }, null, true)).toContain('mcp__auto-claude__wait_until')
+    expect(kickoffText('', 'origin/main')).toContain(':: after:')
+  })
 })

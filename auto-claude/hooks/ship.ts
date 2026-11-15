@@ -117,12 +117,24 @@ export function summary(merges: number, held: number, ships: readonly ShipItem[]
   return `${merges} merged, ${held} held${prs.length > 0 ? ` (PRs ${prs.join(' ')})` : ''}`
 }
 
-export type Caps = { maxRounds: number; maxMerges: number; maxHours: number }
+export type Caps = { maxRounds: number; maxMerges: number; maxHours: number; maxWaitHours?: number }
 
-export function capReached(r: { merges: number; startedAt: number }, caps: Caps, now: number): string | undefined {
+// The time cap counts the run's working time: time spent with nothing to do
+// but wait on a line's `:: after:` (a training run) is left out, up to
+// maxWaitHours of it, so a run waiting on a day-long job is not cut off.
+export function capReached(r: { merges: number; startedAt: number; waitedMs?: number }, caps: Caps, now: number): string | undefined {
   if (r.merges >= caps.maxMerges) return `the merge cap (${caps.maxMerges}) was reached`
-  if (now - r.startedAt >= caps.maxHours * 3600_000) return `the time cap (${caps.maxHours} h) was reached`
+  const waited = Math.min(r.waitedMs ?? 0, (caps.maxWaitHours ?? 0) * 3600_000)
+  if (now - r.startedAt - waited >= caps.maxHours * 3600_000) {
+    return `the time cap (${caps.maxHours} h${waited > 0 ? `, not counting ${Math.round(waited / 3600_000)} h of waiting` : ''}) was reached`
+  }
   return undefined
+}
+
+// Only waits are left: nothing is being built or shipped, and at least one
+// pending line waits on its `:: after:`. The run is waiting, not idle.
+export function onlyWaiting(r: Pick<AutoRecord, 'started' | 'finished' | 'ships' | 'waitCount'>): boolean {
+  return (r.waitCount ?? 0) > 0 && r.started <= r.finished && unfinished(r.ships).length === 0
 }
 
 // Why a run that is on is not moving, with its evidence; undefined when it
@@ -321,10 +333,12 @@ export function startBase(r: Pick<AutoRecord, 'ships' | 'repair'>, next: { base?
 }
 
 // Waiting on something that has its own clock is not idle: the loop building a
-// goal (while the session works on it), or a PR's CI pending with nothing
-// wrong, for up to CI_STUCK_MS.
-export function isWaiting(r: Pick<AutoRecord, 'started' | 'finished' | 'ships'>, now: number, quietMs?: number): boolean {
+// goal (while the session works on it), a PR's CI pending with nothing
+// wrong, for up to CI_STUCK_MS, or queue lines waiting on their `:: after:`
+// with nothing else to do (the driver polls them; see register.ts pollWaits).
+export function isWaiting(r: Pick<AutoRecord, 'started' | 'finished' | 'ships' | 'waitCount'>, now: number, quietMs?: number): boolean {
   if (r.started > r.finished) return quietMs === undefined || quietMs < LOOP_QUIET_MS
+  if (onlyWaiting(r)) return true
   const item = inFlight(r.ships)
   return item?.state === 'ci' && item.note === undefined && ciStuck(r, now) === undefined
 }

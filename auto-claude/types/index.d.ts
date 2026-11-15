@@ -118,6 +118,31 @@ export type AutoRecord = {
   idleNudgedAt?: number
   // Linear sync; unset when the repository maps to no project.
   linear?: LinearSync
+  // Queue lines waiting on their `:: after:` command, by condition (register.ts pollWaits).
+  waits?: Record<string, WaitState>
+  // How many pending lines wait, as of the last tick: while only waits are left the run is not idle.
+  waitCount?: number
+  // Time spent with nothing to do but wait, left out of the time cap; and the tick it was last counted at.
+  waitedMs?: number
+  waitTickAt?: number
+  // A stacked milestone put back to wait keeps the commit it was stacked on,
+  // by condition, so the branch it restarts on is rebased off its parent too.
+  waitOnto?: Record<string, string>
+}
+
+// One waiting queue line, as the driver polls it.
+export type WaitState = {
+  since: number
+  checkedAt?: number
+  // `after` exited 0: the line may start.
+  ok?: boolean
+  // The last output of a failing `after` or `alive`, for the model and status.
+  out?: string
+  // `alive` failures in a row.
+  aliveFails?: number
+  // The model was asked to look (the job looks dead, or `within` passed), once each.
+  askedDead?: boolean
+  askedLate?: boolean
 }
 
 // A goal of the loop: one queue line being built in its own worktree.
@@ -131,6 +156,8 @@ export type Goal = {
   recentReasons: string[]
   lastReason?: string
   deferPending?: string
+  // wait_until: applied at the next Stop, like deferPending.
+  waitPending?: { after: string; alive?: string; within?: string; reason: string }
 }
 
 // What the guards need while a goal runs in this session.

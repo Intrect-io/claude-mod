@@ -1,6 +1,6 @@
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { AutoRecord, ShipItem } from '../types'
+import type { AutoRecord, ShipItem, WaitState } from '../types'
 import { deployFixLine, finalCheckOf, fixLine, kickoffText, parseQueue, planNudgeText, POLICY, READY_TOOL, replanText, validatePlan } from './plan'
 import { segment } from './segment'
 import { DEPLOY_FILE, parseDeploy, specOfPlan } from './deploy'
@@ -8,9 +8,10 @@ import type { DeploySpec } from './deploy'
 import { deployMerged } from './deploy-run'
 import { bootstrapRepo } from './bootstrap'
 import { ensureLines, FILES, fetchRemote, LOCAL, out, readText, refOf, repoRoot, run, tell } from './io'
-import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, guardRefusal, LOOP_EXCLUDES, LOOP_POLICY, loopView, MIN_CHECKS_TO_DEFER, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop } from './loop'
-import { capReached, causeOf, ciAction, diagnose, httpsOf, idleDue, inFlight, isWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, summary, unfinished, wakeDue } from './ship'
-import { markItem, nextPending } from './queue'
+import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, WAIT_TOOL, WAIT_TOOL_ID, waitCall, guardRefusal, LOOP_EXCLUDES, LOOP_POLICY, loopView, MIN_CHECKS_TO_DEFER, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop } from './loop'
+import { capReached, causeOf, ciAction, diagnose, httpsOf, idleDue, inFlight, isWaiting, onlyWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, summary, unfinished, wakeDue } from './ship'
+import { markItem, nextPending, waitingItems } from './queue'
+import type { QueueItem } from './queue'
 import { baseline, getIssue, isOpen, lineIssues, onHeld, onMerged, onStart, projectOf, readChanges, SYNC_MS } from './linear'
 import type { StallFacts } from './ship'
 import type { Caps } from './ship'
@@ -54,6 +55,15 @@ const NO_CI_GRACE_MS = 90_000
 const MAX_DEPLOY_FAILS = 3
 // Milestones held in a row for one cause before the run stops (ship.ts causeOf).
 const MAX_HOLD_STREAK = 2
+// A waiting line's `:: after:` is run this often, each run cut off after
+// WAIT_PROBE_MS; `:: alive:` failing this many polls in a row means the job
+// it waits for died.
+const WAIT_POLL_MS = 3 * 60_000
+const WAIT_PROBE_MS = 30_000
+const ALIVE_FAILS = 2
+// A wait with no `within` of its own still goes to the model after this long,
+// so a job that died without an alive check is not waited on in silence.
+const WAIT_ASK_MS = 12 * 3_600_000
 
 let ticker: Timer | undefined
 let ticking = false
@@ -154,7 +164,8 @@ async function show($: EngineInterface, r: AutoRecord | undefined) {
     done = items.filter(i => i.mark !== ' ').length
   }
   const pr = inFlight(r.ships)?.pr
-  await segment($, `auto·R${r.round}·${r.phase === 'plan' ? 'plan' : `M${done}/${total}`}${pr !== undefined ? `·PR#${pr}` : ''}`)
+  const waiting = (r.waitCount ?? 0) > 0 ? `·wait${r.waitCount}` : ''
+  await segment($, `auto·R${r.round}·${r.phase === 'plan' ? 'plan' : `M${done}/${total}`}${pr !== undefined ? `·PR#${pr}` : ''}${waiting}`)
 }
 
 // The repository of the session's directory, or of its nearest ancestor that
@@ -198,7 +209,7 @@ async function startWanted($: EngineInterface, r: AutoRecord, base: string, stac
   if ((await readLoop($, r.root))?.current !== undefined) return
   const tip = stacked ? (await run($, ['git', '-C', r.root, 'rev-parse', '--verify', '--quiet', `${base}^{commit}`], r.root, 15_000)).stdout.trim() : ''
   if (stacked && tip === '') return
-  const current = await startNext($, r.root, base, r.remote)
+  const current = await startNext($, r.root, base, r.remote, readyOf(r))
   if (current !== undefined && stacked) await writeRecord($, { ...r, onto: { ...r.onto, [current.branch]: tip } })
 }
 
@@ -595,12 +606,17 @@ async function treat($: EngineInterface, r: AutoRecord, item: ShipItem, now: num
 // keeps building through the CI (ship.ts startBase).
 async function nextOrFinish($: EngineInterface, r: AutoRecord, caps: Caps): Promise<void> {
   if (r.phase !== 'run') return
-  const next = nextPending(parseQueue((await readText($, FILES(r.root).queue)) ?? ''))
+  const items = parseQueue((await readText($, FILES(r.root).queue)) ?? '')
+  const next = nextPending(items, readyOf(r))
   if (next !== undefined) {
     const at = startBase(r, next, refOf(r))
     if (at !== undefined) await startWanted($, r, at.base, at.stacked)
     return
   }
+  // Lines still waiting on their `:: after:`: the run is not done, and no
+  // round is spent on a final check that cannot pass yet. pollWaits starts
+  // them when what they wait for is done.
+  if (waitingItems(items, readyOf(r)).length > 0) return
   const building = (await readLoop($, r.root))?.current !== undefined
   if (unfinished(r.ships).length === 0 && !building && r.started <= r.finished) {
     // The run is not done while Linear has changes it has not queued.
@@ -609,6 +625,97 @@ async function nextOrFinish($: EngineInterface, r: AutoRecord, caps: Caps): Prom
     if (synced.added > 0) return
     await finalCheck($, { ...synced.r, phase: 'final' }, caps)
   }
+}
+
+// A pending line may start: it waits on nothing, or its `:: after:` passed.
+function readyOf(r: Pick<AutoRecord, 'waits'>): (item: QueueItem) => boolean {
+  return item => item.after === undefined || r.waits?.[item.condition]?.ok === true
+}
+
+// Polls the `:: after:` of each waiting line (every WAIT_POLL_MS), and its
+// `:: alive:`: the driver, not the model, watches a training run or a cache
+// build, so a run never ends, or sits stopped, while compute it waits for is
+// still running. A wait that looks dead (alive failing) or late (past its
+// `within`) goes to the model once; past twice its `within` it is held.
+async function pollWaits($: EngineInterface, r: AutoRecord): Promise<AutoRecord> {
+  if (r.phase !== 'run') return r
+  const now = await $.clock.now()
+  const building = (await readLoop($, r.root))?.current?.condition
+  const items = parseQueue((await readText($, FILES(r.root).queue)) ?? '').filter(i => i.mark === ' ' && i.after !== undefined && i.condition !== building)
+  const old = r.waits ?? {}
+  const waits: Record<string, WaitState> = {}
+  let held = 0
+  let fetched = false
+  for (const item of items) {
+    const after = item.after!
+    let w: WaitState = old[item.condition] ?? { since: now }
+    if (w.ok !== true && now - (w.checkedAt ?? 0) >= WAIT_POLL_MS) {
+      // A wait on what reached the remote (`git cat-file -e origin/main:x`) sees it fetched.
+      if (!fetched && r.remote !== LOCAL && after.includes(`${r.remote}/`)) {
+        await fetchRemote($, r, r.root)
+        fetched = true
+      }
+      const ran = await run($, ['bash', '-lc', after], r.root, WAIT_PROBE_MS).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+      w = { ...w, checkedAt: now }
+      if (ran.exitCode === 0) {
+        w = { ...w, ok: true, out: undefined }
+        await tell($, r, `wait over after ${hours(now - w.since)}: ${item.condition.slice(0, 80)}; it starts next`)
+      } else {
+        w = { ...w, out: `\`${after.slice(0, 120)}\` exited ${ran.exitCode}${out(ran) !== '' ? `: ${out(ran).slice(0, 300)}` : ''}` }
+        if (item.alive !== undefined) {
+          const alive = await run($, ['bash', '-lc', item.alive], r.root, WAIT_PROBE_MS).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+          w = alive.exitCode === 0
+            ? { ...w, aliveFails: 0, askedDead: false }
+            : { ...w, aliveFails: (w.aliveFails ?? 0) + 1, out: `alive \`${item.alive.slice(0, 120)}\` exited ${alive.exitCode}${out(alive) !== '' ? `: ${out(alive).slice(0, 200)}` : ''}; ${w.out}` }
+        }
+        const waited = now - w.since
+        if (item.withinMs !== undefined && waited > 2 * item.withinMs) {
+          const text = (await readText($, FILES(r.root).queue)) ?? ''
+          await $.fs.write(FILES(r.root).queue, markItem(text, item.condition, '!', `held ${new Date(now).toISOString()}: waited ${hours(waited)}, twice its within; ${w.out ?? ''}`))
+          await tell($, r, `held: ${item.condition.slice(0, 80)} waited ${hours(waited)}, twice its within; ${(w.out ?? '').slice(0, 150)}; going on`)
+          held++
+          continue
+        }
+        const dead = (w.aliveFails ?? 0) >= ALIVE_FAILS
+        const late = waited > (item.withinMs ?? WAIT_ASK_MS)
+        if (dead && w.askedDead !== true) {
+          if (await askWait($, r, item, w, 'dead')) w = { ...w, askedDead: true }
+        } else if (late && w.askedLate !== true) {
+          if (await askWait($, r, item, w, 'late')) w = { ...w, askedLate: true }
+        }
+      }
+    }
+    waits[item.condition] = w
+  }
+  const waitCount = Object.values(waits).filter(w => w.ok !== true).length
+  let next: AutoRecord = { ...r, waits, waitCount, held: r.held + held }
+  // Time with nothing to do but wait is left out of the time cap.
+  if (onlyWaiting(next)) next = { ...next, waitedMs: (r.waitedMs ?? 0) + (r.waitTickAt !== undefined ? now - r.waitTickAt : 0), waitTickAt: now }
+  else next = { ...next, waitTickAt: undefined }
+  return next
+}
+
+const hours = (ms: number) => (ms >= 3_600_000 ? `${(ms / 3_600_000).toFixed(1)} h` : `${Math.round(ms / 60_000)} min`)
+
+// A wait that looks dead or late goes to the model, which can look at the job
+// (logs, tmux, the GPU) and relaunch it or fix the line. Not while it builds a
+// milestone: asked at a later poll instead.
+async function askWait($: EngineInterface, r: AutoRecord, item: QueueItem, w: WaitState, why: 'dead' | 'late'): Promise<boolean> {
+  if ((await readLoop($, r.root))?.current !== undefined) return false
+  const since = hours((await $.clock.now()) - w.since)
+  const text = [
+    `[auto-claude] A wait looks ${why === 'dead' ? 'dead' : 'late'}: "${item.condition.slice(0, 160)}" has waited ${since} on \`${item.after ?? ''}\`.`,
+    why === 'dead'
+      ? `Its alive check \`${item.alive ?? ''}\` failed ${w.aliveFails ?? 0} polls in a row: the job it waits for may have died (a crash, a reboot).`
+      : item.withinMs !== undefined
+        ? `That is longer than its within (${hours(item.withinMs)}).`
+        : `No line waits this long unasked (${hours(WAIT_ASK_MS)}); it has no within of its own.`,
+    `Last poll: ${(w.out ?? '').slice(0, 600)}`,
+    'Find out from here whether the job is still running (its log, tmux, the GPU). Relaunch it if it died, or fix the line\'s `:: after:` / `:: alive:` in .claude/goals.md if they test the wrong thing. Do not wait for it and do not defer it: end the turn, and auto-claude keeps polling. Note what you found under ## Decisions in .claude/auto-plan.md.',
+  ].join('\n')
+  await tell($, r, `${why === 'dead' ? 'a waited-on job looks dead' : 'a wait is late'} (${since}): ${item.condition.slice(0, 80)}; the model was asked to look`)
+  $.prompt.submit({ text }).catch(() => {})
+  return true
 }
 
 async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<void> {
@@ -647,6 +754,7 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
       await stopRun($, r, `${r.holdStreak} milestones in a row were held for one cause (${r.holdCause}), which every later milestone would hit too: ${(last?.note ?? '').slice(0, 200)}`)
       return
     }
+    r = await pollWaits($, r)
     r = await watchdog($, r)
     if (!r.on) return
     r = (await linearSync($, r)).r
@@ -692,6 +800,17 @@ async function readEvents($: EngineInterface, r: AutoRecord): Promise<AutoRecord
   for (const e of read.entries) {
     if (e.event === 'start' && e.branch !== undefined) {
       r = { ...r, started: r.started + 1, worktrees: { ...r.worktrees, [e.branch]: e.worktree ?? '' } }
+      // A line that waited has started: its wait is over.
+      if (e.goal !== undefined && r.waits?.[e.goal] !== undefined) {
+        const { [e.goal]: _done, ...rest } = r.waits
+        r = { ...r, waits: rest }
+      }
+      // It was stacked before it waited: its new branch carries the parent's commits too.
+      const sha = e.goal === undefined ? undefined : r.waitOnto?.[e.goal]
+      if (e.goal !== undefined && sha !== undefined) {
+        const { [e.goal]: _moved, ...rest } = r.waitOnto ?? {}
+        r = { ...r, onto: { ...r.onto, [e.branch]: sha }, waitOnto: rest }
+      }
       const ids = e.goal === undefined ? [] : lineIssues(e.goal)
       if (r.linear !== undefined && r.buildOnly !== true && ids.length > 0) r = { ...r, linear: await onStart($, r.linear, ids) }
     } else if (e.event === 'met' && e.goal !== undefined && e.branch !== undefined) {
@@ -706,6 +825,15 @@ async function readEvents($: EngineInterface, r: AutoRecord): Promise<AutoRecord
       await tell($, r, `${e.event}: ${(e.goal ?? '').slice(0, 80)}${e.reason !== undefined ? ` (${e.reason.slice(0, 100)})` : ''}; going on`)
       const ids = e.goal === undefined ? [] : lineIssues(e.goal)
       if (r.linear !== undefined && r.buildOnly !== true && ids.length > 0) r = { ...r, linear: await onHeld($, r.linear, ids, `${e.event}${e.reason !== undefined ? `: ${e.reason}` : ''}`) }
+    } else if (e.event === 'waiting') {
+      // Back in the queue, waiting on its command: finished as a build, not held.
+      r = { ...r, finished: r.finished + 1 }
+      const sha = e.branch === undefined ? undefined : r.onto?.[e.branch]
+      if (e.goal !== undefined && e.branch !== undefined && sha !== undefined) {
+        const { [e.branch]: _left, ...rest } = r.onto ?? {}
+        r = { ...r, onto: rest, waitOnto: { ...r.waitOnto, [e.goal]: sha } }
+      }
+      await tell($, r, `waiting: ${(e.goal ?? '').slice(0, 80)}${e.reason !== undefined ? ` (${e.reason.slice(0, 100)})` : ''}; auto-claude polls it and goes on with other milestones`)
     } else if (e.event === 'queue-empty') {
       r = { ...r, queueEmpty: true }
     }
@@ -933,6 +1061,20 @@ async function stallLine($: EngineInterface, r: AutoRecord): Promise<string | un
   return why === undefined ? undefined : `stalled: ${why}`
 }
 
+// The waiting lines, for status: what each waits on, since when, and its last poll.
+async function waitLines($: EngineInterface, r: AutoRecord, queue: readonly QueueItem[]): Promise<string[]> {
+  const now = await $.clock.now()
+  return queue
+    .filter(i => i.mark === ' ' && i.after !== undefined)
+    .map(i => {
+      const w = r.waits?.[i.condition]
+      if (w === undefined) return `- waiting: ${i.condition.slice(0, 60)} on \`${i.after!.slice(0, 80)}\` (not polled yet)`
+      if (w.ok === true) return `- wait over: ${i.condition.slice(0, 60)} (starts next)`
+      const checked = w.checkedAt !== undefined ? `, last poll ${Math.round((now - w.checkedAt) / 60_000)} min ago` : ''
+      return `- waiting ${hours(now - w.since)}: ${i.condition.slice(0, 60)} on \`${i.after!.slice(0, 80)}\`${checked}${(w.aliveFails ?? 0) > 0 ? `, alive failing ${w.aliveFails}x` : ''}`
+    })
+}
+
 async function statusText($: EngineInterface): Promise<string> {
   const root = activeRoot ?? (await sessionRoot($)).root
   const r = root === undefined ? undefined : await readRecord($, root)
@@ -950,6 +1092,7 @@ async function statusText($: EngineInterface): Promise<string> {
     deploys,
     `queue: ${queue.filter(i => i.mark === 'x').length} done, ${queue.filter(i => i.mark === '!').length} blocked, ${queue.filter(i => i.mark === ' ').length} pending · ${summary(r.merges, r.held, r.ships)}`,
     current !== undefined ? `building: ${current.condition.slice(0, 80)} (${current.branch})` : undefined,
+    ...(await waitLines($, r, queue)),
     ...r.ships.filter(s => s.state !== 'merged').map(s => `- ${s.state}${s.pr !== undefined ? ` PR #${s.pr}` : ''}: ${s.goal.slice(0, 70)}${s.note ? ` (${s.note.slice(0, 80)})` : ''}`),
     r.linear !== undefined
       ? `linear: project ${r.linear.project} · ${Object.keys(r.linear.seen).length} issue(s) covered · last sync ${r.linear.syncedAt !== undefined ? `${Math.round(((await $.clock.now()) - r.linear.syncedAt) / 60_000)} min ago` : 'never'}${r.linear.error !== undefined ? ` · error: ${r.linear.error}` : ''}`
@@ -975,7 +1118,7 @@ async function recoverLoop($: EngineInterface, r: AutoRecord): Promise<void> {
       continue
     }
     if (e.event === 'start' && e.goal !== undefined && e.branch !== undefined) open = { goal: e.goal, worktree: e.worktree, branch: e.branch }
-    else if ((e.event === 'met' || e.event === 'blocked' || e.event === 'deferred') && e.goal === open?.goal) open = undefined
+    else if ((e.event === 'met' || e.event === 'blocked' || e.event === 'deferred' || e.event === 'waiting') && e.goal === open?.goal) open = undefined
   }
   if (open === undefined || open.worktree === undefined) {
     await writeLoop($, { repoRoot: r.root, seq: 0, retries: 0 })
@@ -994,6 +1137,7 @@ export const register: Register = (on, options) => {
     maxRounds: Number(options.maxRounds ?? 3),
     maxMerges: Number(options.maxMerges ?? 20),
     maxHours: Number(options.maxHours ?? 24),
+    maxWaitHours: Number(options.maxWaitHours ?? 72),
   }
   const pollMs = Math.max(Number(options.ciPollSec ?? 30), 5) * 1000
   const ciMode = typeof options.ciMode === 'string' ? options.ciMode : 'auto'
@@ -1009,8 +1153,23 @@ export const register: Register = (on, options) => {
     })
     await $.tool.register({
       name: DEFER_TOOL,
-      description: `auto-claude run only: give up on the current milestone because of an external blocker (credentials, a human decision, missing access), so it is marked blocked and the run moves on. Allowed only after at least ${MIN_CHECKS_TO_DEFER} failed checks; stop right after calling it.`,
+      description: `auto-claude run only: give up on the current milestone because of an external blocker (credentials, a human decision, missing access), so it is marked blocked and the run moves on. Allowed only after at least ${MIN_CHECKS_TO_DEFER} failed checks; stop right after calling it. Waiting on compute (training, a cache build) is not a blocker: use ${WAIT_TOOL_ID}.`,
       inputSchema: { type: 'object', properties: { reason: { type: 'string', description: 'The external blocker, in one or two sentences.' } }, required: ['reason'] },
+      isDeferred: false,
+    })
+    await $.tool.register({
+      name: WAIT_TOOL,
+      description: 'auto-claude run only: the current milestone needs a job with its own clock to finish first (a training run, a cache build, a file another milestone lands). Commit, call this with a shell command that exits 0 once it is done, then end the turn. auto-claude polls it every few minutes, builds other milestones meanwhile, and restarts this one from its branch when it passes.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          until: { type: 'string', description: 'Shell command, run from the repository root (not the worktree), that exits 0 once what you wait for is done, e.g. grep -q "CACHE DONE" ~/data/m21/cache.log or git cat-file -e origin/main:docs/m22/final.json.' },
+          alive: { type: 'string', description: 'Optional shell command that exits 0 while the awaited job still runs, e.g. tmux has-session -t m21cache. Failing twice in a row means it died, and you are asked to look.' },
+          within: { type: 'string', description: 'Optional: how long it should take at most (90m, 12h, 2d). Past it you are asked to look; past twice it the milestone is held.' },
+          reason: { type: 'string', description: 'What it waits for, in one sentence.' },
+        },
+        required: ['until', 'reason'],
+      },
       isDeferred: false,
     })
     // A fresh load knows nothing of the turns before it: quiet counts from now.
@@ -1078,6 +1237,8 @@ export const register: Register = (on, options) => {
   // is the matcher's type, not this hook. Only this line is exempt.
   // @ts-expect-error TS2589 in claude-code's Matcher<Args<'tool.call'>>
   on('tool.call', { tool: DEFER_TOOL_ID }, async ($, e) => deferCall($, (e as unknown as { reason?: unknown }).reason))
+
+  on('tool.call', { tool: WAIT_TOOL_ID }, async ($, e) => waitCall($, e as unknown as Record<string, unknown>))
 
   on('tool.call', { tool: READY_TOOL_ID }, async ($): Promise<{ result: string }> => {
     const root = activeRoot

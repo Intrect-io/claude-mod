@@ -75,6 +75,8 @@ function world(on: On, store: Record<string, unknown> = {}) {
     // Every `git rebase`, and whether a stacked branch's rebase --onto conflicts.
     rebases: [] as string[],
     rebaseFails: false,
+    // Exits of particular `bash -lc <command>` runs (a wait's after and alive), over checkExit.
+    cmdExit: new Map<string, number>(),
     clock: mock.clock(on, { now: 1_000 }),
   }
   const removed = (path: string) => [...w.gone].some(g => path === g || path.startsWith(`${g}/`))
@@ -182,6 +184,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
       w.adds.push(a)
       w.gone.delete(String(e.argv[5]))
     }
+    if (e.argv[0] === 'bash' && w.cmdExit.has(String(e.argv[2]))) return ok('', w.cmdExit.get(String(e.argv[2]))!)
     if (e.argv[0] === 'bash' && cwd.endsWith('/worktrees/auto-deploy')) return ok('', String(e.argv[2]).startsWith('curl') ? w.smokeExit : w.deployExit)
     if (e.argv[0] === 'bash') return ok('', cwd.endsWith('/worktrees/auto-verify') && w.freshExit !== undefined ? w.freshExit : w.checkExit)
     if (a.includes('status --porcelain') && !a.includes('--untracked-files')) return ok(w.dirty)
@@ -1264,5 +1267,197 @@ describe('Linear sync', () => {
     const w = world(on)
     await planned($, w)
     expect((await cmd($, 'status')).text).toContain('linear: off')
+  })
+})
+
+describe('waits on compute (:: after:, wait_until)', () => {
+  const AFTER = 'grep -q "CACHE DONE" /data/cache.log'
+  const ALIVE = 'tmux has-session -t cache'
+  const WAITQ = `- [ ] add() returns a+b :: check: python3 -m unittest -q test_add\n- [ ] record the cache :: check: python3 -m unittest -q test_cache :: after: ${AFTER} :: alive: ${ALIVE}\n`
+  const finals = (w: W) => w.runs.filter(r => r.includes('worktree add --detach /repo/worktrees/auto-final')).length
+
+  test('only waiting lines left: no final check, no round spent, no stop, no idle nudge; it starts when its after passes (ArtifactNet 2026-11-15)', { timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    w.cmdExit.set(AFTER, 1)
+    w.cmdExit.set(ALIVE, 0)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start')
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set(GOALS, WAITQ)
+    expect(String((await ready($)).result)).toContain('Plan accepted')
+    await w.clock.advance(1_200)
+    // The waiting line is not started first, though it is not first to wait.
+    expect(w.adds).toEqual([`git -C /repo worktree add ${WT1} -b ${BR1} origin/main`])
+    await meet($, w)
+    await w.clock.advance(TICK)
+    expect(w.pushes.some(p => p.includes('HEAD:main') && p.includes(WT1))).toBe(true)
+    // Five hours of a cache build: the run waits, polled every 3 min.
+    for (let i = 0; i < 10; i++) await w.clock.advance(30 * MIN)
+    expect(finals(w)).toBe(0)
+    expect(w.adds).toHaveLength(1)
+    expect(w.notifies.some(n => n.includes('idle') || n.includes('stopped') || n.includes('finished'))).toBe(false)
+    expect(w.runs.filter(r => r === `bash -lc ${AFTER}`).length).toBeGreaterThan(50)
+    const status = (await cmd($, 'status')).text
+    expect(status).toContain('auto-claude on · phase run · round 1')
+    expect(status).toMatch(/waiting 5\.\d h: record the cache on `grep -q "CACHE DONE"/)
+    expect(status).not.toContain('stalled')
+    // The cache is done: the next poll starts the line.
+    w.cmdExit.set(AFTER, 0)
+    await w.clock.advance(3 * MIN + TICK)
+    expect(w.notifies.some(n => n.includes('wait over after 5.') && n.includes('record the cache'))).toBe(true)
+    expect(w.adds.at(-1)).toBe('git -C /repo worktree add /repo/worktrees/goal-02-record-the-cache -b goal/02-record-the-cache origin/main')
+    await meet($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
+    expect(finals(w)).toBe(1)
+    expect(w.notifies.at(-1)).toContain('finished: the final check passed after 1 round(s). 2 merged, 0 held')
+  })
+
+  test('the time cap leaves the waiting out: a run that waits 30 h is not stopped at 24 h', { timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    w.cmdExit.set(AFTER, 1)
+    w.cmdExit.set(ALIVE, 0)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start')
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set(GOALS, WAITQ)
+    await ready($)
+    await w.clock.advance(1_200)
+    await meet($, w)
+    for (let i = 0; i < 30; i++) await w.clock.advance(60 * MIN)
+    expect(w.notifies.some(n => n.includes('time cap'))).toBe(false)
+    expect((await cmd($, 'status')).text).toContain('auto-claude on')
+  })
+
+  test('a job that died: alive failing twice asks the model once, with the poll output; once it runs again it may be asked again', { timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    w.cmdExit.set(AFTER, 1)
+    w.cmdExit.set(ALIVE, 0)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start')
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set(GOALS, WAITQ)
+    await ready($)
+    await w.clock.advance(1_200)
+    await meet($, w)
+    await w.clock.advance(10 * MIN)
+    expect(w.prompts.some(p => p.includes('A wait looks dead'))).toBe(false)
+    w.cmdExit.set(ALIVE, 1)
+    await w.clock.advance(7 * MIN)
+    const asked = w.prompts.filter(p => p.includes('A wait looks dead'))
+    expect(asked).toHaveLength(1)
+    expect(asked[0]).toContain(`alive \`${ALIVE}\` exited 1`)
+    expect(asked[0]).toContain('Relaunch it if it died')
+    expect(w.notifies.some(n => n.includes('a waited-on job looks dead'))).toBe(true)
+    await w.clock.advance(30 * MIN)
+    expect(w.prompts.filter(p => p.includes('A wait looks dead'))).toHaveLength(1)
+    expect((await cmd($, 'status')).text).toContain('alive failing')
+  })
+
+  test('a wait past its within asks the model once; past twice it the line is held and the run goes on', { timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    w.cmdExit.set(AFTER, 1)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start')
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set(GOALS, `- [ ] add() returns a+b :: check: python3 -m unittest -q test_add\n- [ ] record the cache :: check: true :: after: ${AFTER} :: within: 30m\n`)
+    await ready($)
+    await w.clock.advance(1_200)
+    await meet($, w)
+    await w.clock.advance(36 * MIN)
+    expect(w.prompts.filter(p => p.includes('A wait looks late'))).toHaveLength(1)
+    await w.clock.advance(30 * MIN)
+    expect(w.files.get(GOALS)).toMatch(/- \[!\] record the cache .*twice its within/)
+    for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
+    expect(finals(w)).toBe(1)
+    expect((await cmd($, 'status')).text).toContain('1 merged, 1 held')
+  })
+
+  test('wait_until: refused when done already or uncommitted; applied at the next stop, the line waits on its branch, others go on, then it resumes there', { timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    const UNTIL = 'test -f /data/m22/final.json'
+    await planned($, w)
+    const call = (input: Record<string, string>) => $.tool.call({ tool: 'mcp__auto-claude__wait_until', ...input } as never)
+    w.cmdExit.set(UNTIL, 0)
+    expect((await call({ until: UNTIL, reason: 'M22 training' })).deny).toContain('already exits 0')
+    w.cmdExit.set(UNTIL, 1)
+    expect((await call({ until: UNTIL })).deny).toContain('reason is required')
+    expect((await call({ until: UNTIL, reason: 'x', within: 'soon' })).deny).toContain('within must be a duration')
+    w.dirty = ' M calc.py\n'
+    expect((await call({ until: UNTIL, reason: 'M22 training' })).deny).toContain('Commit your work first')
+    w.dirty = ''
+    expect(String((await call({ until: UNTIL, alive: 'tmux has-session -t m22', within: '12h', reason: 'M22 training' })).result)).toContain('Wait recorded')
+    // The stop puts the line back to wait instead of judging it.
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
+    expect(w.evaluations).toBe(0)
+    const line = parseQueue(w.files.get(GOALS) ?? '')[0]!
+    expect(line).toMatchObject({ mark: ' ', condition: 'add() returns a+b', after: UNTIL, alive: 'tmux has-session -t m22', withinMs: 12 * 3_600_000, base: BR1 })
+    expect(w.files.get(LOG)).toContain('"event":"waiting"')
+    await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.includes('waiting: add() returns a+b'))).toBe(true)
+    // The other milestone is built meanwhile.
+    expect(w.adds.at(-1)).toBe(`git -C /repo worktree add ${WT2} -b ${BR2} origin/main`)
+    await meet($, w)
+    for (let i = 0; i < 12; i++) await w.clock.advance(TICK)
+    expect(finals(w)).toBe(0)
+    w.cmdExit.set(UNTIL, 0)
+    await w.clock.advance(3 * MIN + TICK)
+    expect(w.adds.at(-1)).toBe(`git -C /repo worktree add /repo/worktrees/goal-03-add-returns-a-b -b goal/03-add-returns-a-b ${BR1}`)
+    expect(w.prompts.at(-1)).toContain('Milestone #3: add() returns a+b')
+  })
+
+  test('a wait with no within or alive is still asked about once after 12 h, and never held', { timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    w.cmdExit.set(AFTER, 1)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start')
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set(GOALS, `- [ ] add() returns a+b :: check: python3 -m unittest -q test_add\n- [ ] record the cache :: check: true :: after: ${AFTER}\n`)
+    await ready($)
+    await w.clock.advance(1_200)
+    await meet($, w)
+    for (let i = 0; i < 11; i++) await w.clock.advance(60 * MIN)
+    expect(w.prompts.some(p => p.includes('A wait looks late'))).toBe(false)
+    for (let i = 0; i < 2; i++) await w.clock.advance(60 * MIN)
+    const asked = w.prompts.filter(p => p.includes('A wait looks late'))
+    expect(asked).toHaveLength(1)
+    expect(asked[0]).toContain('it has no within of its own')
+    for (let i = 0; i < 24; i++) await w.clock.advance(60 * MIN)
+    expect(w.prompts.filter(p => p.includes('A wait looks late'))).toHaveLength(1)
+    expect(w.files.get(GOALS)).toMatch(/- \[ \] record the cache/)
+    expect(finals(w)).toBe(0)
+  })
+
+  test('a stacked milestone that waits keeps the commit it was stacked on: restarted, it is rebased off its parent before it ships', { timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    const UNTIL = 'test -f /data/sub.ready'
+    w.cmdExit.set(UNTIL, 1)
+    w.github = true
+    w.checks = '[{"bucket":"pending"}]'
+    await planned($, w)
+    await meet($, w)
+    // Milestone 2 is stacked on milestone 1, whose CI is pending.
+    expect(w.adds.at(-1)).toBe(`git -C /repo worktree add ${WT2} -b ${BR2} ${BR1}`)
+    expect(String((await $.tool.call({ tool: 'mcp__auto-claude__wait_until', until: UNTIL, reason: 'sub needs its data' } as never)).result)).toContain('Wait recorded')
+    await $.classic.Stop(STOP)
+    await w.clock.advance(TICK)
+    // Milestone 1 lands meanwhile.
+    w.checks = '[{"bucket":"pass"}]'
+    await w.clock.advance(10_000)
+    expect(w.merged).toHaveLength(1)
+    w.cmdExit.set(UNTIL, 0)
+    await w.clock.advance(3 * MIN + TICK)
+    const WT3 = '/repo/worktrees/goal-03-sub-returns-a-b'
+    expect(w.adds.at(-1)).toBe(`git -C /repo worktree add ${WT3} -b goal/03-sub-returns-a-b ${BR2}`)
+    await meet($, w)
+    await w.clock.advance(10_000)
+    expect(w.rebases).toContain(`git -C ${WT3} rebase --onto origin/main tip-of-${BR1}`)
+    expect(w.merged).toHaveLength(2)
+  })
+
+  test('wait_until is only for a milestone being built', async ($, on) => {
+    const w = world(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect((await $.tool.call({ tool: 'mcp__auto-claude__wait_until', until: 'false', reason: 'x' } as never)).deny).toContain('only for milestones')
+    expect(w.prompts).toEqual([])
   })
 })
