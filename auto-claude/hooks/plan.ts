@@ -61,6 +61,14 @@ export const MIN_MILESTONES = 2
 
 // Words that put shipping into a milestone's end state, which the loop judges
 // before anything is pushed (measured: "…, merged to main" stayed unmet).
+// A start condition in prose ("(start only after X shows DONE)"): the driver
+// cannot read it, so it started the line at once and the model deferred it,
+// which spent the run's rounds while the awaited job still ran (measured in
+// ArtifactNet, 2026-11-09 and 11-15). It belongs in `:: after: <command>`.
+// Only the parenthesised prefix seen there: an end state that merely says
+// "the server starts only after migrations" is not a wait.
+const PROSE_WAIT = /^\([^)]*\bstarts? only (after|when|once)\b/i
+
 const SHIPPING = /\b(merged|merge[sd]? (in)?to|pushed|push(ed)? to|pull request|PR (is )?(open|opened|created|merged)|deployed|is live)\b|머지|병합|푸시|배포(됨|되었|된|완료)/i
 
 // The plan Claude wrote is the contract the run holds it to: a final check,
@@ -81,7 +89,11 @@ export function validatePlan(plan: string | undefined, queue: string | undefined
   for (const item of pending) {
     if (SHIPPING.test(item.condition)) errors.push(`a milestone says what is true on its own branch; merging, pushing, PRs and deploying happen after it is met: "${item.condition.slice(0, 80)}"`)
     if (item.check === undefined) errors.push(`milestone without a check: "${item.condition.slice(0, 80)}"`)
-    if (item.base !== undefined) errors.push(`milestones take no ":: base:" (auto-claude sets the base): "${item.condition.slice(0, 80)}"`)
+    // A line put back to wait (wait_until) keeps the branch it was built on.
+    if (item.base !== undefined && item.after === undefined) errors.push(`milestones take no ":: base:" (auto-claude sets the base): "${item.condition.slice(0, 80)}"`)
+    if (item.after === undefined && PROSE_WAIT.test(item.condition)) {
+      errors.push(`a start condition in prose is never checked, so the line starts at once: write it as ":: after: <shell command that exits 0 once it holds>" after the check (e.g. :: after: grep -q DONE ~/data/x/cache.log): "${item.condition.slice(0, 80)}"`)
+    }
   }
   const seen = new Set<string>()
   for (const item of items) {
@@ -119,6 +131,7 @@ export function kickoffText(hint: string, base: string, noRemote = false, fixedD
     'Aim at the long-term end state of the whole work, not a first step. Then write two files in the repository root:',
     '1. .claude/auto-plan.md: ## Goal (the end state, with its quality bar), a line `Final check: <one shell command that passes only when the whole goal is met>`, the deploy lines below, ## Milestones (ordered, why each), ## Decisions (empty for now).',
     `2. .claude/goals.md: one line per milestone, in order: \`- [ ] <milestone end state> :: check: <shell command that proves it>\`. Each milestone is one reviewable PR, built in its own worktree from ${base} after the earlier milestones are merged, so each check must pass from such a checkout. State only what is true on the milestone's own branch: never \"merged\", \"pushed\", \"PR opened\" or \"deployed\" (that happens after it is met).`,
+    'A milestone that needs something with its own clock first (a training run, a cache build, a file an earlier milestone lands on the default branch) adds, after its check, `:: after: <shell command that exits 0 once it is done>` and optionally `:: alive: <command that fails if the job died>` and `:: within: <12h>`. Examples: `:: after: grep -q "CACHE DONE" ~/data/m21/cache.log :: alive: tmux has-session -t m21cache :: within: 8h`, `:: after: git cat-file -e origin/main:docs/m22/final.json`. auto-claude polls it, builds other milestones meanwhile and starts the line when it passes; the run does not end while lines wait. Never write such a condition in prose.',
     ...deployRules(fixedDeploy),
     ...(linearBrief !== undefined ? [linearBrief] : []),
     `Then call mcp__auto-claude__${READY_TOOL}. It checks the files and starts the run: auto-claude builds each milestone in a worktree, pushes it, opens a PR, waits for CI, merges when green and deploys.`,
@@ -146,6 +159,7 @@ export const POLICY = [
   '- Decide every choice yourself: the recommended option, or the safest when it is plainly wrong; write it with its reason under ## Decisions in .claude/auto-plan.md.',
   '- Starting milestones, pushing, PRs, merging and deploying are auto-claude\'s: never run gh pr merge, a release or a deploy yourself, and never ask the person to run /auto-claude, /goal or merge anything. Commit your milestone on its goal/* branch.',
   '- When you are waiting on something (CI, the next milestone, a merge), just end the turn: auto-claude carries on by itself and prompts you when there is work. Never end a turn asking the person to check status.',
+  '- Waiting on compute (training, a cache build, a job you launched) is not a blocker and never a reason to defer: inside a milestone call mcp__auto-claude__wait_until with a shell command that exits 0 once it is done; in goals.md write `:: after: <command>` on the line. auto-claude polls it and resumes the work itself.',
   '- auto-claude sets each milestone as the goal itself: never call ProposeGoal or /goal during the run (a session goal would hold the loop).',
   '- An irreversible step (deleting data, credentials, payment, a new public release) is never taken: call mcp__auto-claude__defer_goal with the reason instead.',
   '- Linear issues named at the start of a milestone ("[AX-12] ...") are the driver\'s to move and comment on: read them, never change their state or comment on them, and never create Linear issues during a run (a new issue in the project becomes a milestone of this run).',

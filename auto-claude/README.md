@@ -31,7 +31,8 @@ goal-mode merged into auto-claude in 1.0.0 (see "From goal-mode" below). Its loo
      - a final check;
      - a Deploy line;
      - at least 2 milestones, with a check on every line and no duplicates;
-     - no milestone that says it is merged, pushed or deployed. That happens after the milestone is met.
+     - no milestone that says it is merged, pushed or deployed. That happens after the milestone is met;
+     - no start condition in prose ("start only after X shows DONE"). It goes in `:: after:` (see "Waiting on compute").
 2. **Build.** When nothing is being built or shipped, auto-claude starts the next pending line itself. Lines with `:: base:` go first.
    - The line gets its own worktree, `worktrees/goal-NN-…` on branch `goal/NN-…`, made from `origin/<default>`, or from the line's `:: base:`.
    - Claude gets a kickoff prompt. At every stop, the loop runs the line's check in the worktree and refuses uncommitted changes. Then an independent evaluator (`claude-sonnet-5-5`) judges the milestone from the transcript.
@@ -45,7 +46,7 @@ goal-mode merged into auto-claude in 1.0.0 (see "From goal-mode" below). Its loo
    - When CI fails or the PR conflicts, auto-claude appends a fix goal built on the milestone's branch (`:: base: goal/NN-…`), and the loop builds that next. After 3 failures the milestone is held.
    - **Deploy.** After each merge, as the plan says (see "Deploying").
    - **The session never rests through CI.** While a PR waits on CI, the next milestone starts at once, **stacked** on that PR's branch: the commit it starts from is recorded. Up to 2 milestones are built ahead this way. They ship in order. When the one before lands (squashed) or is held, the stacked branch runs `git rebase --onto origin/<default> <recorded commit>`, which drops its parent's commits, and is then pushed like any other. A rebased branch is pushed with `--force-with-lease`, since the session may have pushed it before. A stacked branch that does not rebase cleanly gets a fix goal that does the rebase by hand. While a broken deploy is being repaired, nothing new is stacked and nothing stacked ships: the repair, built from the default branch, lands and deploys first. A fix goal (`:: base:`) always starts on its own base.
-4. **Finish or replan.** When the queue is done, auto-claude runs the final check on a fresh checkout of the merged default branch.
+4. **Finish or replan.** When the queue is done, auto-claude runs the final check on a fresh checkout of the merged default branch. Lines still waiting on their `:: after:` mean the queue is not done: no final check runs and no round is spent until they have started.
    - If it passes, auto-claude deploys once more if a deploy is still due. Then it writes a `## Result` section and stops.
    - If it fails, Claude appends new milestones from the check's output (round 2, and so on, up to `maxRounds`).
 
@@ -107,7 +108,7 @@ A run keeps the repository's Linear project in step, through the session's own `
     - `rm -rf` outside the worktree;
     - edits in the repository outside the worktree;
     - any regex in `.claude/goal-loop.deny`.
-- **Caps.** A run stops and reports after `maxMerges` (20) merges, after `maxHours` (24), or after `maxRounds` (3) rounds without the final check passing.
+- **Caps.** A run stops and reports after `maxMerges` (20) merges, after `maxHours` (24) of working time, or after `maxRounds` (3) rounds without the final check passing. Time spent with nothing to do but wait on `:: after:` lines does not count toward `maxHours`, up to `maxWaitHours` (72) of it.
 - **Kill switch.** Create `.claude/auto-claude.stop`, or run `/auto-claude stop`. Either one ends the loop's milestone as well: it is no longer judged, and its guards lift. `/auto-claude start` and `resume` move a stop file left from an earlier run to `.claude/auto-claude.stop.cleared`. `resume` goes back to the phase the run stopped in: planning stays planning.
 
 ## Nothing waits on the person
@@ -117,7 +118,9 @@ A run never asks the person to look at `status` or to run a command. When someth
 | what stops | what happens |
 | --- | --- |
 | A milestone is open, but the session has had no turn for 1 min: the model ended its turn to "wait", a prompt was dropped, an interrupt, or a stop the judge could not read | The milestone's prompt is sent again, after 1, 3 and 6 min of quiet. At 12 min, the milestone is blocked and the next one starts. A stop being judged, or a retry pause, is not quiet. Turns are tracked with `turn.start` / `turn.complete`. |
-| The model waits inside a turn | Refused while a run is on: `sleep` of 60 s or more (or a computed duration), `gh run watch`, `gh pr checks --watch`, `Monitor`, `CronCreate` and `ScheduleWakeup`. auto-claude watches CI, merges and deploys itself, and prompts the session when there is work. Shorter sleeps (a check waiting for a server) pass. |
+| The model waits inside a turn | Refused while a run is on: `sleep` of 60 s or more (or a computed duration), `gh run watch`, `gh pr checks --watch`, `Monitor`, `CronCreate` and `ScheduleWakeup`. auto-claude watches CI, merges and deploys itself, and prompts the session when there is work. The refusal points to `wait_until` for a job with its own clock. Shorter sleeps (a check waiting for a server) pass. |
+| A milestone needs a training run or a cache build to finish | The line waits on its `:: after:` command, polled every 3 min, while other lines are built (see "Waiting on compute"). The run neither ends nor counts it as idle. |
+| A waited-on job died, or its wait runs past its `within` | `:: alive:` failing 2 polls in a row, or the wait passing its `within`, sends the model one prompt with the last poll's output to look at the job and relaunch it or fix the line. Past twice its `within`, the line is held. |
 | A shipping error to diagnose while the session builds another milestone | The diagnosis prompt waits until that milestone is done, so the stop judge never judges the wrong work. Nothing is held before the model was asked and had 10 min to act (after an hour unasked, the hold goes ahead). |
 | Planning ends without `auto_plan_ready` | A reminder 1 min after that turn ended, listing what the plan files lack (15 min at most otherwise). After 3, the run stops. |
 | An SSH remote refuses the push (`Permission denied (publickey)`) | The push goes to the https URL of the same repository. |
@@ -131,10 +134,29 @@ A run never asks the person to look at `status` or to run a command. When someth
 
 `/auto-claude status` ends with a `stalled:` line naming the cause whenever the run is not moving. Only the owning session receives the unattended rules. Progress shows in the status line piece (`auto·R1·M3/7·PR#12`) and in notifications.
 
+## Waiting on compute
+
+A milestone may need something with its own clock first: a training run, a cache build, or a file another milestone lands on the default branch. The driver watches it; the model never schedules its own wake-up.
+
+```
+- [ ] record the M21 cache :: check: pytest -q tests/test_m21.py :: after: grep -q "CACHE DONE" ~/data/m21/cache.log :: alive: tmux has-session -t m21cache :: within: 8h
+- [ ] the M22 verdict :: check: python -m src.m22.check final :: after: git cat-file -e origin/main:docs/m22/runs.json
+```
+
+- **`:: after: <command>`** must exit 0 before the line starts. auto-claude runs it from the repository root every 3 min (30 s timeout), fetching first when it names `origin/`. Lines that wait are skipped; the others are built meanwhile.
+- **`:: alive: <command>`** (optional) exits 0 while the awaited job runs. Failing 2 polls in a row asks the model, once, to look at the job.
+- **`:: within: <90m | 12h | 2d>`** (optional): past it the model is asked to look; past twice it the line is held. A line without one is still asked about, once, after 12 h, and never held.
+- `after` and `alive` run from the repository root, never from a worktree, both when polled and when `wait_until` checks them.
+- The fields go after the check, in this order, with `:: base:` last.
+- **`mcp__auto-claude__wait_until`** does the same from inside a milestone: `{ until, alive?, within?, reason }`. It is refused if `until` already passes or the worktree has uncommitted changes. At the next stop the line goes back to the queue with `:: after:` and `:: base: <its branch>`, so it restarts from the work built so far. A milestone that was stacked keeps the commit it was stacked on, so its restarted branch is rebased off the parent like any stacked one.
+- `/auto-claude status` lists each wait, how long it has waited and its last poll; the status line piece shows `·waitN`.
+
+Measured in ArtifactNet (2026-11-09 to 11-15): lines carried prose start conditions the driver could not read, so each was started at once and deferred by the model. With every line deferred, the final check failed and a round was spent; three rounds went in 25 minutes, the run stopped, and nothing resumed it when the cache finished hours later.
+
 ## The loop
 
 - **Stuck.** 5 unmet checks in one turn, two unreadable verdicts, or an evaluator that fails: the loop waits 2 minutes, then sends a "change your approach" prompt, at most twice. After that the line is marked `[!]` and the run moves on.
-- **Deferring.** The model may call `mcp__auto-claude__defer_goal` for an external blocker after 2 failed checks. The deferral is applied at the next stop.
+- **Deferring.** The model may call `mcp__auto-claude__defer_goal` for an external blocker after 2 failed checks. The deferral is applied at the next stop. Waiting on compute is not a blocker: it uses `wait_until`.
 - **Evaluator.** Each call takes about 2–20 s. It is billed to the session's credentials but does not appear in `/cost`. A transcript over the 4 MiB read cap is judged by a fork of the session instead.
 - **Files.** `.claude/goals.md`, `.claude/goal-loop.log` (JSONL, its last 2000 lines) and `.claude/goal-loop.deny` are excluded from git through `.git/info/exclude`, along with `worktrees/`.
 - **`--queue`.** `/auto-claude start --queue` builds the queue you wrote, line by line, with the same loop. Nothing is pushed, merged or deployed, and the branches are left for review, as goal-mode's `loop on` did.
@@ -147,4 +169,4 @@ A run never asks the person to look at `status` or to run a command. When someth
 - **Session goals** (`set_goal`, `/goal-mode set|auto|clear` and the outcome nudges) are gone. Use Claude Code's `/goal` and `ProposeGoal`.
 - **A run already going** when 1.0 loads keeps its milestone. The loop's state lived in goal-mode's store, which this plugin cannot read, so the open milestone is found again from the last `start` in `.claude/goal-loop.log` and prompted again. New branches number above the highest existing `goal/NN-*`.
 
-Options: `ciMode` (`auto` | `github` | `local`), `maxRounds`, `maxMerges`, `maxHours` and `ciPollSec`.
+Options: `ciMode` (`auto` | `github` | `local`), `maxRounds`, `maxMerges`, `maxHours`, `maxWaitHours` and `ciPollSec`.

@@ -14,10 +14,15 @@ import type { Goal, LoopCurrent, LoopRecord, LoopView } from '../types'
 import { clip, evaluate } from './evaluator'
 import type { StopFields } from './evaluator'
 import { checkBash, checkPath, uncommitted, WAIT_MAX_S, waitsLong } from './guard'
-import { markItem, nextPending, parseQueue, slugify } from './queue'
+import { markItem, nextPending, parseDuration, parseQueue, requeueItem, slugify, waitingItems } from './queue'
+import type { QueueItem } from './queue'
 
 export const DEFER_TOOL = 'defer_goal'
 export const DEFER_TOOL_ID = 'mcp__auto-claude__defer_goal'
+export const WAIT_TOOL = 'wait_until'
+export const WAIT_TOOL_ID = 'mcp__auto-claude__wait_until'
+// How long wait_until's own probe of `until` may run.
+const WAIT_PROBE_MS = 30_000
 
 const MAX_UNMET_PER_TURN = 5
 const MAX_CHECKS = 30
@@ -53,7 +58,7 @@ export function setOnFinish(f: (() => void) | undefined): void {
   onFinish = f
 }
 
-export type LogEvent = 'start' | 'resume' | 'unmet' | 'met' | 'retry' | 'blocked' | 'deferred' | 'denied' | 'queue-empty' | 'error'
+export type LogEvent = 'start' | 'resume' | 'unmet' | 'met' | 'retry' | 'blocked' | 'deferred' | 'denied' | 'queue-empty' | 'waiting' | 'error'
 
 const loopKey = (root: string) => `loop:${root}`
 export const queuePath = (root: string) => `${root}/.claude/goals.md`
@@ -90,17 +95,21 @@ export function maxBranchSeq(refs: string): number {
 
 // Takes the next pending queue line, makes its worktree from `base` (or the
 // line's own `:: base:`), sets the goal and sends the kickoff. Undefined when
-// the queue has no pending line (logged as queue-empty) or none could start.
-export async function startNext($: EngineInterface, root: string, base: string, remote: string): Promise<LoopCurrent | undefined> {
+// the queue has no pending line (logged as queue-empty), when every pending
+// line still waits on its `:: after:` (`ready`, the driver's polls), or when
+// none could start.
+export async function startNext($: EngineInterface, root: string, base: string, remote: string, ready?: (item: QueueItem) => boolean): Promise<LoopCurrent | undefined> {
   let rec: LoopRecord = (await readLoop($, root)) ?? { repoRoot: root, seq: 0, retries: 0 }
   if (rec.current !== undefined) return rec.current
   const refs = await run($, ['git', '-C', root, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/goal/'], root, 15_000).catch(() => undefined)
   rec = { ...rec, seq: Math.max(rec.seq, maxBranchSeq(refs?.stdout ?? '')) }
   for (let attempt = 0; attempt < 5; attempt++) {
-    const item = nextPending(parseQueue((await readText($, queuePath(root))) ?? ''))
+    const items = parseQueue((await readText($, queuePath(root))) ?? '')
+    const item = nextPending(items, ready)
     if (item === undefined) {
       await writeLoop($, { ...rec, current: undefined, retries: 0 })
-      await appendLog($, root, { event: 'queue-empty' })
+      // Lines still waiting: the queue is not empty, and the driver polls them.
+      if (waitingItems(items, ready ?? (i => i.after === undefined)).length === 0) await appendLog($, root, { event: 'queue-empty' })
       return undefined
     }
     const seq = rec.seq + 1
@@ -209,6 +218,10 @@ async function judge<R extends { block?: string }>($: EngineInterface, { rec, vi
     await finishGoal($, rec, { mark: '!', note: `deferred ${isoNow()}: ${goal.deferPending}`, event: 'deferred', reason: goal.deferPending })
     return below
   }
+  if (goal.waitPending !== undefined) {
+    await finishWait($, rec, goal.waitPending)
+    return below
+  }
 
   // 1. The queue's own check, run deterministically in the worktree.
   let evidence: string | undefined
@@ -296,6 +309,49 @@ async function finishGoal($: EngineInterface, rec: LoopRecord, { mark, note, eve
   onFinish?.()
 }
 
+// wait_until applied: the line goes back to the queue, waiting on its
+// command, and restarts from the branch built so far once that passes. The
+// session is free for other lines meanwhile.
+async function finishWait($: EngineInterface, rec: LoopRecord, wait: NonNullable<Goal['waitPending']>): Promise<void> {
+  const current = rec.current
+  if (current === undefined) return
+  const text = await readText($, queuePath(rec.repoRoot))
+  if (text !== undefined) {
+    await $.fs.write(queuePath(rec.repoRoot), requeueItem(text, current.condition, wait, current.branch, `waiting since ${isoNow()}: ${wait.reason}`)).catch(() => undefined)
+  }
+  await appendLog($, rec.repoRoot, { event: 'waiting', goal: current.condition, reason: clip(wait.reason, 300), branch: current.branch, after: wait.after })
+  $.ui.toast(`auto-claude: milestone waits on \`${clip(wait.after, 60)}\`: ${clip(current.condition, 60)}`)
+  await update($, goalAtom, () => null)
+  await update($, viewAtom, () => null)
+  await writeLoop($, { ...rec, current: undefined, retries: 0, wakes: 0 })
+  onFinish?.()
+}
+
+// wait_until: the milestone needs something with its own clock (a training
+// run, a cache build, a file another milestone lands). Recorded only; the next
+// Stop puts the line back to wait, so the driver, not the model, watches it.
+export async function waitCall($: EngineInterface, input: Record<string, unknown>): Promise<{ deny: string } | { result: string }> {
+  const text = (k: string) => (typeof input[k] === 'string' ? (input[k] as string).trim() : '')
+  const until = text('until')
+  const alive = text('alive')
+  const within = text('within')
+  const reason = text('reason')
+  const goal = await read($, goalAtom)
+  const view = await read($, viewAtom)
+  if (goal === null || view === null) return { deny: `${WAIT_TOOL_ID} is only for milestones of a running auto-claude loop.` }
+  if (until === '') return { deny: 'until is required: a shell command that exits 0 once what you wait for is done (e.g. grep -q "DONE" ~/data/x/cache.log).' }
+  if (reason === '') return { deny: 'reason is required.' }
+  if (within !== '' && parseDuration(within) === undefined) return { deny: `within must be a duration like 90m, 12h or 2d, not "${within}".` }
+  // Run where the driver polls it: the repository root (the worktree may be gone by then).
+  const probe = await run($, ['bash', '-lc', until], view.repoRoot, WAIT_PROBE_MS).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+  if (probe.exitCode === 0) return { deny: `\`${until}\` already exits 0: what it waits for is done. Keep working on the milestone.` }
+  const status = await run($, ['git', '-C', view.worktree, 'status', '--porcelain'], view.worktree, 60_000).catch(() => undefined)
+  const dirty = status === undefined ? [] : uncommitted(status.stdout)
+  if (dirty.length > 0) return { deny: `Commit your work first: the milestone restarts from ${view.branch} once the wait is over.\n${clip(dirty.join('\n'), 400)}` }
+  await update($, goalAtom, g => (g === null ? null : { ...g, waitPending: { after: until, ...(alive !== '' ? { alive } : {}), ...(within !== '' ? { within } : {}), reason } }))
+  return { result: `Wait recorded. End the turn now. auto-claude polls \`${clip(until, 120)}\` every few minutes and restarts this milestone from ${view.branch} when it exits 0; other milestones go on meanwhile.${alive !== '' ? ' If the alive command fails, you are asked to look.' : ''}` }
+}
+
 // defer_goal: recorded only; the next Stop marks the goal and moves on, so a
 // new goal is never judged against this turn's transcript.
 export async function deferCall($: EngineInterface, reasonRaw: unknown): Promise<{ deny: string } | { result: string }> {
@@ -317,7 +373,7 @@ export async function deferCall($: EngineInterface, reasonRaw: unknown): Promise
 // A run never rests inside a turn either: auto-claude watches CI, merges and
 // deploys itself, and wakes the session when it has work for it.
 const WAIT_TOOLS: ReadonlySet<string> = new Set(['CronCreate', 'ScheduleWakeup', 'Monitor'])
-const WAIT_REFUSAL = `auto-claude run: do not wait or schedule a wake-up. auto-claude watches CI, merges and deploys by itself and prompts this session when there is work; keep working on the milestone, or end the turn if it is done (sleeps under ${WAIT_MAX_S} s are fine).`
+const WAIT_REFUSAL = `auto-claude run: do not wait or schedule a wake-up inside a turn. auto-claude watches CI, merges and deploys by itself. To wait on a training run, a cache build or another job, call ${WAIT_TOOL_ID} with a shell command that exits 0 once it is done, then end the turn: the driver polls it and prompts this session again. Otherwise keep working on the milestone, or end the turn if it is done (sleeps under ${WAIT_MAX_S} s are fine).`
 
 export function guardRefusal(e: Record<string, unknown>, view: LoopView | null, runOn: boolean): string | undefined {
   const tool = String(e.tool)
@@ -338,8 +394,9 @@ export const LOOP_POLICY = `# auto-claude milestone — ACTIVE
 You are building one milestone of an unattended auto-claude run. Nobody is watching this session.
 - Do not ask questions (AskUserQuestion is refused) and do not enter plan mode. Decide with a stated assumption and record it in the commit message.
 - A "CONFIDENCE HALT" becomes a call to ${DEFER_TOOL_ID} with the reason, and only for external blockers (credentials, a human decision, missing access) after at least ${MIN_CHECKS_TO_DEFER} failed checks. Otherwise keep working.
+- Waiting on compute (a training run, a cache build, a job you launched, a file another milestone lands) is not a blocker: commit, call ${WAIT_TOOL_ID} with a shell command that exits 0 once it is done (and an alive command that fails if the job died), then end the turn. Never defer for it.
 - Work only inside the milestone's worktree; commit after each meaningful step. Push only your goal/* branch, never main or with force. auto-claude pushes, merges and deploys for you.
-- Never wait inside a turn (no long sleep, CI watch, Monitor, cron or scheduled wake-up). While an earlier milestone's CI runs you are already building the next one; when this one is done, end the turn and the next prompt comes by itself.`
+- Never wait inside a turn (no long sleep, CI watch, Monitor, cron or scheduled wake-up); ${WAIT_TOOL_ID} is how a milestone waits. While an earlier milestone's CI runs you are already building the next one; when this one is done, end the turn and the next prompt comes by itself.`
 
 export function kickoffText(current: LoopCurrent, seq: number): string {
   return [
@@ -351,6 +408,7 @@ export function kickoffText(current: LoopCurrent, seq: number): string {
     'Commit after each meaningful step: the milestone is not accepted with uncommitted changes.',
     `You may push only this branch (git push -u origin ${current.branch}); never main/master, never with force. auto-claude opens the PR, merges and deploys once the milestone is met.`,
     `Nobody is watching: do not ask questions. Decide with a stated assumption and record it in the commit message. For an external blocker (credentials, a human decision, missing access), call ${DEFER_TOOL_ID} after at least ${MIN_CHECKS_TO_DEFER} failed checks.`,
+    `If it needs a job to finish first (training, a cache build), launch or check the job, commit, and call ${WAIT_TOOL_ID} with a shell command that exits 0 once it is done; auto-claude polls it and resumes this milestone.`,
   ].join('\n')
 }
 
