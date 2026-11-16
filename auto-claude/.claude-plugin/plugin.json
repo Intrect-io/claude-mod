@@ -1,7 +1,7 @@
 {
   "name": "auto-claude",
-  "version": "1.3.0",
-  "description": "Finishes a repository's work unattended and live: Claude plans the long-term end state, its milestones and how it deploys; the built-in loop builds each milestone in its own worktree and judges it; auto-claude ships it (push, PR, CI, merge when green), deploys and smoke-checks it, and a watchdog keeps the run moving until the final check passes. Absorbs goal-mode's loop (1.0.0).",
+  "version": "1.4.0",
+  "description": "Finishes a repository's work unattended and live: Claude plans the long-term end state, its milestones and how it deploys; the built-in loop builds each milestone in its own worktree and judges it; auto-claude ships it (push, PR, CI, merge when green), deploys and smoke-checks it, and a watchdog keeps the run moving until the final check passes. With --always-on it does not end there: it stands by with no model turn and wakes for a new cycle when Linear, the live smoke check, the default branch's CI or a labelled GitHub issue gives it work (1.4.0). Absorbs goal-mode's loop (1.0.0).",
   "author": {
     "name": "unohee"
   },
@@ -43,6 +43,36 @@
       "title": "CI poll interval (s)",
       "description": "How often the driver looks at the loop's log and the open PR",
       "default": 30
+    },
+    "alwaysOn": {
+      "type": "boolean",
+      "title": "Always on by default",
+      "description": "Every /auto-claude start stands by after its final check passes, as with --always-on (--once opts a run out)",
+      "default": false
+    },
+    "healthEveryMin": {
+      "type": "number",
+      "title": "Standby smoke check interval (min)",
+      "description": "While standing by, how often the plan's Smoke check runs; 2 failures in a row queue a repair and wake the run",
+      "default": 30
+    },
+    "githubEveryMin": {
+      "type": "number",
+      "title": "Standby GitHub poll interval (min)",
+      "description": "While standing by, how often the default branch's CI runs and labelled issues are read (github CI mode only)",
+      "default": 10
+    },
+    "issueLabel": {
+      "type": "string",
+      "title": "GitHub issue label",
+      "description": "Open issues with this label become queue lines of an always-on run (empty: issues are not read). Only people with triage access can label, so the label is the trust gate",
+      "default": "auto-claude"
+    },
+    "maxMergesPerDay": {
+      "type": "number",
+      "title": "Max merges per 24 h (always on)",
+      "description": "An always-on run does not wake while the last 24 h already hold this many merges; maxMerges and maxHours count per cycle",
+      "default": 20
     }
   }
 }

@@ -122,8 +122,10 @@ export type Caps = { maxRounds: number; maxMerges: number; maxHours: number; max
 // The time cap counts the run's working time: time spent with nothing to do
 // but wait on a line's `:: after:` (a training run) is left out, up to
 // maxWaitHours of it, so a run waiting on a day-long job is not cut off.
-export function capReached(r: { merges: number; startedAt: number; waitedMs?: number }, caps: Caps, now: number): string | undefined {
-  if (r.merges >= caps.maxMerges) return `the merge cap (${caps.maxMerges}) was reached`
+// An always-on run counts both caps per cycle: a wake restarts startedAt and
+// records the merges so far in cycleBase.
+export function capReached(r: { merges: number; startedAt: number; waitedMs?: number; cycleBase?: { merges: number } }, caps: Caps, now: number): string | undefined {
+  if (r.merges - (r.cycleBase?.merges ?? 0) >= caps.maxMerges) return `the merge cap (${caps.maxMerges}) was reached`
   const waited = Math.min(r.waitedMs ?? 0, (caps.maxWaitHours ?? 0) * 3600_000)
   if (now - r.startedAt - waited >= caps.maxHours * 3600_000) {
     return `the time cap (${caps.maxHours} h${waited > 0 ? `, not counting ${Math.round(waited / 3600_000)} h of waiting` : ''}) was reached`

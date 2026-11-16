@@ -47,7 +47,8 @@ export type LinearSync = {
   error?: string
 }
 
-export type AutoPhase = 'plan' | 'run' | 'final' | 'done' | 'stopped'
+// standby: an always-on run between cycles; it is on, but owns nothing and runs no model turn.
+export type AutoPhase = 'plan' | 'run' | 'final' | 'done' | 'stopped' | 'standby'
 
 export type AutoRecord = {
   on: boolean
@@ -128,6 +129,29 @@ export type AutoRecord = {
   // A stacked milestone put back to wait keeps the commit it was stacked on,
   // by condition, so the branch it restarts on is rebased off its parent too.
   waitOnto?: Record<string, string>
+  // Always-on (hooks/standby.ts): the run stands by after its final check
+  // passes instead of ending, and wakes for a new cycle when a source queues work.
+  alwaysOn?: boolean
+  // When it last entered standby; the cycle now running or last run (0: the first, planned one).
+  standbyAt?: number
+  cycle?: number
+  // The counts when the cycle woke, for its line under ## Cycles; what woke it.
+  cycleBase?: { merges: number; held: number; deploys: number }
+  wokeFor?: string[]
+  // When each standby source is next polled.
+  timers?: { health?: number; github?: number }
+  // Smoke checks failing in a row, in standby.
+  healthFails?: number
+  // GitHub events covered, by id (ci:<run>, gh#<n>), with the stamp each is covered up to; follow-ups per id.
+  seen?: Record<string, string>
+  followUps?: Record<string, number>
+  // The last GitHub poll's error, told once when it starts failing.
+  githubError?: string
+  // Merge times in the last 24 h, for the rolling cap, and whether its hold was told.
+  mergeTimes?: number[]
+  dayCapTold?: boolean
+  // The standby whose entry already compacted the session (its standbyAt).
+  compactedFor?: number
 }
 
 // One waiting queue line, as the driver polls it.
