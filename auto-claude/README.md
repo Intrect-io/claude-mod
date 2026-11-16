@@ -4,7 +4,9 @@ An unattended run of one repository, through to what it built being live. Give i
 
 ```
 /auto-claude start [aim]   # e.g. /auto-claude start finish the CLI and its docs
+/auto-claude start --always-on [aim]  # the same, then stand by and wake for new work
 /auto-claude start --queue # build .claude/goals.md as it is: branches only, nothing shipped
+/auto-claude standby       # a finished run (or the one going) stands by from now on
 /auto-claude status | stop | resume
 ```
 
@@ -49,6 +51,26 @@ goal-mode merged into auto-claude in 1.0.0 (see "From goal-mode" below). Its loo
 4. **Finish or replan.** When the queue is done, auto-claude runs the final check on a fresh checkout of the merged default branch. Lines still waiting on their `:: after:` mean the queue is not done: no final check runs and no round is spent until they have started.
    - If it passes, auto-claude deploys once more if a deploy is still due. Then it writes a `## Result` section and stops.
    - If it fails, Claude appends new milestones from the check's output (round 2, and so on, up to `maxRounds`).
+
+## Always on
+
+With `--always-on` (or the `alwaysOn` option), a run does not end when its final check passes. It **stands by**: still on, but with no model turn, while the driver polls what can give it work. Each new thing becomes a queue line, and a queue line wakes the run for a new **cycle**. The design follows [Building always-on agents](https://claude.com/resources/articles/building-always-on-agents): sleep without tokens, wake on events and timers, keep memory outside the conversation, send little.
+
+| source | polled | becomes |
+| --- | --- | --- |
+| Linear (mapped project) | every 10 min, as during a run | `- [ ] [AX-12] …` (see "Linear") |
+| The plan's `Smoke check:` | every `healthEveryMin` (30) | 2 failures in a row: the deploy repair line, built from the default branch first |
+| The default branch's CI (github mode) | every `githubEveryMin` (10), and at once on entering standby | a failed run on the branch's current tip: `- [ ] [ci:<run>] The "<workflow>" workflow passes on main again …` |
+| Open GitHub issues labelled `issueLabel` (`auto-claude`) | with the CI poll | `- [ ] [gh#12] <title>: what GitHub issue #12 asks is resolved on this branch …`; closed with a comment when it merges |
+
+- **Dedupe.** Each event has an id (`ci:<run>`, `gh#<n>`) and a stamp. An id is queued once; a newer stamp gets a follow-up line, at most 2 per id; at most 5 lines per poll.
+- **Trust.** Only the number and title of an issue go into the line, with `::` and brackets removed, so a title cannot add a check or a base. The model reads the body itself while building. Labelling needs triage access, so the label is the gate. Peer messages and webhook text do not wake a run.
+- **Waking.** Only when the session has had no turn for 2 min: a person may use the session while it stands by. A cycle builds, ships and deploys like any run, without a new planning round; its final check passing stands it by again. A failing one replans, as a run does.
+- **Standing by owns nothing.** The guards and the unattended policy are off, `.claude/auto-claude.on` says `on: false, phase: standby` (harness's Linear rules apply again), and the watchdog's idle notices are quiet.
+- **Caps.** `maxMerges` and `maxHours` count per cycle; standby time counts toward neither. `maxMergesPerDay` (20) holds a wake back while the last 24 h hold that many merges, told once. 3 deploys failing in a row still stop the run.
+- **Memory.** Each cycle adds one line under `## Cycles` in `auto-plan.md`: what woke it, what merged, was held and deployed. On entering standby the session is compacted once (when its context is 30% full or more), keeping the goal, decisions and cycles.
+- **Quiet.** In standby a person is told only of a wake (and why), a cycle's end, a failing smoke check or GitHub poll, and the daily cap.
+- **Limits.** The worker is the session: if it exits, nothing polls until `/auto-claude resume` in a session (other sessions report it orphaned). An external supervisor, Remote Control or webhook inboxes, and answering a deferred milestone are not part of this.
 
 ## Deploying
 
@@ -169,4 +191,4 @@ Measured in ArtifactNet (2026-11-09 to 11-15): lines carried prose start conditi
 - **Session goals** (`set_goal`, `/goal-mode set|auto|clear` and the outcome nudges) are gone. Use Claude Code's `/goal` and `ProposeGoal`.
 - **A run already going** when 1.0 loads keeps its milestone. The loop's state lived in goal-mode's store, which this plugin cannot read, so the open milestone is found again from the last `start` in `.claude/goal-loop.log` and prompted again. New branches number above the highest existing `goal/NN-*`.
 
-Options: `ciMode` (`auto` | `github` | `local`), `maxRounds`, `maxMerges`, `maxHours`, `maxWaitHours` and `ciPollSec`.
+Options: `ciMode` (`auto` | `github` | `local`), `maxRounds`, `maxMerges`, `maxHours`, `maxWaitHours`, `ciPollSec`, and for always-on runs `alwaysOn`, `healthEveryMin`, `githubEveryMin`, `issueLabel` and `maxMergesPerDay`.

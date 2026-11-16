@@ -26,7 +26,7 @@
     },
     {
       "name": "auto-claude",
-      "description": "Unattended run of a repository, to the end state live: Claude plans the long-term goal, milestones and deploy; the built-in loop builds each in a worktree and judges it; auto-claude pushes, opens PRs, merges when CI is green, deploys and smoke-checks, and a watchdog repairs or routes around stalls until the final check passes.",
+      "description": "Unattended run of a repository, to the end state live: Claude plans the long-term goal, milestones and deploy; the built-in loop builds each in a worktree and judges it; auto-claude pushes, opens PRs, merges when CI is green, deploys and smoke-checks, and a watchdog repairs or routes around stalls until the final check passes. With --always-on it then stands by and wakes for new cycles (Linear, live smoke check, default-branch CI, labelled GitHub issues).",
       "author": {
         "name": "unohee"
       },

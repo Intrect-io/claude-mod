@@ -77,6 +77,11 @@ function world(on: On, store: Record<string, unknown> = {}) {
     rebaseFails: false,
     // Exits of particular `bash -lc <command>` runs (a wait's after and alive), over checkExit.
     cmdExit: new Map<string, number>(),
+    // Standby: `gh issue list` for the label, the default branch tip, context fill and compactions.
+    issueList: '[]',
+    tip: 'tip',
+    contextPercent: 50,
+    compacts: 0,
     clock: mock.clock(on, { now: 1_000 }),
   }
   const removed = (path: string) => [...w.gone].some(g => path === g || path.startsWith(`${g}/`))
@@ -98,6 +103,11 @@ function world(on: On, store: Record<string, unknown> = {}) {
   on('ui.notify', (_, e) => {
     w.notifies.push(e.text)
     return { value: { isSent: true as const, channel: 'terminal_bell' as const } }
+  })
+  on('session.usage', () => ({ value: { context: { window: 200_000, percent: w.contextPercent } } as never }))
+  on('session.compact', () => {
+    w.compacts++
+    return { skip: 'test' } as never
   })
   on('env.get', () => ({ value: '/home' }))
   on('fs.read', (_, e) => {
@@ -175,6 +185,8 @@ function world(on: On, store: Record<string, unknown> = {}) {
       return ok()
     }
     if (a.startsWith('gh run list')) return ok(w.runList)
+    if (a.startsWith('gh issue list')) return ok(w.issueList)
+    if (/ rev-parse (origin\/)?main$/.test(a)) return ok(`${w.tip}\n`)
     if (e.argv[0] === 'test' && e.argv[1] === '-d') return ok('', w.gone.has(String(e.argv[2])) ? 1 : 0)
     if (e.argv[0] === 'test' && e.argv[1] === '-e') return ok('', w.missing.has(String(e.argv[2])) ? 1 : 0)
     if (a.includes('rev-parse --verify')) return w.branchGone ? ok('', 1) : ok(`tip-of-${String(e.argv.at(-1)).replace(/\^\{commit\}$/, '')}\n`)
@@ -1459,5 +1471,104 @@ describe('waits on compute (:: after:, wait_until)', () => {
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     expect((await $.tool.call({ tool: 'mcp__auto-claude__wait_until', until: 'false', reason: 'x' } as never)).deny).toContain('only for milestones')
     expect(w.prompts).toEqual([])
+  })
+})
+
+describe('always on (standby)', () => {
+  const SMOKE = 'curl -fsS http://localhost:8080/health'
+  // Plans an always-on run and builds both milestones until it stands by.
+  async function standing($: Engine, w: W, plan = PLAN_DEPLOY) {
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect((await cmd($, 'start --always-on')).text).toContain('Always on')
+    w.files.set('/repo/.claude/auto-plan.md', plan)
+    w.files.set(GOALS, QUEUE)
+    await ready($)
+    await w.clock.advance(1_200)
+    await meet($, w)
+    await w.clock.advance(TICK)
+    await meet($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
+  }
+
+  test('a passing final check stands by: on, owning nothing, compacted once, quiet while nothing happens', { timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    await standing($, w)
+    expect(w.notifies.at(-1)).toContain('the final check passed after 1 round(s); standing by')
+    expect(w.files.get('/repo/.claude/auto-plan.md')).toContain('## Result')
+    expect((await cmd($, 'status')).text).toContain('auto-claude on · phase standby')
+    expect(JSON.parse(w.files.get('/repo/.claude/auto-claude.on') ?? '{}')).toMatchObject({ on: false, phase: 'standby' })
+    // The person may use the session: no refusals, no unattended policy.
+    expect((await $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)).deny).toBeUndefined()
+    expect((await compose($)).sections.some((x: { id: string }) => x.id === 'auto-claude:policy')).toBe(false)
+    const told = w.notifies.length
+    const prompts = w.prompts.length
+    await w.clock.advance(20 * MIN)
+    expect(w.compacts).toBe(1)
+    expect(w.notifies.length).toBe(told)
+    expect(w.prompts.length).toBe(prompts)
+  })
+
+  test('a smoke check failing twice in standby queues a repair, wakes cycle 1, ships it and stands by again with a cycle line', { timeoutMs: 120_000 }, async ($, on) => {
+    const w = world(on)
+    await standing($, w)
+    w.cmdExit.set(SMOKE, 7)
+    await w.clock.advance(31 * MIN)
+    expect(parseQueue(w.files.get(GOALS) ?? '').filter(i => i.mark === ' ')).toHaveLength(0)
+    await w.clock.advance(31 * MIN)
+    expect(w.notifies.some(n => n.includes('failed 2 times in a row while standing by'))).toBe(true)
+    expect(w.notifies.some(n => n.includes('cycle 1 starts'))).toBe(true)
+    expect(w.prompts.at(-1)).toContain('The cause of the failed deploy is found and fixed')
+    w.cmdExit.delete(SMOKE)
+    await meet($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
+    expect((await cmd($, 'status')).text).toContain('phase standby')
+    expect(w.files.get('/repo/.claude/auto-plan.md')).toMatch(/## Cycles\n\n- cycle 1, .*: woke for The cause of the failed deploy is found ; merged 1, held 0, deployed 1/)
+  })
+
+  test('github: a red default-branch tip and a labelled issue are queued once, wake a cycle, and the issue is closed on merge', { timeoutMs: 120_000 }, async ($, on) => {
+    const w = world(on)
+    w.github = true
+    await standing($, w, PLAN)
+    // A person is in the session: no wake until it has been quiet for 2 min.
+    await turnStart($)
+    w.runList = JSON.stringify([{ databaseId: 5, headSha: 'tip', conclusion: 'failure', workflowName: 'CI' }])
+    w.issueList = JSON.stringify([{ number: 3, title: 'docs :: check: true', updatedAt: 'u1' }])
+    await w.clock.advance(11 * MIN)
+    const queue = parseQueue(w.files.get(GOALS) ?? '').filter(i => i.mark === ' ')
+    expect(queue.map(i => i.condition.slice(0, 7))).toEqual(['[ci:5] ', '[gh#3] '])
+    expect(queue.every(i => i.check === undefined)).toBe(true)
+    expect((await cmd($, 'status')).text).toContain('phase standby')
+    await turnEnd($)
+    await w.clock.advance(3 * MIN)
+    expect(w.notifies.some(n => n.includes('woke for ci:5, gh#3: cycle 1 starts'))).toBe(true)
+    await w.clock.advance(11 * MIN)
+    expect(parseQueue(w.files.get(GOALS) ?? '').filter(i => i.condition.startsWith('[gh#3]'))).toHaveLength(1)
+    await meet($, w)
+    await w.clock.advance(TICK)
+    await meet($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
+    expect(w.runs.some(r => r.startsWith('gh issue close 3 --comment [auto-claude] Resolved by PR #7'))).toBe(true)
+    expect((await cmd($, 'status')).text).toContain('phase standby')
+  })
+
+  test('stop and resume in standby; standby turns a finished run always on', { timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start')
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set(GOALS, QUEUE)
+    await ready($)
+    await w.clock.advance(1_200)
+    await meet($, w)
+    await w.clock.advance(TICK)
+    await meet($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
+    expect((await cmd($, 'status')).text).toContain('phase done')
+    expect((await cmd($, 'standby')).text).toContain('Standing by')
+    expect((await cmd($, 'status')).text).toContain('phase standby')
+    await cmd($, 'stop')
+    expect((await cmd($, 'status')).text).toContain('auto-claude off · phase stopped')
+    expect((await cmd($, 'resume')).text).toContain('Resumed: standing by')
+    expect((await cmd($, 'status')).text).toContain('phase standby')
   })
 })
