@@ -563,7 +563,7 @@ describe('standby (always on)', () => {
   })
 
   test('events are queued once, follow-ups when they change (at most 2), 5 lines a poll', () => {
-    const ev = (n: number, stamp = 'a') => issueEvent(n, `t${n}`, stamp)
+    const ev = (n: number, stamp = 'a') => ({ id: `e${n}`, stamp, line: `- [ ] e${n}`, followUp: `- [ ] e${n} again` })
     const first = eventLines([ev(1), ev(2)], {}, {})
     expect(first.lines.length).toBe(2)
     expect(eventLines([ev(1), ev(2)], first.seen, first.followUps).lines).toEqual([])
@@ -572,8 +572,12 @@ describe('standby (always on)', () => {
       const got = eventLines([ev(1, stamp)], state.seen, state.followUps)
       state = { ...got }
       if (stamp === 'd') expect(got.lines).toEqual([])
-      else expect(got.lines[0]).toContain('the changes on GitHub issue #1 since it was last built are handled')
+      else expect(got.lines).toEqual(['- [ ] e1 again'])
     }
+    // A labelled issue's later changes (anyone's comment) queue nothing.
+    const issue = eventLines([issueEvent(4, 't', 'a')], {}, {})
+    expect(eventLines([issueEvent(4, 't', 'b')], issue.seen, issue.followUps).lines).toEqual([])
+    expect(lineGhIssues('fix [gh#1] later')).toEqual([])
     const many = eventLines([1, 2, 3, 4, 5, 6, 7].map(n => ev(n)), {}, {})
     expect(many.lines.length).toBe(MAX_EVENT_LINES)
     // The ones past the cap stay unseen, so the next poll queues them.

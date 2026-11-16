@@ -1516,6 +1516,8 @@ describe('always on (standby)', () => {
     expect(parseQueue(w.files.get(GOALS) ?? '').filter(i => i.mark === ' ')).toHaveLength(0)
     await w.clock.advance(31 * MIN)
     expect(w.notifies.some(n => n.includes('failed 2 times in a row while standing by'))).toBe(true)
+    // Smoke-checked as the deploy does: in a fresh checkout of the default branch.
+    expect(w.runs).toContain('git -C /repo worktree add --detach /repo/worktrees/auto-health origin/main')
     expect(w.notifies.some(n => n.includes('cycle 1 starts'))).toBe(true)
     expect(w.prompts.at(-1)).toContain('The cause of the failed deploy is found and fixed')
     w.cmdExit.delete(SMOKE)
@@ -1547,7 +1549,8 @@ describe('always on (standby)', () => {
     await w.clock.advance(TICK)
     await meet($, w)
     for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
-    expect(w.runs.some(r => r.startsWith('gh issue close 3 --comment [auto-claude] Resolved by PR #7'))).toBe(true)
+    expect(w.runs.some(r => r.startsWith('gh issue close 3 --repo o/r --comment [auto-claude] Resolved by PR #7'))).toBe(true)
+    for (const call of w.runs.filter(a => /^gh (run|issue) list/.test(a))) expect(call).toContain('--repo o/r')
     expect((await cmd($, 'status')).text).toContain('phase standby')
   })
 

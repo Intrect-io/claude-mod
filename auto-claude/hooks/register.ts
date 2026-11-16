@@ -426,7 +426,7 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
     await tell($, next, `merged ${landed}: ${item.goal.slice(0, 80)}`)
     // A labelled GitHub issue the milestone resolved is closed with the evidence.
     for (const n of lineGhIssues(item.goal)) {
-      await run($, ['gh', 'issue', 'close', String(n), '--comment', `[auto-claude] Resolved by ${landed}: ${item.goal.slice(0, 160)}`], r.root, 30_000)
+      await run($, ['gh', 'issue', 'close', String(n), ...repo, '--comment', `[auto-claude] Resolved by ${landed}: ${item.goal.slice(0, 160)}`], r.root, 30_000)
     }
     const ids = lineIssues(item.goal)
     if (next.linear !== undefined && ids.length > 0) {
@@ -509,6 +509,7 @@ async function finalCheck($: EngineInterface, r: AutoRecord, caps: Caps): Promis
     const live = r.deploy !== undefined ? ` Deployed ${r.deploys ?? 0} time(s) with \`${r.deploy.command}\`.` : r.deployNone !== undefined ? ` Nothing deployed: ${r.deployNone}.` : ''
     // A cycle an always-on run woke for logs one line under ## Cycles; the planned run its Result.
     if ((r.cycle ?? 0) === 0) await $.fs.write(FILES(r.root).plan, `${plan2.trimEnd()}\n\n## Result\n\nFinished ${new Date().toISOString()}: round ${r.round}, ${summary(r.merges, r.held, r.ships)}. Final check passed: \`${check}\`.${live}\n`)
+    if (r.alwaysOn === true && (r.cycle ?? 0) > 0) await $.fs.write(FILES(r.root).plan, withCycle(plan2, cycleLine(r, new Date().toISOString())))
     if (r.alwaysOn === true) return enterStandby($, r, `the final check passed${(r.cycle ?? 0) > 0 ? ` (cycle ${r.cycle})` : ` after ${r.round} round(s)`}`)
     return stopRun($, r, `the final check passed after ${r.round} round(s)${r.deploy !== undefined ? ' and what was merged is deployed' : ''}`, 'done')
   }
@@ -757,10 +758,6 @@ function sourceNames(r: AutoRecord): string {
 // what the run remembers of it (and what it told the person).
 async function enterStandby($: EngineInterface, r: AutoRecord, why: string): Promise<AutoRecord> {
   const now = await $.clock.now()
-  if ((r.cycle ?? 0) > 0) {
-    const plan = (await readText($, FILES(r.root).plan)) ?? ''
-    await $.fs.write(FILES(r.root).plan, withCycle(plan, cycleLine(r, new Date().toISOString())))
-  }
   const next: AutoRecord = {
     ...r,
     on: true,
@@ -851,6 +848,8 @@ async function standbyTick($: EngineInterface, r: AutoRecord): Promise<void> {
         note: undefined,
       }
       woke = true
+      // A /goal set while it stood by would block the cycle's stops (see clearSessionGoal).
+      clearSessionGoal($)
       await tell($, r, `woke for ${ids.slice(0, 5).join(', ')}${ids.length > 5 ? ` and ${ids.length - 5} more` : ''}: cycle ${r.cycle} starts`)
     }
   }

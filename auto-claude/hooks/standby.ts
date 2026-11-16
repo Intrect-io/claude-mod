@@ -9,7 +9,8 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { AutoRecord } from '../types'
-import { LOCAL, out, refOf, run } from './io'
+import { fetchRemote, LOCAL, out, refOf, run } from './io'
+import { repoSlug } from './ship'
 
 // The session must have had no turn for this long before a wake prompts it:
 // a person may be using the session while the run stands by.
@@ -35,7 +36,8 @@ export type Source = 'health' | 'github'
 
 // One thing that happened outside the run, keyed for dedupe: `id` names it
 // (ci:<run id>, gh#<number>), `stamp` changes when it changes.
-export type StandbyEvent = { id: string; stamp: string; line: string; followUp: string }
+// `followUp` undefined: a change to it is covered without a new line.
+export type StandbyEvent = { id: string; stamp: string; line: string; followUp?: string }
 
 // The sources this run can poll at all.
 export function sourcesOf(r: Pick<AutoRecord, 'remote' | 'ciMode' | 'deploy'>): Source[] {
@@ -98,14 +100,15 @@ export function ciEvent(id: number, workflow: string, branch: string, sha: strin
 }
 
 // Only the number and title go in the line: the body and comments are
-// third-party text the model reads itself while it builds the line.
+// third-party text the model reads itself while it builds the line. A later
+// change (anyone's comment, an edit after labelling) queues nothing: the label
+// is the trust gate, and only a fresh label (a new issue) is new work.
 export function issueEvent(n: number, title: string, updatedAt: string): StandbyEvent {
   const head = `[gh#${n}] ${clean(title)}`
   return {
     id: `gh#${n}`,
     stamp: updatedAt,
-    line: `- [ ] ${head}: what GitHub issue #${n} asks is resolved on this branch (read it with \`gh issue view ${n} --comments\`)`,
-    followUp: `- [ ] ${head}: the changes on GitHub issue #${n} since it was last built are handled (\`gh issue view ${n} --comments\`)`,
+    line: `- [ ] ${head}: what GitHub issue #${n} asks is resolved on this branch (read it with \`gh issue view ${n}\`)`,
   }
 }
 
@@ -128,7 +131,7 @@ export function eventLines(
     if (before === undefined) {
       lines.push(e.line)
     } else {
-      if ((f[e.id] ?? 0) >= MAX_EVENT_FOLLOW_UPS) {
+      if (e.followUp === undefined || (f[e.id] ?? 0) >= MAX_EVENT_FOLLOW_UPS) {
         s[e.id] = e.stamp
         continue
       }
@@ -142,7 +145,8 @@ export function eventLines(
 
 // GitHub issue numbers a queue line resolves ([gh#12]).
 export function lineGhIssues(condition: string): number[] {
-  return [...condition.matchAll(/\[gh#(\d+)\]/g)].map(m => Number(m[1]))
+  const m = condition.match(/^\[gh#(\d+)\]/)
+  return m === null ? [] : [Number(m[1])]
 }
 
 // Merges in the last 24 h, as kept (older ones dropped).
@@ -180,25 +184,45 @@ export function eventIds(lines: readonly string[]): string[] {
   return lines.map(l => l.match(/^- \[ \] \[([^\]]+)\]/)?.[1]).filter((x): x is string => x !== undefined)
 }
 
-// The live service's smoke check, from the repository root. Exit 0 is healthy.
+// The live service's smoke check, run as the deploy runs it: in a fresh
+// detached checkout of the default branch (the root checkout does not follow
+// merges in github mode, so a smoke check naming a repo script could fail
+// there while live is fine). Exit 0 is healthy; no checkout is no verdict.
 export async function pollHealth($: EngineInterface, r: AutoRecord): Promise<{ ok: boolean; out: string }> {
   const smoke = r.deploy?.smoke
   if (smoke === undefined) return { ok: true, out: '' }
-  const got = await run($, ['bash', '-lc', smoke], r.root, POLL_TIMEOUT_MS)
-  return { ok: got.exitCode === 0, out: `exited ${got.exitCode}: ${out(got)}`.slice(0, 300) }
+  const dir = `${r.root}/worktrees/auto-health`
+  await run($, ['git', '-C', r.root, 'worktree', 'remove', '--force', dir], r.root)
+  await fetchRemote($, r, r.root)
+  const made = await run($, ['git', '-C', r.root, 'worktree', 'add', '--detach', dir, refOf(r)], r.root)
+  if (made.exitCode !== 0) return { ok: true, out: `no checkout: ${out(made)}` }
+  try {
+    const got = await run($, ['bash', '-lc', smoke], dir, POLL_TIMEOUT_MS)
+    return { ok: got.exitCode === 0, out: `exited ${got.exitCode}: ${out(got)}`.slice(0, 300) }
+  } finally {
+    await run($, ['git', '-C', r.root, 'worktree', 'remove', '--force', dir], r.root)
+  }
+}
+
+// `--repo owner/name` of the pushed remote: gh alone may pick a fork's parent (ship.ts repoSlug).
+export async function repoArgs($: EngineInterface, r: Pick<AutoRecord, 'root' | 'remote'>): Promise<string[]> {
+  if (r.remote === LOCAL) return []
+  const slug = repoSlug((await run($, ['git', '-C', r.root, 'remote', 'get-url', r.remote], r.root, 15_000)).stdout)
+  return slug === undefined ? [] : ['--repo', slug]
 }
 
 // Failed runs on the default branch's tip and open issues with the label.
 export async function pollGithub($: EngineInterface, r: AutoRecord, label: string): Promise<{ events: StandbyEvent[]; error?: string }> {
-  await run($, ['git', '-C', r.root, 'fetch', '-q', r.remote], r.root)
+  await fetchRemote($, r, r.root)
+  const repo = await repoArgs($, r)
   const sha = (await run($, ['git', '-C', r.root, 'rev-parse', refOf(r)], r.root, 15_000)).stdout.trim()
-  const runs = await run($, ['gh', 'run', 'list', '--branch', r.defaultBranch, '--limit', '20', '--json', 'databaseId,headSha,conclusion,workflowName'], r.root, POLL_TIMEOUT_MS)
+  const runs = await run($, ['gh', 'run', 'list', ...repo, '--branch', r.defaultBranch, '--limit', '20', '--json', 'databaseId,headSha,conclusion,workflowName'], r.root, POLL_TIMEOUT_MS)
   const events: StandbyEvent[] = []
   let error: string | undefined
   if (runs.exitCode === 0) for (const f of failedRuns(runs.stdout, sha)) events.push(ciEvent(f.id, f.workflow, r.defaultBranch, sha))
   else error = `gh run list: ${out(runs)}`
   if (label !== '') {
-    const issues = await run($, ['gh', 'issue', 'list', '--label', label, '--state', 'open', '--limit', '30', '--json', 'number,title,updatedAt'], r.root, POLL_TIMEOUT_MS)
+    const issues = await run($, ['gh', 'issue', 'list', ...repo, '--label', label, '--state', 'open', '--limit', '30', '--json', 'number,title,updatedAt'], r.root, POLL_TIMEOUT_MS)
     if (issues.exitCode === 0) for (const i of openIssues(issues.stdout)) events.push(issueEvent(i.number, i.title, i.updatedAt))
     else error ??= `gh issue list: ${out(issues)}`
   }
