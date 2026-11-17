@@ -89,16 +89,15 @@ async function readRecord($: EngineInterface, root: string): Promise<AutoRecord 
 
 async function writeRecord($: EngineInterface, r: AutoRecord): Promise<void> {
   await $.store.set(STORE(r.root), r)
-  // Other plugins cannot read this store: harness reads this file to know a run
-  // owns the repository (its Linear flow leaves issue states to the driver).
+  // Other plugins cannot read this store: this file tells them a run owns the
+  // repository.
   // A run standing by owns nothing: the person may work in the repository meanwhile.
   await $.fs.write(`${r.root}/.claude/auto-claude.on`, `${JSON.stringify({ on: owns(r), phase: r.phase, at: await $.clock.now() })}\n`).catch(() => undefined)
   await show($, r)
 }
 
 // The run holds the session and the repository: on, and not standing by
-// between cycles. Its guards, its unattended policy and harness's hands-off
-// Linear flow apply only then.
+// between cycles. Its guards and its unattended policy apply only then.
 const owns = (r: Pick<AutoRecord, 'on' | 'phase'> | undefined): boolean => r?.on === true && r.phase !== 'standby'
 
 // Issue IDs of queue lines not started yet, and of the milestones being built or shipped.

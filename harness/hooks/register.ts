@@ -20,8 +20,8 @@ import { issueIds, registerShipGate, shipPrompt, shipStop } from './ship-gate'
 import { DEFAULT_TOGGLES, INITIAL_SHIP } from './state'
 
 const envAtom = atom({ plugin: 'harness', key: 'env' } as const, {}, { shape: 'env-1' })
-const shipAtom = atom({ plugin: 'harness', key: 'ship' } as const, INITIAL_SHIP, { shape: 'ship-3' })
-const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT_TOGGLES, { shape: 'toggles-3' })
+const shipAtom = atom({ plugin: 'harness', key: 'ship' } as const, INITIAL_SHIP, { shape: 'ship-4' })
+const togglesAtom = atom({ plugin: 'harness', key: 'toggles' } as const, DEFAULT_TOGGLES, { shape: 'toggles-4' })
 
 // harness: the user's CLAUDE.md and ~/.claude/rules enforced at the tool
 // call (guards, ship-gate, report-lint: each switchable, all on by default),
@@ -62,7 +62,6 @@ const FEATURES: Record<string, keyof Toggles> = {
   'ship-gate': 'shipGate',
   'report-lint': 'reportLint',
   'repo-size': 'repoSize',
-  'linear-flow': 'linearFlow',
 }
 
 function showStatus($: EngineInterface, toggles: Toggles) {
@@ -166,7 +165,11 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const stored = await $.store.get(STORE_KEY)
-    const toggles = { ...DEFAULT_TOGGLES, ...(typeof stored === 'object' && stored !== null ? (stored as Partial<Toggles>) : {}) }
+    // Only known features: a stored toggle of a removed feature (linear-flow, 0.5.0) is dropped.
+    const kept = typeof stored === 'object' && stored !== null ? (stored as Record<string, unknown>) : {}
+    const toggles = Object.fromEntries(
+      Object.entries(DEFAULT_TOGGLES).map(([key, value]) => [key, typeof kept[key] === 'boolean' ? kept[key] : value]),
+    ) as Toggles
     await update($, togglesAtom, () => toggles)
     await loadGuardEnv($)
     // Loaded into a running session: earlier prompts still count as requests.
@@ -184,7 +187,7 @@ export const register: Register = (on, options) => {
     scheduleSweep($)
     await $.command.register({
       name: COMMAND,
-      description: 'Harness: /harness [status | on|off guards|ship-gate|report-lint|repo-size|linear-flow | skip-codeql | heartbeat start [5m]|stop|status]',
+      description: 'Harness: /harness [status | on|off guards|ship-gate|report-lint|repo-size | skip-codeql | heartbeat start [5m]|stop|status]',
     })
     // A user command of the same name keeps its name; the rest still register.
     for (const spec of EXTRA_COMMANDS) {
@@ -306,10 +309,9 @@ export const register: Register = (on, options) => {
 
     return {
       text: [
-        `guards ${toggles.guards ? 'on' : 'off'} · ship-gate ${toggles.shipGate ? 'on' : 'off'} · report-lint ${toggles.reportLint ? 'on' : 'off'} · repo-size ${toggles.repoSize ? 'on' : 'off'} · linear-flow ${toggles.linearFlow ? 'on' : 'off'}`,
+        `guards ${toggles.guards ? 'on' : 'off'} · ship-gate ${toggles.shipGate ? 'on' : 'off'} · report-lint ${toggles.reportLint ? 'on' : 'off'} · repo-size ${toggles.repoSize ? 'on' : 'off'}`,
         `venv: ${env.venv ?? `missing (${env.venvMissing ?? 'unknown platform'})`}`,
         `ship-gate this session: open-PR check ${ship.prListed ? 'done' : 'not yet'}, CodeQL ${ship.codeqlRan ? 'ran' : ship.skipCodeql ? 'waived' : 'not yet'}, issues awaiting Done: ${ship.pending.filter(issue => !issue.done || !issue.commented).map(issue => issue.id).join(', ') || 'none'}`,
-        `linear-flow this session: opened ${ship.opened.join(', ') || 'none'} · claimed ${ship.claimed.join(', ') || 'none'} · done ${ship.doneIds.join(', ') || 'none'}`,
       ].join('\n'),
     }
   })
