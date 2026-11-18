@@ -12,6 +12,7 @@ import {
   venvRewrite,
 } from './guards'
 import { checkAgentWorktree, checkMemorySecret, checkSystemPython, checkTradingOrder, DEFAULT_ORDER_TOOLS, isVersionBump, leftoverWorktrees } from './extra-guards'
+import { checkDocAppend, checkDocBudget, checkSwallowedBash, checkSwallowedTest, editDelta, isTestPath, lineCount, writtenTexts } from './doc-guards'
 import { kstNow, statusCounts } from './commands'
 import { splitPorcelain } from './commit'
 import { fireTag, holdReason, parseInterval } from './heartbeat'
@@ -368,4 +369,70 @@ describe('linearIds', () => {
   test('anchored: AX-1 does not match inside MAX-1', () => {
     expect(linearIds(['MAX-1'], patterns)).toEqual([])
   })
+})
+
+const swallowed = (path: string, text: string) => checkSwallowedTest(path, [text]) !== undefined
+
+describe('swallowed exceptions in tests', () => {
+  table('python test files', input => swallowed('tests/test_a.py', input), [
+    ['try:\n    run()\nexcept Exception:\n    pass\n', true],
+    ['try:\n    run()\nexcept ValueError as e:  # ignore\n    ...\n', true],
+    ['try:\n    run()\nexcept OSError: pass\n', true],
+    ['try:\n    run()\nexcept:\n    log()\n', true],
+    ['with contextlib.suppress(KeyError):\n    run()\n', true],
+    ['with pytest.raises(ValueError, match="x"):\n    run()\n', false],
+    ['try:\n    run()\nexcept ValueError as e:\n    assert "x" in str(e)\n', false],
+    ['try:\n    run()\nexcept ValueError:\n    raise\n', false],
+  ])
+  table('typescript test files', input => swallowed('src/a.test.ts', input), [
+    ['try { await run() } catch {}', true],
+    ['try { run() } catch (e) {\n  // ignore\n}', true],
+    ['await run().catch(() => {})', true],
+    ['await run().catch(() => undefined)', true],
+    ['try { run() } catch (e) { expect(String(e)).toContain("x") }', false],
+    ['await expect(run()).rejects.toThrow("x")', false],
+  ])
+  test('only test paths are judged', () => {
+    expect(swallowed('src/app.py', 'try:\n    x()\nexcept Exception:\n    pass\n')).toBe(false)
+    expect(swallowed('src/app.ts', 'try { x() } catch {}')).toBe(false)
+    expect(isTestPath('pkg/tests/helpers.py')).toBe(true)
+    expect(isTestPath('src/foo.spec.tsx')).toBe(true)
+    expect(isTestPath('src/foo.ts')).toBe(false)
+  })
+  table('shell writes of test files', input => checkSwallowedBash(input) !== undefined, [
+    ["cat > tests/test_a.py <<'EOF'\ntry:\n    x()\nexcept Exception:\n    pass\nEOF", true],
+    ['echo "await run().catch(() => {})" >> a.test.ts', true],
+    ["cat > src/app.py <<'EOF'\ntry:\n    x()\nexcept Exception:\n    pass\nEOF", false],
+    ['pytest tests/test_a.py', false],
+    ['git commit -m "drop except: pass from tests/test_a.py"', false],
+  ])
+})
+
+describe('doc budget', () => {
+  test('growth past the budget is refused, shrinking is not', () => {
+    expect(checkDocBudget('/r/plan.md', 100, 151)).toBeDefined()
+    expect(checkDocBudget('/r/plan.md', 100, 150)).toBeUndefined()
+    expect(checkDocBudget('/r/plan.md', 7000, 7001)).toBeDefined()
+    expect(checkDocBudget('/r/plan.md', 7000, 6990)).toBeUndefined()
+    expect(checkDocBudget('/r/plan.md', 7000, 7000)).toBeUndefined()
+    expect(checkDocBudget('/r/CLAUDE.md', 190, 201)).toBeDefined()
+    expect(checkDocBudget('/r/CLAUDE.md', 190, 200)).toBeUndefined()
+    expect(checkDocBudget('/r/notes.md', 1, 9999)).toBeUndefined()
+    expect(checkDocBudget('/r/plan.md', 10, 300, { claude: 200, plan: 400 })).toBeUndefined()
+  })
+  test('line counts', () => {
+    expect(lineCount('')).toBe(0)
+    expect(lineCount('a\nb\n')).toBe(2)
+    expect(editDelta('a\nb\nc', 'b', 'x\ny\nz', false)).toBe(2)
+    expect(editDelta('b b', 'b', 'x\ny', true)).toBe(2)
+    expect(editDelta('a', 'zzz', 'x\ny', false)).toBe(0)
+    expect(writtenTexts({ new_string: 'a', edits: [{ new_string: 'b' }, { old_string: 'c' }] })).toEqual(['a', 'b'])
+  })
+  table('shell appends', input => checkDocAppend(input) !== undefined, [
+    ['echo "- item" >> plan.md', true],
+    ['cat >> CLAUDE.md <<EOF\nx\nEOF', true],
+    ['echo x | tee -a docs/plan.md', true],
+    ['echo x > plan.md', false],
+    ['cat plan.md', false],
+  ])
 })

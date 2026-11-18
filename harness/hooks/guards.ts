@@ -2,6 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
 import type { GuardEnv } from '../types'
+import { checkDocAppend, checkDocBudget, checkSwallowedBash, checkSwallowedTest, DEFAULT_DOC_BUDGETS, docKind, editDelta, lineCount, writtenTexts } from './doc-guards'
+import type { DocBudgets } from './doc-guards'
 import { checkAgentWorktree, checkMemorySecret, checkSystemPython, checkTradingOrder, DEFAULT_ORDER_TOOLS, isVersionBump, versionBumpNote } from './extra-guards'
 import { cachedReport, checkWorktreeGrowth, devRepoRoot, isWorktreeAdd, largeStageRefusal, leftoverMerged, measureRepo, stagedTargets } from './repo-size'
 import { commandWords, expandHome, isInside, programOf, segments, stripProse, unquote } from './shell'
@@ -226,7 +228,9 @@ export async function guardsToolCall(
         checkDelete(command, env, await $.session.cwd().catch(() => undefined)) ??
         checkWorktree(command, env, await repoRoot($)) ??
         checkLlmPort(stripProse(command)) ??
-        checkSystemPython(command)
+        checkSystemPython(command) ??
+        checkSwallowedBash(command) ??
+        checkDocAppend(stripProse(command))
       if (refusal !== undefined) return { deny: refusal }
       if (toggles.repoSize) {
         const growth = await repoGrowthRefusal($, command, env.home)
@@ -271,11 +275,56 @@ export async function guardsToolCall(
         .filter((part): part is string => typeof part === 'string')
         .join('\n')
       const path = typeof input.file_path === 'string' ? input.file_path : ''
-      const refusal = checkLlmPort(text) ?? checkMemorySecret(path, text, env.home)
+      const refusal =
+        checkLlmPort(text) ??
+        checkMemorySecret(path, text, env.home) ??
+        checkSwallowedTest(path, writtenTexts(input)) ??
+        (await docBudgetRefusal($, e.tool, path, input))
       if (refusal !== undefined) return { deny: refusal }
     }
 
     return next(e)
+}
+
+// CLAUDE.md / plan.md: a write may not leave one past its line budget while
+// growing it. `<cwd>/.claude/doc-budget.json` ({"claude": n, "plan": n}) overrides.
+async function docBudgetRefusal($: EngineInterface, tool: string, path: string, input: Record<string, unknown>): Promise<string | undefined> {
+  if (docKind(path) === undefined) return undefined
+  let current = ''
+  try {
+    current = await $.fs.read(path)
+  } catch {
+    // A new file: it has no earlier size.
+  }
+  const before = lineCount(current)
+  let after: number
+  if (tool === 'Write') {
+    after = typeof input.content === 'string' ? lineCount(input.content) : before
+  } else {
+    const edits = Array.isArray(input.edits) ? (input.edits as Array<Record<string, unknown>>) : [input]
+    let delta = 0
+    for (const edit of edits) {
+      if (typeof edit.old_string !== 'string' || typeof edit.new_string !== 'string') continue
+      delta += editDelta(current, edit.old_string, edit.new_string, edit.replace_all === true)
+    }
+    after = before + delta
+  }
+
+  return checkDocBudget(path, before, after, await docBudgets($))
+}
+
+async function docBudgets($: EngineInterface): Promise<DocBudgets> {
+  try {
+    const cwd = await $.session.cwd()
+    const raw = JSON.parse(await $.fs.read(`${cwd}/.claude/doc-budget.json`)) as Partial<DocBudgets>
+
+    return {
+      claude: typeof raw.claude === 'number' ? raw.claude : DEFAULT_DOC_BUDGETS.claude,
+      plan: typeof raw.plan === 'number' ? raw.plan : DEFAULT_DOC_BUDGETS.plan,
+    }
+  } catch {
+    return DEFAULT_DOC_BUDGETS
+  }
 }
 
 // repo-size: a command that would grow a repo under ~/dev for good.
