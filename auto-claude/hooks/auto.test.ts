@@ -426,8 +426,9 @@ describe('a run, local CI', () => {
     w.files.set(GOALS, QUEUE)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     expect(JSON.stringify(await compose($))).not.toContain('auto-claude:policy')
-    await w.clock.advance(TICK)
-    await w.clock.advance(TICK)
+    // The person is busy in this session: the run is reported, not taken.
+    await turnStart($)
+    for (let i = 0; i < 6; i++) await w.clock.advance(TICK)
     expect(w.notifies.filter(n => n.includes('went quiet'))).toHaveLength(1)
     expect(w.notifies[0]).toContain('/auto-claude resume in this session takes it over')
     expect(w.prompts).toEqual([])
@@ -504,6 +505,76 @@ describe('a run, local CI', () => {
     expect((await cmd($, 'resume')).text).toContain('moved to .claude/auto-claude.stop.cleared')
     for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
     expect((await cmd($, 'status')).text).toContain('auto-claude on')
+  })
+
+  test('a free session of the repository takes over a run whose owner went quiet, with its milestone', async ($, on) => {
+    const other = { on: true, phase: 'run', root: '/repo', sessionId: 'gone-owner', hint: '', round: 1, startedAt: 0, beatAt: -20 * MIN, remote: 'origin', defaultBranch: 'main', ciMode: 'local', logOffset: 0, started: 1, finished: 0, worktrees: { [BR1]: WT1 }, ships: [], fixes: {}, merges: 0, held: 0, queueEmpty: false }
+    const loop = { repoRoot: '/repo', seq: 1, retries: 0, current: { condition: 'add() returns a+b', check: 'python3 -m unittest -q test_add', worktree: WT1, branch: BR1, startedAt: 0 } }
+    const w = world(on, { 'auto:/repo': other, 'loop:/repo': loop })
+    w.files.set(GOALS, QUEUE)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    // Not before the session has been free for 2 min.
+    await w.clock.advance(TICK)
+    expect(w.prompts).toEqual([])
+    for (let i = 0; i < 5; i++) await w.clock.advance(TICK)
+    await w.clock.advance(5_000)
+    const taken = w.prompts.find(p => p.includes('Continuing (taken over from session gone-own'))
+    expect(taken).toContain('Milestone #1: add() returns a+b')
+    expect(w.notifies.some(n => n.includes('this session took the run over'))).toBe(true)
+    expect(JSON.stringify(await compose($))).toContain('auto-claude:policy')
+    await meet($, w)
+    await w.clock.advance(TICK)
+    expect(w.pushes.some(p => p.includes('HEAD:main'))).toBe(true)
+  })
+
+  test('an owner whose long tick still pulses (a deploy, CodeQL) is not taken over; once the pulse stops it is', { timeoutMs: 30_000 }, async ($, on) => {
+    const other = { on: true, phase: 'run', root: '/repo', sessionId: 'busy-owner', hint: '', round: 1, startedAt: 0, beatAt: -20 * MIN, remote: 'origin', defaultBranch: 'main', ciMode: 'local', logOffset: 0, started: 1, finished: 1, worktrees: {}, ships: [], fixes: {}, merges: 0, held: 0, queueEmpty: false }
+    const w = world(on, { 'auto:/repo': other, 'beat:/repo': { sessionId: 'busy-owner', at: 10 * MIN } })
+    w.files.set(GOALS, QUEUE)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    for (let i = 0; i < 30; i++) await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.includes('took the run over') || n.includes('went quiet'))).toBe(false)
+    for (let i = 0; i < 12; i++) await w.clock.advance(TICK)
+    await w.clock.advance(5_000)
+    expect(w.notifies.some(n => n.includes('took the run over'))).toBe(true)
+  })
+
+  test('a run quiet for more than 12 h is only reported, not taken', async ($, on) => {
+    const other = { on: true, phase: 'plan', root: '/repo', sessionId: 'old-owner', hint: '', round: 1, startedAt: 0, beatAt: -13 * 60 * MIN, remote: 'origin', defaultBranch: 'main', ciMode: 'local', logOffset: 0, started: 0, finished: 0, worktrees: {}, ships: [], fixes: {}, merges: 0, held: 0, queueEmpty: false }
+    const w = world(on, { 'auto:/repo': other })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    for (let i = 0; i < 8; i++) await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.includes('took the run over'))).toBe(false)
+    expect(w.notifies.some(n => n.includes('went quiet'))).toBe(true)
+    expect(w.prompts).toEqual([])
+  })
+
+  test('taking a run over keeps its deploy brake and time cap, skipping only the dead gap', async ($, on) => {
+    const other = { on: true, phase: 'run', root: '/repo', sessionId: 'gone-owner', hint: '', round: 1, startedAt: -60 * MIN, beatAt: -20 * MIN, remote: 'origin', defaultBranch: 'main', ciMode: 'local', logOffset: 0, started: 1, finished: 1, worktrees: {}, ships: [], fixes: {}, merges: 0, held: 0, queueEmpty: false, deployFails: 2, holdStreak: 1 }
+    const w = world(on, { 'auto:/repo': other })
+    w.files.set(GOALS, QUEUE)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    for (let i = 0; i < 6; i++) await w.clock.advance(TICK)
+    await w.clock.advance(5_000)
+    expect(w.notifies.some(n => n.includes('took the run over'))).toBe(true)
+    const status = (await cmd($, 'status')).text ?? ''
+    expect(status).toContain('auto-claude on')
+    expect(JSON.parse(w.files.get('/repo/.claude/auto-claude.on') ?? '{}')).toMatchObject({ on: true, phase: 'run' })
+  })
+
+  test('a stop file the person left keeps an orphaned run reported, not taken; once it is gone the run is taken', async ($, on) => {
+    const other = { on: true, phase: 'run', root: '/repo', sessionId: 'gone-owner', hint: '', round: 1, startedAt: 0, beatAt: -20 * MIN, remote: 'origin', defaultBranch: 'main', ciMode: 'local', logOffset: 0, started: 1, finished: 1, worktrees: {}, ships: [], fixes: {}, merges: 0, held: 0, queueEmpty: false }
+    const w = world(on, { 'auto:/repo': other })
+    w.files.set(GOALS, QUEUE)
+    w.files.set('/repo/.claude/auto-claude.stop', '')
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    for (let i = 0; i < 6; i++) await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.includes('took the run over'))).toBe(false)
+    expect(w.notifies.some(n => n.includes('went quiet'))).toBe(true)
+    w.files.delete('/repo/.claude/auto-claude.stop')
+    await w.clock.advance(TICK)
+    await w.clock.advance(5_000)
+    expect(w.notifies.some(n => n.includes('took the run over'))).toBe(true)
   })
 
   test('status names an orphaned owner and how long ago it last ticked', async ($, on) => {

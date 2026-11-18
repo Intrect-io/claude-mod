@@ -36,11 +36,21 @@ const COMMAND = 'auto-claude'
 // The ready tool's full name, as the tool.call matcher sees it.
 const READY_TOOL_ID = 'mcp__auto-claude__auto_plan_ready'
 const STORE = (root: string) => `auto:${root}`
+// The owner's pulse, written on every timer fire even while a long tick (a
+// deploy, CodeQL) runs, apart from the record so it never overwrites it.
+const BEAT = (root: string) => `beat:${root}`
 const EXCLUDES = ['.claude/auto-plan.md', '.claude/auto-claude.stop', '.claude/auto-claude.stop.cleared', '.claude/auto-claude.on', ...LOOP_EXCLUDES]
 const DENY = ['\\bgh\\s+pr\\s+merge\\b', '\\bgh\\s+release\\b', '\\bgit\\s+push\\b.*\\bHEAD:(main|master)\\b']
 
 // A run whose owning session has not ticked for this long is orphaned.
 const STALE_MS = 10 * 60_000
+// How long a claim on an orphaned run settles before it is read back.
+const ADOPT_SETTLE_MS = 3_000
+// A run quiet longer than this is only reported: a session opened days later
+// is not handed a run nobody may remember.
+const ADOPT_MAX_MS = 12 * 3600_000
+// A tick in flight longer than this no longer pulses: a hung tick lets the run be reported and taken.
+const PULSE_MAX_TICK_MS = 30 * 60_000
 // A run still planning is reminded this long after the model's turn ended
 // without accepting a plan, else after PLAN_NUDGE_MS; this many times, then stopped.
 const PLAN_QUIET_MS = 60_000
@@ -74,6 +84,15 @@ let fastTick = false
 let activeRoot: string | undefined
 // The owner an orphaned run was last reported for, once per session.
 let orphanTold: string | undefined
+// A claim on an orphaned run is settling.
+let adopting = false
+// When this session's tick in flight began, and when its last tick ran.
+let tickStartedAt = 0
+let lastTickAt: number | undefined
+// The owner's beat this session saw on its previous tick: a run is taken only
+// after the same beat was seen on two ticks in a row, a poll interval apart,
+// so this session is not the one waking from a sleep.
+let sawBeat: { root: string; beat: number; at: number } | undefined
 // Ticks failed in a row and the last error: a tick that throws every time
 // (an unwritable file, a broken store) moves nothing and must not stay silent.
 let tickFails = 0
@@ -234,15 +253,123 @@ async function startWanted($: EngineInterface, r: AutoRecord, base: string, stac
   if (current !== undefined && stacked) await writeRecord($, { ...r, onto: { ...r.onto, [current.branch]: tip } })
 }
 
+async function pulse($: EngineInterface): Promise<void> {
+  if (activeRoot === undefined) return
+  try {
+    const now = await $.clock.now()
+    if (ticking && now - tickStartedAt > PULSE_MAX_TICK_MS) return
+    const r = await readRecord($, activeRoot)
+    const me = await $.session.id()
+    if (r?.on === true && r.sessionId === me) await $.store.set(BEAT(r.root), { sessionId: me, at: now })
+  } catch {
+    // A missed pulse only makes the owner look quieter.
+  }
+}
+
+// When the owner last showed life: its record's beat or its pulse, whichever is later.
+async function lastBeat($: EngineInterface, r: AutoRecord): Promise<number> {
+  const own = r.beatAt ?? r.startedAt
+  const p = (await $.store.get(BEAT(r.root)).catch(() => undefined)) as { sessionId?: unknown; at?: unknown } | undefined
+  return p?.sessionId === r.sessionId && typeof p?.at === 'number' ? Math.max(own, p.at) : own
+}
+
+// A run whose owner stopped ticking (the session exited, was replaced after a
+// reboot, or the person went on in another session) is taken over by a session
+// of the same repository once it is free, without anyone typing resume. The
+// claim is written first and read back after a pause: of two sessions claiming
+// at once, the one whose claim is still there goes on; the other stays quiet.
+async function adoptOrphan($: EngineInterface, r: AutoRecord, prevTickAt: number | undefined, pollMs: number): Promise<boolean> {
+  if (!r.on || r.phase === 'done' || r.phase === 'stopped' || adopting) return false
+  const now = await $.clock.now()
+  const beat = await lastBeat($, r)
+  const seen = sawBeat
+  sawBeat = { root: r.root, beat, at: now }
+  if (now - beat < STALE_MS || now - beat > ADOPT_MAX_MS || !sessionQuiet(now)) return false
+  // Seen quiet on this session's previous tick too, and that tick was recent: not a wake from sleep.
+  if (seen?.root !== r.root || seen.beat !== beat || prevTickAt === undefined || now - prevTickAt > 3 * pollMs) return false
+  // A stop file the person left is theirs to clear: the run is reported, not taken.
+  if (await $.fs.exists(FILES(r.root).stop).catch(() => true)) return false
+  const me = await $.session.id()
+  const was = r.sessionId
+  adopting = true
+  try {
+    await $.store.set(STORE(r.root), { ...r, sessionId: me, beatAt: now })
+  } catch {
+    adopting = false
+    return false
+  }
+  $.clock.after(ADOPT_SETTLE_MS, async () => {
+    try {
+      const got = await readRecord($, r.root)
+      if (got?.sessionId !== me || !got.on) return
+      orphanTold = undefined
+      const text = await takeOver($, got, `taken over from session ${String(was).slice(0, 8)}, quiet ${Math.round((now - beat) / 60_000)} min`, now - beat)
+      await tell($, got, `this session took the run over (its session ${String(was).slice(0, 8)} stopped ticking): ${text}`)
+    } catch (error) {
+      $.ui.toast(`auto-claude: taking the run over failed: ${String(error).slice(0, 120)}`)
+    } finally {
+      adopting = false
+    }
+  })
+  return true
+}
+
 // Another session owns the run. Once its ticks stop, the run is stuck there:
 // say so here, once, instead of staying silent.
 async function reportOrphan($: EngineInterface, r: AutoRecord): Promise<void> {
   if (!r.on || r.sessionId === undefined || orphanTold === r.sessionId) return
-  const quiet = (await $.clock.now()) - (r.beatAt ?? r.startedAt)
+  const quiet = (await $.clock.now()) - (await lastBeat($, r))
   if (quiet < STALE_MS) return
   orphanTold = r.sessionId
   await segment($, 'auto·orphaned')
   await tell($, r, `the session running it went quiet ${Math.round(quiet / 60_000)} min ago, so nothing moves; /${COMMAND} resume in this session takes it over, or /${COMMAND} stop`)
+}
+
+// Takes a run over in this session, where it was: by the person's resume, or
+// by a session that adopts a run whose owner went quiet.
+// `gapMs` set: taken by another session, not by the person. The caps and the
+// deploy brake keep counting; the time cap only skips the dead gap.
+async function takeOver($: EngineInterface, r: AutoRecord, why: string, gapMs?: number): Promise<string> {
+  const stop = await clearStop($, r.root)
+  if ('error' in stop) return `Not resumed: ${stop.error}.`
+  const now = await $.clock.now()
+  const phase = r.phase === 'done' || r.phase === 'stopped' || r.phase === 'final' ? (r.pausedPhase ?? 'run') : r.phase
+  // A run that stood by stands by again: nothing was being built.
+  if (phase === 'standby') {
+    const stop = await clearStop($, r.root)
+    if ('error' in stop) return `Not resumed: ${stop.error}.`
+    activeRoot = r.root
+    orphanTold = undefined
+    await enterStandby($, { ...r, sessionId: await $.session.id(), beatAt: await $.clock.now() }, why)
+    return `Resumed: standing by, cycle ${r.cycle ?? 0}.${clearedNote(stop)}`
+  }
+  // A run still planning gets its prompt again, with Linear read before the record is written.
+  const kick = phase === 'plan' ? await linearKickoff($, r.root) : {}
+  const next: AutoRecord = {
+    ...r,
+    on: true,
+    phase,
+    sessionId: await $.session.id(),
+    beatAt: now,
+    ...(gapMs === undefined ? { startedAt: now, holdStreak: 0, deployFails: 0 } : { startedAt: r.startedAt + gapMs }),
+    ...(phase === 'plan' ? { phaseAt: now, nudges: 0 } : {}),
+    ...(kick.linear !== undefined ? { linear: kick.linear } : {}),
+  }
+  activeRoot = r.root
+  orphanTold = undefined
+  await writeRecord($, next)
+  clearSessionGoal($)
+  if (phase === 'plan') {
+    const text = kickoffText(r.hint, refOf(r), r.remote === LOCAL, r.deploy?.source === 'file' ? r.deploy.command : undefined, kick.brief)
+    $.clock.after(100, () => {
+      $.prompt.submit({ text }).catch(() => $.ui.toast('auto-claude: the planning prompt was not submitted; send any message to start.'))
+    })
+  } else {
+    // The goal it was building, taken over here (a loop from goal-mode is found in its log).
+    await recoverLoop($, next).catch(() => undefined)
+    await resumeLoop($, r.root, why)
+  }
+  return `Resumed: phase ${next.phase}, round ${next.round}.${clearedNote(stop)}`
 }
 
 async function stopRun($: EngineInterface, r: AutoRecord, why: string, phase: 'stopped' | 'done' = 'stopped'): Promise<AutoRecord> {
@@ -867,12 +994,17 @@ async function standbyTick($: EngineInterface, r: AutoRecord): Promise<void> {
 async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<void> {
   if (ticking || activeRoot === undefined) return
   ticking = true
+  const prevTickAt = lastTickAt
+  tickStartedAt = await $.clock.now()
+  lastTickAt = tickStartedAt
   let failed = false
   try {
     const got = await readRecord($, activeRoot)
     if (got === undefined) return
     if (got.sessionId !== (await $.session.id())) {
-      await reportOrphan($, got)
+      // Another session took the run: this one stops judging or guarding its milestone.
+      if ((await loopView($)) !== null) await stopLoop($, got.root)
+      if (!(await adoptOrphan($, got, prevTickAt, pollMs))) await reportOrphan($, got)
       return
     }
     if (!got.on) return
@@ -1357,7 +1489,10 @@ export const register: Register = (on, options) => {
     // which also takes down a piece an earlier load left.
     await show($, r)
     ticker?.cancel()
-    ticker = $.clock.every(pollMs, () => void tick($, caps, pollMs))
+    ticker = $.clock.every(pollMs, () => {
+      void pulse($)
+      void tick($, caps, pollMs)
+    })
     return started
   })
 
@@ -1491,48 +1626,7 @@ export const register: Register = (on, options) => {
     }
     if (action === 'resume') {
       if (r.on && r.sessionId === (await $.session.id())) return { text: 'The run is already on in this session.' }
-      const stop = await clearStop($, r.root)
-      if ('error' in stop) return { text: `Not resumed: ${stop.error}.` }
-      const now = await $.clock.now()
-      const phase = r.phase === 'done' || r.phase === 'stopped' || r.phase === 'final' ? (r.pausedPhase ?? 'run') : r.phase
-      // A run that stood by stands by again: nothing was being built.
-      if (phase === 'standby') {
-        const stop = await clearStop($, r.root)
-        if ('error' in stop) return { text: `Not resumed: ${stop.error}.` }
-        activeRoot = r.root
-        orphanTold = undefined
-        await enterStandby($, { ...r, sessionId: await $.session.id(), beatAt: await $.clock.now() }, 'resumed by the person')
-        return { text: `Resumed: standing by, cycle ${r.cycle ?? 0}.${clearedNote(stop)}` }
-      }
-      // A run still planning gets its prompt again, with Linear read before the record is written.
-      const kick = phase === 'plan' ? await linearKickoff($, r.root) : {}
-      const next: AutoRecord = {
-        ...r,
-        on: true,
-        phase,
-        sessionId: await $.session.id(),
-        startedAt: now,
-        beatAt: now,
-        holdStreak: 0,
-        deployFails: 0,
-        ...(phase === 'plan' ? { phaseAt: now, nudges: 0 } : {}),
-        ...(kick.linear !== undefined ? { linear: kick.linear } : {}),
-      }
-      activeRoot = r.root
-      orphanTold = undefined
-      await writeRecord($, next)
-      clearSessionGoal($)
-      if (phase === 'plan') {
-        const text = kickoffText(r.hint, refOf(r), r.remote === LOCAL, r.deploy?.source === 'file' ? r.deploy.command : undefined, kick.brief)
-        $.clock.after(100, () => {
-          $.prompt.submit({ text }).catch(() => $.ui.toast('auto-claude: the planning prompt was not submitted; send any message to start.'))
-        })
-      } else {
-        // The goal it was building, taken over here (a loop from goal-mode is found in its log).
-        await recoverLoop($, next).catch(() => undefined)
-        await resumeLoop($, r.root, 'resumed by the person')
-      }
-      return { text: `Resumed: phase ${next.phase}, round ${next.round}.${clearedNote(stop)}` }
+      return { text: await takeOver($, r, 'resumed by the person') }
     }
     return { text: `Usage: /${COMMAND} start [aim] | start --always-on [aim] | start --queue | standby | status | stop | resume` }
   })

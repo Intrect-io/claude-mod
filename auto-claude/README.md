@@ -71,7 +71,7 @@ With `--always-on` (or the `alwaysOn` option), a run does not end when its final
 - **Caps.** `maxMerges` and `maxHours` count per cycle; standby time counts toward neither. `maxMergesPerDay` (20) holds a wake back while the last 24 h hold that many merges, told once. 3 deploys failing in a row still stop the run.
 - **Memory.** Each cycle adds one line under `## Cycles` in `auto-plan.md`: what woke it, what merged, was held and deployed. On entering standby the session is compacted once (when its context is 30% full or more), keeping the goal, decisions and cycles.
 - **Quiet.** In standby a person is told only of a wake (and why), a cycle's end, a failing smoke check or GitHub poll, and the daily cap.
-- **Limits.** The worker is the session: if it exits, nothing polls until `/auto-claude resume` in a session (other sessions report it orphaned). An external supervisor, Remote Control or webhook inboxes, and answering a deferred milestone are not part of this.
+- **Limits.** The worker is a session: if it exits, nothing polls until another session of the repository takes the run over (below) or `/auto-claude resume`. An external supervisor, Remote Control or webhook inboxes, and answering a deferred milestone are not part of this.
 
 ## Deploying
 
@@ -153,7 +153,7 @@ A run never asks the person to look at `status` or to run a command. When someth
 | The same cause holds two milestones in a row (no runner, gh not logged in) | The run stops and names the cause, instead of holding every later milestone. |
 | A tick that fails 3 times in a row | Reported once with its error. `stalled: every tick fails` stays in `status` until a tick gets through. |
 | Nothing started, shipped or merged for 15 min | The person is told the cause and that the watchdog is on it: at 15 min, 30 min later, and once more. |
-| The owning session goes quiet for 10 min | Other sessions report the run as orphaned. `/auto-claude resume` takes it over there, including the milestone being built. |
+| The owning session goes quiet for 10 min (exited, replaced after a reboot, or the person moved to another session) | Any session of the same repository takes the run over by itself, with the milestone being built, once it has been free for 2 min (no turn running), and says so. A busy session only reports the run as orphaned, until it is free. A `.claude/auto-claude.stop` left in place keeps it reported, not taken. Two sessions claiming at once: the claim still in the store after 3 s goes on. `/auto-claude resume` takes it over at once. |
 
 `/auto-claude status` ends with a `stalled:` line naming the cause whenever the run is not moving. Only the owning session receives the unattended rules. Progress shows in the status line piece (`auto·R1·M3/7·PR#12`) and in notifications.
 
