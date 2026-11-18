@@ -29,6 +29,16 @@ Refuses or rewrites a single tool call.
 - The LM Studio port.
 - Secrets (keys, tokens, private keys, `password=`) written into `~/.claude/projects/*/memory/`.
 
+**Tests that swallow exceptions** (rules/code-quality.md)
+- An Edit/Write of a test file (`test_*.py`, `*_test.py`, `conftest.py`, `*.test.ts`, `*.spec.*`, anything under `tests/` or `__tests__/`) is refused when the text it writes holds a swallowed exception: Python `except ...: pass` (or `...`), a bare `except:`, `contextlib.suppress`; TS/JS an empty `catch` block (a comment inside counts as empty) or `.catch(() => {})` / `() => undefined|null`. A test that swallows an exception cannot fail.
+- A Bash command that writes a test file (redirect, `tee`, `sed -i`, a script) with such text is refused too, so the shell is not a way around it.
+- Only the written text is judged; editing a file that already has one is not blocked. Non-test code is out of scope. There is no override: assert the error (`pytest.raises(E, match=...)`, `.rejects.toThrow`) or let it propagate.
+
+**Doc budget** (CLAUDE.md and plan.md stay light)
+- A write to any `CLAUDE.md` or `plan.md` may not grow it past its budget: 200 lines for CLAUDE.md, 150 for plan.md. A file already over budget may shrink or stay the same size, so the next edit has to trim what is finished or stale. Appending through the shell (`>>`, `tee -a`) is refused as growth.
+- Override per repo with `<repo>/.claude/doc-budget.json`: `{ "claude": 300, "plan": 400 }`, read from the session's cwd.
+- This enforces *light*. *Current* is not decidable from one tool call, so the refusal text asks for the stale part to be removed in the same edit.
+
 **Linear (CLAUDE.md §1.5)**
 - `save_issue` creates and `save_comment` writes only when the user asked for Linear work in this session. Any one of these counts as asking:
   - a prompt naming Linear, 리니어, 이슈 or an issue ID;

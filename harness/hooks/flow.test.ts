@@ -281,6 +281,22 @@ describe('phase 1 guards', () => {
     expect((await $.tool.call({ tool: 'Agent', prompt: 'x', description: 'x', isolation: 'worktree' })).deny).toContain('worktrees/')
     expect((await $.tool.call({ tool: 'mcp__pykis-local__place_order', code: '005930' })).deny).toContain('approves')
   })
+
+  test('swallowing tests and growing a past-budget plan.md are refused at the tool call', async ($, on) => {
+    const w = world(on)
+    w.files.set('/repo/plan.md', 'x\n'.repeat(160))
+    w.files.set('/repo/CLAUDE.md', 'y\n'.repeat(10))
+    await start($)
+    await prompt($, '정리해줘')
+    const swallow = 'try:\n    run()\nexcept Exception:\n    pass\n'
+    expect((await $.tool.call({ tool: 'Write', file_path: '/repo/tests/test_a.py', content: swallow })).deny).toContain('swallows an exception')
+    expect((await $.tool.call({ tool: 'Edit', file_path: '/repo/src/a.test.ts', old_string: 'a', new_string: 'try { x() } catch {}' })).deny).toContain('swallows an exception')
+    expect((await $.tool.call({ tool: 'Write', file_path: '/repo/src/app.py', content: swallow })).deny).toBeUndefined()
+    expect((await $.tool.call({ tool: 'Bash', command: `cat > tests/test_b.py <<'EOF'\n${swallow}EOF` })).deny).toContain('swallows an exception')
+    expect((await $.tool.call({ tool: 'Edit', file_path: '/repo/plan.md', old_string: 'x', new_string: 'x\nmore' })).deny).toContain('doc budget')
+    expect((await $.tool.call({ tool: 'Edit', file_path: '/repo/CLAUDE.md', old_string: 'y', new_string: 'y\nmore' })).deny).toBeUndefined()
+    expect((await $.tool.call({ tool: 'Bash', command: 'echo x >> plan.md' })).deny).toContain('doc budget')
+  })
 })
 
 describe('phase 2', () => {
