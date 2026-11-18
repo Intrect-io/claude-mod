@@ -8,7 +8,7 @@ import type { DeploySpec } from './deploy'
 import { deployMerged } from './deploy-run'
 import { bootstrapRepo } from './bootstrap'
 import { ensureLines, FILES, fetchRemote, LOCAL, out, readText, refOf, repoRoot, run, tell } from './io'
-import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, WAIT_TOOL, WAIT_TOOL_ID, waitCall, guardRefusal, LOOP_EXCLUDES, LOOP_POLICY, loopView, MIN_CHECKS_TO_DEFER, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop } from './loop'
+import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, WAIT_TOOL, WAIT_TOOL_ID, waitCall, guardRefusal, LOOP_EXCLUDES, LOOP_POLICY, loopView, MIN_CHECKS_TO_DEFER, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop, AGENT_PARKS, backgroundBusy, noteBackground } from './loop'
 import { capReached, causeOf, ciAction, diagnose, httpsOf, idleDue, inFlight, isWaiting, onlyWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, summary, unfinished, wakeDue } from './ship'
 import { markItem, nextPending, waitingItems } from './queue'
 import type { QueueItem } from './queue'
@@ -40,6 +40,20 @@ const STORE = (root: string) => `auto:${root}`
 // The owner's pulse, written on every timer fire even while a long tick (a
 // deploy, CodeQL) runs, apart from the record so it never overwrites it.
 const BEAT = (root: string) => `beat:${root}`
+// When this session's background workflow was first seen running, kept across
+// a /reload-plugins (a deploy reloads sessions whose turn has ended, which a
+// session waiting on a workflow has). Written only when it changes.
+const BG = (sessionId: string) => `bg:${sessionId}`
+// Names this Claude Code process: set in its environment at the first load,
+// kept by a reload, gone in a new process (a resume, a reboot), where a
+// workflow from before cannot still be running.
+async function processToken($: EngineInterface): Promise<string> {
+  const had = await $.env.get('AUTO_CLAUDE_PROCESS')
+  if (had !== undefined && had !== '') return had
+  const made = `${await $.clock.now()}-${Math.floor(Math.random() * 1e9)}`
+  await $.env.set('AUTO_CLAUDE_PROCESS', made)
+  return made
+}
 const EXCLUDES = ['.claude/auto-plan.md', '.claude/auto-plan.*.md', '.claude/goals.*.md', '.claude/auto-claude.stop', '.claude/auto-claude.stop.cleared', '.claude/auto-claude.on', ...LOOP_EXCLUDES]
 const DENY = ['\\bgh\\s+pr\\s+merge\\b', '\\bgh\\s+release\\b', '\\bgit\\s+push\\b.*\\bHEAD:(main|master)\\b']
 
@@ -103,6 +117,19 @@ const TICK_FAIL_TELL = 3
 let standbyCfg: StandbyConfig = { healthMs: 30 * 60_000, githubMs: 10 * 60_000, issueLabel: 'auto-claude', maxMergesPerDay: 20 }
 // Runs going on by themselves (continueRun): on by default, and at most this many started in 24 h.
 let runCfg = { continueRuns: true, maxRunsPerDay: 6 }
+// Ultracode for every run (userConfig `ultracode`): the session that owns a run
+// works with standing dynamic workflows. The engine keeps the flag per session
+// and tells no state back (`command.run` of /effort answers {}), so it is asked
+// for once per run in each load of the owning session; a person may still turn
+// it off, and the next run or resume asks again.
+let ultracodeWanted = true
+let ultracodeKey: string | undefined
+// The ask in flight for ultracodeKey: a kickoff awaits it, so its prompt comes after.
+let ultracodeAsk: Promise<void> = Promise.resolve()
+let ultracodePending = false
+let ultracodeFails = { key: '', n: 0 }
+const ULTRACODE_TRIES = 3
+const ULTRACODE_WAIT_MS = 60_000
 
 async function readRecord($: EngineInterface, root: string): Promise<AutoRecord | undefined> {
   const v = await $.store.get(STORE(root))
@@ -364,12 +391,16 @@ async function takeOver($: EngineInterface, r: AutoRecord, why: string, gapMs?: 
   clearSessionGoal($)
   if (phase === 'plan') {
     const text = kickoffText(r.hint, refOf(r), r.remote === LOCAL, r.deploy?.source === 'file' ? r.deploy.command : undefined, kick.brief)
-    $.clock.after(100, () => {
+    $.clock.after(100, async () => {
+      await ensureUltracode($, next)
       $.prompt.submit({ text }).catch(() => $.ui.toast('auto-claude: the planning prompt was not submitted; send any message to start.'))
     })
   } else {
     // The goal it was building, taken over here (a loop from goal-mode is found in its log).
     await recoverLoop($, next).catch(() => undefined)
+    // Asked from a timer (this may run inside the /auto-claude command's hook):
+    // queued at once, so it lands before the milestone prompt a second later.
+    $.clock.after(0, () => void ensureUltracode($, next))
     await resumeLoop($, r.root, why)
   }
   return `Resumed: phase ${next.phase}, round ${next.round}.${clearedNote(stop)}`
@@ -674,7 +705,7 @@ async function finalCheck($: EngineInterface, r: AutoRecord, caps: Caps): Promis
 // How long the session has had no turn, while nothing else (a judge, an armed
 // retry) holds it; undefined while it is busy.
 function quietFor(now: number, since: number): number | undefined {
-  if (watch.turnActive || watch.judging || now < watch.retryUntil) return undefined
+  if (watch.turnActive || watch.judging || now < watch.retryUntil || backgroundBusy(now)) return undefined
   return now - Math.max(watch.lastTurnEndAt ?? watch.loadedAt, since)
 }
 
@@ -683,9 +714,11 @@ function quietFor(now: number, since: number): number | undefined {
 // soon after its turn ends, else every PLAN_NUDGE_MS; then give up.
 function planNudgeDue(r: AutoRecord, now: number): boolean {
   if (r.phaseAt === undefined) return true
+  // A planning workflow still running will open the next turn itself.
+  if (backgroundBusy(now)) return false
   if (now - r.phaseAt >= PLAN_NUDGE_MS) return true
   const ended = watch.lastTurnEndAt
-  return !watch.turnActive && ended !== undefined && ended > r.phaseAt && now - ended >= PLAN_QUIET_MS
+  return !watch.turnActive && !backgroundBusy(now) && ended !== undefined && ended > r.phaseAt && now - ended >= PLAN_QUIET_MS
 }
 
 // Planning: remind a model that has not accepted a plan, then give up.
@@ -697,6 +730,7 @@ async function planTick($: EngineInterface, r: AutoRecord): Promise<void> {
     if (!sessionQuiet(now)) return
     const text = r.kickoff
     await writeRecord($, { ...r, kickoff: undefined, phaseAt: now, nudges: 0 })
+    await ensureUltracode($, r)
     $.prompt.submit({ text }).catch(() => {})
     return
   }
@@ -1043,7 +1077,8 @@ async function continueRun($: EngineInterface, r: AutoRecord, why: string, resul
   await appendLog($, r.root, { event: 'next-run', run: next.runNo, after: why })
   await tell($, next, `finished: ${why}. ${summary(r.merges, r.held, r.ships)}. Run ${next.runNo} plans itself ${free ? 'now' : 'once the session is free'} toward the same aim (${runs.length + 1}/${runCfg.maxRunsPerDay} runs in 24 h); /${COMMAND} stop ends it`)
   if (free) {
-    $.clock.after(100, () => {
+    $.clock.after(100, async () => {
+      await ensureUltracode($, next)
       $.prompt.submit({ text }).catch(() => $.ui.toast('auto-claude: the planning prompt was not submitted; send any message to go on.'))
     })
   }
@@ -1052,7 +1087,40 @@ async function continueRun($: EngineInterface, r: AutoRecord, why: string, resul
 
 // The session is free for a wake: no turn now, and none for WAKE_QUIET_MS.
 function sessionQuiet(now: number): boolean {
-  return !watch.turnActive && !watch.judging && now - (watch.lastTurnEndAt ?? watch.loadedAt) >= WAKE_QUIET_MS
+  return !watch.turnActive && !watch.judging && !backgroundBusy(now) && now - (watch.lastTurnEndAt ?? watch.loadedAt) >= WAKE_QUIET_MS
+}
+
+// Asks for ultracode in the session that owns the run, once per run (a resume
+// or the next run asks again). Awaited before a kickoff, so the flag lands
+// before the prompt; a refusal is retried on later ticks, then told once.
+async function ensureUltracode($: EngineInterface, r: AutoRecord): Promise<void> {
+  if (!ultracodeWanted || !r.on || r.phase === 'standby') return
+  if (r.sessionId !== (await $.session.id())) return
+  const key = `${r.root}|${r.startedAt}|${r.runNo ?? 1}`
+  // Set before the call: a tick while the command waits for an idle session asks nothing twice.
+  if (ultracodeKey !== key) {
+    ultracodeKey = key
+    ultracodePending = true
+    ultracodeAsk = askUltracode($, r, key).finally(() => {
+      ultracodePending = false
+    })
+  }
+  if (!ultracodePending) return
+  // A kickoff waits for the ask, but never for long: the run goes on without it.
+  return Promise.race([ultracodeAsk, new Promise<void>(resolve => void $.clock.after(ULTRACODE_WAIT_MS, () => resolve()))])
+}
+
+async function askUltracode($: EngineInterface, r: AutoRecord, key: string): Promise<void> {
+  try {
+    await $.command.run({ command: 'effort', args: 'ultracode on' })
+    await appendLog($, r.root, { event: 'ultracode', run: r.runNo ?? 1 })
+  } catch (error) {
+    ultracodeFails = { key, n: ultracodeFails.key === key ? ultracodeFails.n + 1 : 1 }
+    const reason = String(error).slice(0, 200)
+    await appendLog($, r.root, { event: 'ultracode-refused', reason, tries: ultracodeFails.n })
+    if (ultracodeFails.n < ULTRACODE_TRIES) ultracodeKey = undefined
+    else await tell($, r, `ultracode could not be turned on (${reason}); the run goes on without it`)
+  }
 }
 
 // Standby: no model turn. Polls what is due, queues what changed, compacts
@@ -1158,6 +1226,8 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
       await standbyTick($, r)
       return
     }
+    // Not awaited: the command waits for an idle session, and a milestone's turn is long.
+    void ensureUltracode($, r)
     // The engine's clock, like every other time the run keeps (beatAt, phaseAt, movedAt).
     const cap = capReached(r, caps, await $.clock.now())
     if (cap !== undefined) {
@@ -1442,7 +1512,8 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string, bu
     return `auto-claude building the queue in ${root}: one worktree per pending line, judged by its check; nothing is pushed, merged or deployed.${clearedNote(stop)}`
   }
   const text = kickoffText(hint, refOf({ remote, defaultBranch }), remote === LOCAL, deploy?.command, kick.brief)
-  $.clock.after(100, () => {
+  $.clock.after(100, async () => {
+    await ensureUltracode($, r)
     $.prompt.submit({ text }).catch(() => $.ui.toast('auto-claude: the planning prompt was not submitted; send any message to start.'))
   })
 
@@ -1585,6 +1656,9 @@ export const register: Register = (on, options) => {
     maxMergesPerDay: Number(options.maxMergesPerDay ?? 20),
   }
   runCfg = { continueRuns: options.continueRuns !== false, maxRunsPerDay: Math.max(Number(options.maxRunsPerDay ?? 6) || 6, 1) }
+  ultracodeWanted = options.ultracode !== false
+  ultracodeKey = undefined
+  ultracodePending = false
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -1623,7 +1697,10 @@ export const register: Register = (on, options) => {
       isDeferred: false,
     })
     // A fresh load knows nothing of the turns before it: quiet counts from now.
-    Object.assign(watch, { turnActive: false, lastTurnEndAt: undefined, judging: false, retryUntil: 0, loadedAt: await $.clock.now() })
+    Object.assign(watch, { turnActive: false, lastTurnEndAt: undefined, judging: false, retryUntil: 0, backgroundSince: undefined, loadedAt: await $.clock.now() })
+    // A reload while a workflow runs: the session still waits on it.
+    const bg = (await $.store.get(BG(await $.session.id())).catch(() => undefined)) as { since?: unknown; process?: unknown } | undefined
+    if (typeof bg?.since === 'number' && bg.process === (await processToken($))) watch.backgroundSince = bg.since
     tickNow = () => tick($, caps, pollMs)
     setOnFinish(() => {
       $.clock.after(100, () => void tick($, caps, pollMs))
@@ -1683,7 +1760,13 @@ export const register: Register = (on, options) => {
   // The Stop of a turn that builds a milestone: the loop judges it.
   on('classic.Stop', async ($, e, next) => {
     const below = await next(e)
-    if (e.agent_id !== undefined || below.block !== undefined || below.preventContinuation === true) return below
+    if (e.agent_id !== undefined) return below
+    // A workflow or subagent still running will open the next turn: until then
+    // the session is waiting, not idle, and the milestone is not judged.
+    const before = watch.backgroundSince
+    noteBackground((e as { background_tasks?: unknown }).background_tasks, await $.clock.now())
+    if (watch.backgroundSince !== before) await $.store.set(BG(await $.session.id()), { since: watch.backgroundSince ?? null, process: await processToken($) }).catch(() => undefined)
+    if (below.block !== undefined || below.preventContinuation === true) return below
     return onStop($, e, below)
   })
 
@@ -1691,9 +1774,15 @@ export const register: Register = (on, options) => {
   // on the first matcher hook of the event; a stub handler reproduces it, so it
   // is the matcher's type, not this hook. Only this line is exempt.
   // @ts-expect-error TS2589 in claude-code's Matcher<Args<'tool.call'>>
-  on('tool.call', { tool: DEFER_TOOL_ID }, async ($, e) => deferCall($, (e as unknown as { reason?: unknown }).reason))
+  on('tool.call', { tool: DEFER_TOOL_ID }, async ($, e) => {
+    if ((e as unknown as { agentId?: unknown }).agentId !== undefined) return { result: AGENT_PARKS }
+    return deferCall($, (e as unknown as { reason?: unknown }).reason)
+  })
 
-  on('tool.call', { tool: WAIT_TOOL_ID }, async ($, e) => waitCall($, e as unknown as Record<string, unknown>))
+  on('tool.call', { tool: WAIT_TOOL_ID }, async ($, e) => {
+    if ((e as unknown as { agentId?: unknown }).agentId !== undefined) return { result: AGENT_PARKS }
+    return waitCall($, e as unknown as Record<string, unknown>)
+  })
 
   on('tool.call', { tool: READY_TOOL_ID }, async ($): Promise<{ result: string }> => {
     const root = activeRoot

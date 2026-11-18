@@ -13,7 +13,7 @@ import type { EngineInterface } from 'claude-code'
 import type { Goal, LoopCurrent, LoopRecord, LoopView } from '../types'
 import { clip, evaluate } from './evaluator'
 import type { StopFields } from './evaluator'
-import { checkBash, checkPath, uncommitted, WAIT_MAX_S, waitsLong } from './guard'
+import { checkBash, checkPath, stripProse, uncommitted, WAIT_MAX_S, waitsLong } from './guard'
 import { WORKTREE_WAIT_HINT, worktreeRefs } from './plan'
 import { markItem, nextPending, parseDuration, parseQueue, requeueItem, slugify, waitingItems } from './queue'
 import type { QueueItem } from './queue'
@@ -51,6 +51,41 @@ export const watch = {
   // A retry prompt is armed until then (loopStuck's pause).
   retryUntil: 0,
   loadedAt: 0,
+  // Since when the last Stop left a workflow or subagent running in the
+  // background: the session is waiting on it, not idle (see backgroundBusy).
+  backgroundSince: undefined as number | undefined,
+}
+
+// Background work that wakes the session when it ends: a workflow (ultracode
+// starts one for most tasks) or a subagent. A shell task is left out: a dev
+// server never ends, and a milestone would never be judged.
+const WAKING_TASKS: ReadonlySet<string> = new Set(['workflow', 'subagent', 'remote_agent', 'teammate'])
+const LIVE_STATUS: ReadonlySet<string> = new Set(['running', 'pending'])
+// Past this the run stops waiting on it: a hung workflow must not park the run.
+export const BACKGROUND_MAX_MS = 2 * 60 * 60_000
+
+// The waking work a Stop reports in flight (its `background_tasks`), described.
+export function wakingWork(tasks: unknown): string[] {
+  if (!Array.isArray(tasks)) return []
+  return tasks.flatMap(t => {
+    const task = t as { type?: unknown; status?: unknown; description?: unknown; name?: unknown }
+    if (!WAKING_TASKS.has(String(task.type)) || !LIVE_STATUS.has(String(task.status))) return []
+    return [`${String(task.type)} ${String(task.name ?? task.description ?? '').slice(0, 80)}`.trim()]
+  })
+}
+
+// Records what a main-thread Stop left running. Each such Stop restarts the
+// clock: a turn that a workflow's result opened and that starts the next one
+// is progress, and only a workflow that never reports back runs the ceiling out.
+export function noteBackground(tasks: unknown, now: number): string[] {
+  const work = wakingWork(tasks)
+  watch.backgroundSince = work.length === 0 ? undefined : now
+  return work
+}
+
+// The session waits on background work that will wake it, within the ceiling.
+export function backgroundBusy(now: number): boolean {
+  return watch.backgroundSince !== undefined && now - watch.backgroundSince < BACKGROUND_MAX_MS
 }
 
 // Called when a goal finishes, so the driver looks at once instead of at its next tick.
@@ -215,6 +250,14 @@ export async function onStop<R extends { block?: string }>($: EngineInterface, e
 }
 
 async function judge<R extends { block?: string }>($: EngineInterface, { rec, view, goal }: { rec: LoopRecord; view: LoopView; goal: Goal }, e: StopFields, below: R): Promise<R> {
+  // The turn ended with a workflow or subagent still running: its result opens
+  // the next turn, and that turn's Stop is judged. No check runs or counts now,
+  // and a wait or deferral asked for meanwhile is applied then, so the next
+  // milestone never starts under a workflow still working on this one.
+  if (backgroundBusy(await $.clock.now())) {
+    await appendLog($, view.repoRoot, { event: 'background', goal: rec.current?.condition.slice(0, 80) })
+    return below
+  }
   if (goal.deferPending !== undefined) {
     await finishGoal($, rec, { mark: '!', note: `deferred ${isoNow()}: ${goal.deferPending}`, event: 'deferred', reason: goal.deferPending })
     return below
@@ -380,6 +423,15 @@ const WAIT_REFUSAL = `auto-claude run: do not wait or schedule a wake-up inside 
 
 export function guardRefusal(e: Record<string, unknown>, view: LoopView | null, runOn: boolean): string | undefined {
   const tool = String(e.tool)
+  const agent = e.agentId !== undefined
+  if (agent && (runOn || view !== null)) {
+    if (WAIT_TOOLS.has(tool) || (tool === 'Bash' && typeof e.command === 'string' && waitsLong(e.command))) return AGENT_PARKS
+  }
+  // A workflow agent's shell starts in the session's directory, which may be
+  // the main checkout: its git writes must name the worktree.
+  if (agent && view !== null && tool === 'Bash' && typeof e.command === 'string' && GIT_WRITE.test(stripProse(e.command)) && !e.command.includes(view.worktree)) {
+    return `auto-claude milestone: a workflow agent runs git writes in the worktree only: cd ${view.worktree} && <command>, or git -C ${view.worktree} <command>. Committing is the main thread's job.`
+  }
   if (runOn || view !== null) {
     if (tool === 'AskUserQuestion') return `auto-claude run: nobody can answer. Decide with a stated assumption (the recommended or safest option), or call ${DEFER_TOOL_ID} for an external blocker.`
     if (tool === 'EnterPlanMode') return 'auto-claude run: plan mode would hold the run; plan inline and keep working.'
@@ -393,13 +445,24 @@ export function guardRefusal(e: Record<string, unknown>, view: LoopView | null, 
   return undefined
 }
 
+// Git commands that change a checkout or its history.
+// The subcommand right after `git` and its global options, so `git diff -- add.py` is a read.
+const GIT_WRITE = /\bgit(?:\s+(?:-[Cc]\s+\S+|--[\w-]+(?:=\S+)?))*\s+(commit|add|checkout|switch|merge|rebase|stash|restore|cherry-pick|am|apply|reset|rm|mv)\b/
+
+// What a workflow agent is told when it would wait or park the milestone: that is the main thread's call.
+export const AGENT_PARKS = `auto-claude run: a workflow agent does not wait or park the milestone. Finish with what you have and return what is still pending (the job, how to check it) to the main thread; it calls ${WAIT_TOOL_ID} or ${DEFER_TOOL_ID}.`
+
+// Ultracode runs workflows: their agents must keep to the milestone's worktree.
+export const WORKFLOW_RULE = "Workflows and subagents: give every agent the milestone's worktree path and have it work there, with no isolation: 'worktree' (an agent's edits or git writes elsewhere are refused). Agents neither commit nor wait: you commit their work, and a job still running comes back to you for the wait tool. Ending the turn while a workflow runs is fine: the milestone is judged at the Stop of the turn its result opens."
+
 export const LOOP_POLICY = `# auto-claude milestone — ACTIVE
 You are building one milestone of an unattended auto-claude run. Nobody is watching this session.
 - Do not ask questions (AskUserQuestion is refused) and do not enter plan mode. Decide with a stated assumption and record it in the commit message.
 - A "CONFIDENCE HALT" becomes a call to ${DEFER_TOOL_ID} with the reason, and only for external blockers (credentials, a human decision, missing access) after at least ${MIN_CHECKS_TO_DEFER} failed checks. Otherwise keep working.
 - Waiting on compute (a training run, a cache build, a job you launched, a file another milestone lands) is not a blocker: commit, call ${WAIT_TOOL_ID} with a shell command that exits 0 once it is done (and an alive command that fails if the job died), then end the turn. Never defer for it.
 - Work only inside the milestone's worktree; commit after each meaningful step. Push only your goal/* branch, never main or with force. auto-claude pushes, merges and deploys for you.
-- Never wait inside a turn (no long sleep, CI watch, Monitor, cron or scheduled wake-up); ${WAIT_TOOL_ID} is how a milestone waits. While an earlier milestone's CI runs you are already building the next one; when this one is done, end the turn and the next prompt comes by itself.`
+- Never wait inside a turn (no long sleep, CI watch, Monitor, cron or scheduled wake-up); ${WAIT_TOOL_ID} is how a milestone waits. While an earlier milestone's CI runs you are already building the next one; when this one is done, end the turn and the next prompt comes by itself.
+- ${WORKFLOW_RULE}`
 
 export function kickoffText(current: LoopCurrent, seq: number): string {
   return [
@@ -412,6 +475,7 @@ export function kickoffText(current: LoopCurrent, seq: number): string {
     `You may push only this branch (git push -u origin ${current.branch}); never main/master, never with force. auto-claude opens the PR, merges and deploys once the milestone is met.`,
     `Nobody is watching: do not ask questions. Decide with a stated assumption and record it in the commit message. For an external blocker (credentials, a human decision, missing access), call ${DEFER_TOOL_ID} after at least ${MIN_CHECKS_TO_DEFER} failed checks.`,
     `If it needs a job to finish first (training, a cache build), launch or check the job, commit, and call ${WAIT_TOOL_ID} with a shell command that exits 0 once it is done; auto-claude polls it and resumes this milestone.`,
+    WORKFLOW_RULE.replace("the milestone's worktree path", `the worktree path ${current.worktree}`),
   ].join('\n')
 }
 
