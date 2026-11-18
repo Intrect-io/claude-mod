@@ -1,9 +1,10 @@
 # auto-claude
 
-An unattended run of one repository, through to what it built being live. Give it an aim in one line, or none at all. Claude plans the long-term end state, its milestones and how the repository deploys. The built-in loop builds each milestone in its own worktree and judges it. auto-claude ships each one (merging it when CI is green), deploys it and smoke-checks it. Rounds of planning repeat until the plan's final check passes.
+An unattended run of one repository, through to what it built being live. Give it an aim in one line, or none at all. Claude plans the long-term end state, its milestones and how the repository deploys. The built-in loop builds each milestone in its own worktree and judges it. auto-claude ships each one (merging it when CI is green), deploys it and smoke-checks it. Rounds of planning repeat until the plan's final check passes. Then the next run toward the same aim plans itself (see "Runs that go on by themselves").
 
 ```
 /auto-claude start [aim]   # e.g. /auto-claude start finish the CLI and its docs
+/auto-claude start --once [aim]       # the same, but end when this run's final check passes
 /auto-claude start --always-on [aim]  # the same, then stand by and wake for new work
 /auto-claude start --queue # build .claude/goals.md as it is: branches only, nothing shipped
 /auto-claude standby       # a finished run (or the one going) stands by from now on
@@ -49,8 +50,28 @@ goal-mode merged into auto-claude in 1.0.0 (see "From goal-mode" below). Its loo
    - **Deploy.** After each merge, as the plan says (see "Deploying").
    - **The session never rests through CI.** While a PR waits on CI, the next milestone starts at once, **stacked** on that PR's branch: the commit it starts from is recorded. Up to 2 milestones are built ahead this way. They ship in order. When the one before lands (squashed) or is held, the stacked branch runs `git rebase --onto origin/<default> <recorded commit>`, which drops its parent's commits, and is then pushed like any other. A rebased branch is pushed with `--force-with-lease`, since the session may have pushed it before. A stacked branch that does not rebase cleanly gets a fix goal that does the rebase by hand. While a broken deploy is being repaired, nothing new is stacked and nothing stacked ships: the repair, built from the default branch, lands and deploys first. A fix goal (`:: base:`) always starts on its own base.
 4. **Finish or replan.** When the queue is done, auto-claude runs the final check on a fresh checkout of the merged default branch. Lines still waiting on their `:: after:` mean the queue is not done: no final check runs and no round is spent until they have started.
-   - If it passes, auto-claude deploys once more if a deploy is still due. Then it writes a `## Result` section and stops.
+   - If it passes, auto-claude deploys once more if a deploy is still due. Then it writes a `## Result` section, and the next run plans itself (see below). With `--once` the run stops here.
    - If it fails, Claude appends new milestones from the check's output (round 2, and so on, up to `maxRounds`).
+
+## Runs that go on by themselves
+
+Measured over 2026-11-11..18, comparing the CC-Router usage dashboard with each repository's log, plans and transcripts:
+- 10 runs ended done that week, 4 of them between 22:00 and 08:00 KST.
+- None of those 4 was followed by another run before a person came back. de-artifact, for one, was done at 03:06 and started again by hand at 12:54.
+- 50 of the week's 83 starts gave no aim.
+
+That restart is now the driver's.
+
+- When a run's final check passes, its `.claude/auto-plan.md` and `.claude/goals.md` are kept as `auto-plan.<yyyymmdd-hhmm>.md` and `goals.<…>.md` (git-ignored), and the same session is asked to plan the next run toward the same aim. The prompt names the finished run's Result and its kept files, so the next plan builds on its `## Decisions` and does not plan again what it met. The log gets a `next-run` event.
+- A planner that finds nothing worth a run left without the person (credentials, a decision, hardware, money) calls `mcp__auto-claude__auto_run_done` with the reason, instead of planning busywork. The run ends as done with that reason. The tool is refused once a run is under way.
+- It goes on only while it makes progress, and within caps over the last 24 h:
+  - A run that merged nothing ends as done: another would likely do the same.
+  - `maxRunsPerDay` (6) runs started in 24 h.
+  - `maxMergesPerDay` (20) merges in 24 h, shared with always-on runs.
+  - A `.claude/auto-claude.stop` in place.
+  When one of these holds, the run ends as done and the notice says which ("no next run: …"). A run that stops (a cap, failed deploys, `/auto-claude stop`) never goes on by itself.
+- Every run does this unless started with `--once`, or unless the `continueRuns` option is off. Runs started before 1.6.0 do it too. An always-on run stands by instead. A `--queue` run has no plan to continue.
+- `status` shows the run's number in the chain and the count against the cap. A run's end (`run-done`, `run-stopped`) is now in `.claude/goal-loop.log` too.
 
 ## Always on
 
@@ -87,7 +108,9 @@ CodeQL: python
 
 - `Deploy:` is run by auto-claude after each merge, with `bash -lc`, in a fresh detached checkout of the default branch (`worktrees/auto-deploy`). The model never deploys. Its deploy and cluster commands stay refused, except read-only looks such as `kubectl get|logs|describe`, `fly status|logs` and `wrangler tail`, which it can use to debug a failed smoke check.
 - `Smoke check:` runs right after the deploy. It must pass only when the deployed service really works.
-- `CodeQL:` names the languages scanned before each deploy (`<lang>-security-and-quality`), or says `none (<reason>)`. Any error-level result blocks the deploy. Warnings are only reported. The database and the SARIF go to `$TMPDIR`.
+- `CodeQL:` names the languages scanned before each deploy (`<lang>-security-and-quality`), or says `none (<reason>)`. An error-level result the run brought in blocks the deploy. One that was already there before the run is reported and does not block. Warnings are only reported. The database and the SARIF go to `$TMPDIR`.
+  - "Before the run" is the default branch's commit when the run started. It is scanned once, in `worktrees/auto-codeql-base`, the first time a deploy's scan finds an error. After that the record keeps the set of known results: what the last passing scan found. A result is matched by its rule, its file and CodeQL's `primaryLocationLineHash` (else its message), so moving it to another line does not make it new.
+  - Why: blocking on results that were live before the run stopped whole runs. intrect-platform stopped on 48 old results on 2026-11-17. kyte-portal deferred for 112 h on the same cause.
 - A repository with nothing to run anywhere (a library, a document set) writes `Deploy: none (<reason>)`. `none` without a reason is not accepted.
 - When there is no way to deploy yet, the plan's early milestones build it. While a script the command names (`bash scripts/deploy.sh`, `./deploy`) is missing from the default branch, the deploy waits ("a deploy is due" in `status`) instead of failing. It runs once the script lands, and at the latest before the run is done.
 - The lines are fixed when `auto_plan_ready` accepts the plan. A milestone that edits them does not change what the run executes. A replan may change them, and the change is announced.
@@ -100,7 +123,7 @@ A committed `.claude/auto-deploy.json` takes precedence: the person decided. The
 
 `timeoutSec` is 600 by default, and also at most 600.
 
-**A failed deploy does not stop the run.** That covers a non-zero exit, a timeout, CodeQL errors and a failed smoke check.
+**A failed deploy does not stop the run.** That covers a non-zero exit, a timeout, new CodeQL errors and a failed smoke check.
 - A milestone that repairs the deploy goes into the queue first. It is built from the default branch, because the shipped branch is merged and gone, and it is judged by the final check.
 - It is merged like any milestone, and the deploy then runs again.
 - 3 deploys failing in a row stop the run. Nothing more is merged on top of a broken live service.
@@ -170,6 +193,7 @@ A milestone may need something with its own clock first: a training run, a cache
 - **`:: alive: <command>`** (optional) exits 0 while the awaited job runs. Failing 2 polls in a row asks the model, once, to look at the job.
 - **`:: within: <90m | 12h | 2d>`** (optional): past it the model is asked to look; past twice it the line is held. A line without one is still asked about, once, after 12 h, and never held.
 - `after` and `alive` run from the repository root, never from a worktree, both when polled and when `wait_until` checks them.
+- **They never name a milestone worktree** (`worktrees/goal-…`). Those worktrees are removed once their branch merges, so the wait could never pass. Test the default branch instead: `git cat-file -e origin/main:<path>` for a file that lands, `git merge-base --is-ancestor <sha> origin/main` for a commit. The plan check and `wait_until` refuse such paths. A line edited into the queue later is caught when it is polled: when a worktree it names is gone, the model is asked to rewrite it at once, instead of after its `within` or 12 h. Measured in kyte-portal on 2026-11-17: two such lines sat 3.5 h and 4 h after their milestones merged.
 - The fields go after the check, in this order, with `:: base:` last.
 - **`mcp__auto-claude__wait_until`** does the same from inside a milestone: `{ until, alive?, within?, reason }`. It is refused if `until` already passes or the worktree has uncommitted changes. At the next stop the line goes back to the queue with `:: after:` and `:: base: <its branch>`, so it restarts from the work built so far. A milestone that was stacked keeps the commit it was stacked on, so its restarted branch is rebased off the parent like any stacked one.
 - `/auto-claude status` lists each wait, how long it has waited and its last poll; the status line piece shows `·waitN`.
@@ -192,4 +216,4 @@ Measured in ArtifactNet (2026-11-09 to 11-15): lines carried prose start conditi
 - **Session goals** (`set_goal`, `/goal-mode set|auto|clear` and the outcome nudges) are gone. Use Claude Code's `/goal` and `ProposeGoal`.
 - **A run already going** when 1.0 loads keeps its milestone. The loop's state lived in goal-mode's store, which this plugin cannot read, so the open milestone is found again from the last `start` in `.claude/goal-loop.log` and prompted again. New branches number above the highest existing `goal/NN-*`.
 
-Options: `ciMode` (`auto` | `github` | `local`), `maxRounds`, `maxMerges`, `maxHours`, `maxWaitHours`, `ciPollSec`, and for always-on runs `alwaysOn`, `healthEveryMin`, `githubEveryMin`, `issueLabel` and `maxMergesPerDay`.
+Options: `ciMode` (`auto` | `github` | `local`), `maxRounds`, `maxMerges`, `maxHours`, `maxWaitHours`, `ciPollSec`, `continueRuns` and `maxRunsPerDay` for runs that go on by themselves, and for always-on runs `alwaysOn`, `healthEveryMin`, `githubEveryMin`, `issueLabel` and `maxMergesPerDay`.

@@ -159,6 +159,17 @@ export function dayCapHit(times: readonly number[] | undefined, now: number, max
   return max > 0 && recentMerges(times, now).length >= max
 }
 
+// Why a finished run does not plan the next one itself (register.ts
+// continueRun), or undefined when it does: it goes on only while runs make
+// progress and stay under the rolling caps.
+export function nextRunBlock(r: { merges: number; startedAt: number; runTimes?: readonly number[]; mergeTimes?: readonly number[] }, now: number, cfg: { maxRunsPerDay: number; maxMergesPerDay: number }): string | undefined {
+  if (r.merges === 0) return 'this run merged nothing, so another would likely do the same'
+  const runs = recentMerges(r.runTimes ?? [r.startedAt], now).length
+  if (runs >= cfg.maxRunsPerDay) return `${runs} runs started in the last 24 h, the cap (maxRunsPerDay)`
+  if (dayCapHit(r.mergeTimes, now, cfg.maxMergesPerDay)) return `${recentMerges(r.mergeTimes, now).length} merges in the last 24 h, the cap (maxMergesPerDay)`
+  return undefined
+}
+
 // The line each cycle adds under ## Cycles in auto-plan.md: what woke it and what it did.
 export function cycleLine(r: Pick<AutoRecord, 'cycle' | 'wokeFor' | 'merges' | 'held' | 'deploys' | 'cycleBase'>, at: string): string {
   const base = r.cycleBase ?? { merges: 0, held: 0, deploys: 0 }
