@@ -29,6 +29,12 @@ function world(on: On, store: Record<string, unknown> = {}) {
     files: new Map<string, string>([['/repo/.git/info/exclude', ''], ['/tmp/s.jsonl', '']]),
     prompts: [] as string[],
     commands: [] as string[],
+    // Prompts and commands in the order they reached the engine.
+    order: [] as string[],
+    // /effort is refused (a host's limit, an engine without it).
+    effortFails: false,
+    // This Claude Code process, as auto-claude names it in its environment (a new one after a restart).
+    proc: 'p1',
     // Commands the engine has (/goal where it exists).
     commandNames: [] as string[],
     runs: [] as string[],
@@ -109,7 +115,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
     w.compacts++
     return { skip: 'test' } as never
   })
-  on('env.get', () => ({ value: '/home' }))
+  on('env.get', (_, e) => ({ value: e.name === 'AUTO_CLAUDE_PROCESS' ? w.proc : '/home' }))
   on('fs.read', (_, e) => {
     const t = w.files.get(e.path)
     return t === undefined ? { deny: `ENOENT ${e.path}` } : { value: t }
@@ -122,10 +128,13 @@ function world(on: On, store: Record<string, unknown> = {}) {
   })
   on('prompt.submit', (_, e) => {
     w.prompts.push(e.text)
+    w.order.push(`prompt ${e.text.slice(0, 40)}`)
     return { text: e.text }
   })
   on('command.run', (_, e) => {
+    if (e.command === 'effort' && w.effortFails) throw new Error('refused past a host limit')
     w.commands.push(`${e.command} ${e.args ?? ''}`.trim())
+    w.order.push(`/${e.command} ${e.args ?? ''}`.trim())
     return { text: 'ok' }
   })
   on('model.complete', () => {
@@ -902,7 +911,7 @@ describe('the watchdog (P2, P4, P5)', () => {
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     await cmd($, 'start')
     await w.clock.advance(200)
-    expect(w.commands).toEqual([])
+    expect(w.commands.filter(c => c.startsWith('goal'))).toEqual([])
   })
 
   test('an SSH remote that refuses the push is pushed over https instead (P2)', async ($, on) => {
@@ -1784,5 +1793,180 @@ describe('runs that go on by themselves', () => {
     const result = String((await $.tool.call({ tool: 'mcp__auto-claude__auto_run_done', reason: 'x' } as never)).result)
     expect(result).toContain('Only a run being planned can end this way (phase run, round 1)')
     expect((await cmd($, 'status')).text).toContain('auto-claude on · phase run')
+  })
+})
+
+describe('ultracode (1.7.0)', () => {
+  const ULTRA = 'effort ultracode on'
+  const RUNNING = [{ id: 'w1', type: 'workflow', status: 'running', description: 'build the parser', name: 'parser' }]
+
+  test('the owner session turns ultracode on before the first prompt, once per run', { timeoutMs: 30_000 }, async ($, on) => {
+    const w = world(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start --once add and sub')
+    await w.clock.advance(200)
+    expect(w.order[0]).toBe('/effort ultracode on')
+    expect(w.order[1]).toContain('prompt ')
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set(GOALS, QUEUE)
+    await ready($)
+    for (let i = 0; i < 6; i++) await w.clock.advance(TICK)
+    expect(w.commands.filter(c => c === ULTRA)).toHaveLength(1)
+    expect(w.files.get(LOG)).toContain('"event":"ultracode"')
+  })
+
+  test('off by the ultracode option: the effort is left alone', { options: { ultracode: false } }, async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    await w.clock.advance(3 * TICK)
+    expect(w.commands.filter(c => c === ULTRA)).toEqual([])
+  })
+
+  test('a session that does not own the run asks for nothing', { timeoutMs: 30_000 }, async ($, on) => {
+    const other = { on: true, phase: 'run', root: '/repo', sessionId: 'busy-owner', hint: '', round: 1, startedAt: 0, beatAt: 0, remote: 'origin', defaultBranch: 'main', ciMode: 'local', logOffset: 0, started: 1, finished: 1, worktrees: {}, ships: [], fixes: {}, merges: 0, held: 0, queueEmpty: false }
+    const w = world(on, { 'auto:/repo': other, 'beat:/repo': { sessionId: 'busy-owner', at: 0 } })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await w.clock.advance(3 * TICK)
+    expect(w.commands.filter(c => c === ULTRA)).toEqual([])
+  })
+
+  test('a refused /effort is retried, told once after 3 tries, and the run goes on', { timeoutMs: 30_000 }, async ($, on) => {
+    const w = world(on)
+    w.effortFails = true
+    await planned($, w)
+    for (let i = 0; i < 8; i++) await w.clock.advance(TICK)
+    const log = w.files.get(LOG) ?? ''
+    expect(log.match(/"event":"ultracode-refused"/g)?.length).toBe(3)
+    expect(w.notifies.filter(n => n.includes('ultracode could not be turned on'))).toHaveLength(1)
+    // The milestone was still kicked off.
+    expect(w.prompts.some(p => p.includes('Milestone #1'))).toBe(true)
+  })
+
+  test('a Stop with a workflow in flight is not judged; the Stop after its result is', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    w.checkExit = 1
+    const held = await $.classic.Stop({ ...STOP, background_tasks: RUNNING } as never)
+    expect(held.block).toBeUndefined()
+    expect(w.runs.filter(r => r.startsWith('bash -lc python3'))).toEqual([])
+    expect(w.files.get(LOG)).toContain('"event":"background"')
+    // The workflow's result opened a turn; its Stop has nothing in flight.
+    expect((await $.classic.Stop({ ...STOP, background_tasks: [] } as never)).block).toContain('exited 1')
+  })
+
+  test('a background shell task (a server) does not hold the judge', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    w.checkExit = 1
+    const shell = [{ id: 's1', type: 'shell', status: 'running', description: 'npm run dev', command: 'npm run dev' }]
+    expect((await $.classic.Stop({ ...STOP, background_tasks: shell } as never)).block).toContain('exited 1')
+  })
+
+  test('while a workflow runs the watchdog sends nothing; past 2 h it no longer holds the run', { timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    await turnStart($)
+    await $.classic.Stop({ ...STOP, background_tasks: RUNNING } as never)
+    await turnEnd($)
+    const before = w.prompts.length
+    for (let i = 0; i < 60; i++) await w.clock.advance(MIN)
+    expect(w.prompts.length).toBe(before)
+    for (let i = 0; i < 75; i++) await w.clock.advance(MIN)
+    expect(w.prompts.length).toBeGreaterThan(before)
+  })
+
+  test('planning reminders wait while a planning workflow runs', { timeoutMs: 30_000 }, async ($, on) => {
+    const w = world(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start')
+    await w.clock.advance(200)
+    await turnStart($)
+    await $.classic.Stop({ ...STOP, background_tasks: RUNNING } as never)
+    await turnEnd($)
+    for (let i = 0; i < 20; i++) await w.clock.advance(MIN)
+    expect(w.prompts.filter(p => p.includes('Reminder'))).toHaveLength(0)
+    // Its result opened a turn that ended with nothing in flight: reminders resume.
+    await turnStart($)
+    await $.classic.Stop({ ...STOP, background_tasks: [] } as never)
+    await turnEnd($)
+    for (let i = 0; i < 3; i++) await w.clock.advance(MIN)
+    expect(w.prompts.filter(p => p.includes('Reminder'))).toHaveLength(1)
+  })
+
+  test('a reload while a workflow runs still waits on it: no idle prompt, no judge', { timeoutMs: 30_000 }, async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    await turnStart($)
+    await $.classic.Stop({ ...STOP, background_tasks: RUNNING } as never)
+    await turnEnd($)
+    // /reload-plugins from a deploy: the module's memory starts over.
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    const before = w.prompts.length
+    for (let i = 0; i < 30; i++) await w.clock.advance(MIN)
+    expect(w.prompts.length).toBe(before)
+  })
+
+  test('after a restart (a new process) a workflow from before is not waited on', { timeoutMs: 30_000 }, async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    await turnStart($)
+    await $.classic.Stop({ ...STOP, background_tasks: RUNNING } as never)
+    await turnEnd($)
+    w.proc = 'p2'
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    const before = w.prompts.length
+    for (let i = 0; i < 30; i++) await w.clock.advance(MIN)
+    expect(w.prompts.length).toBeGreaterThan(before)
+  })
+
+  test('chained workflows: each Stop that leaves one running restarts the 2 h ceiling', { timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    await turnStart($)
+    await $.classic.Stop({ ...STOP, background_tasks: RUNNING } as never)
+    await turnEnd($)
+    for (let i = 0; i < 100; i++) await w.clock.advance(MIN)
+    // A's result opened a turn that started B.
+    await turnStart($)
+    await $.classic.Stop({ ...STOP, background_tasks: [{ ...RUNNING[0], id: 'w2', name: 'tests' }] } as never)
+    await turnEnd($)
+    const before = w.prompts.length
+    for (let i = 0; i < 60; i++) await w.clock.advance(MIN)
+    expect(w.prompts.length).toBe(before)
+  })
+
+  test('a wait asked for while a workflow runs is applied at the Stop after its result', { timeoutMs: 30_000 }, async ($, on) => {
+    const w = world(on)
+    const UNTIL = 'test -f /data/m22/final.json'
+    await planned($, w)
+    w.cmdExit.set(UNTIL, 1)
+    expect(String((await $.tool.call({ tool: 'mcp__auto-claude__wait_until', until: UNTIL, reason: 'M22 training' } as never)).result)).toContain('Wait recorded')
+    await $.classic.Stop({ ...STOP, background_tasks: RUNNING } as never)
+    expect(w.files.get(LOG) ?? '').not.toContain('"event":"waiting"')
+    await $.classic.Stop({ ...STOP, background_tasks: [] } as never)
+    expect(w.files.get(LOG)).toContain('"event":"waiting"')
+  })
+
+  test('workflow agents: no waits or parking, git writes only in the worktree', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    const agent = (input: Record<string, unknown>) => $.tool.call({ agentId: 'a1', ...input } as never)
+    expect(String((await agent({ tool: 'Monitor', command: 'tail -f x' })).deny)).toContain('does not wait or park')
+    expect(String((await agent({ tool: 'mcp__auto-claude__wait_until', until: 'true', reason: 'x' })).result)).toContain('does not wait or park')
+    expect(String((await agent({ tool: 'mcp__auto-claude__defer_goal', reason: 'x' })).result)).toContain('does not wait or park')
+    expect(String((await agent({ tool: 'Bash', command: 'git commit -am "x"' })).deny)).toContain(`cd ${WT1}`)
+    expect((await agent({ tool: 'Bash', command: `cd ${WT1} && git add -A` })).deny).toBeUndefined()
+    expect((await agent({ tool: 'Bash', command: 'git diff -- add.py && git log --oneline' })).deny).toBeUndefined()
+    // The main thread keeps its own rules.
+    expect((await $.tool.call({ tool: 'Bash', command: 'git status' } as never)).deny).toBeUndefined()
+    expect(w.files.get(LOG) ?? '').not.toContain('"event":"waiting"')
+  })
+
+  test('the kickoff tells the model to keep workflow agents in the worktree', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    const kick = w.prompts.find(p => p.includes('Milestone #1')) ?? ''
+    expect(kick).toContain(`the worktree path ${WT1}`)
+    expect(kick).toContain("no isolation: 'worktree'")
   })
 })

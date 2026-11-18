@@ -73,6 +73,23 @@ That restart is now the driver's.
 - Every run does this unless started with `--once`, or unless the `continueRuns` option is off. Runs started before 1.6.0 do it too. An always-on run stands by instead. A `--queue` run has no plan to continue.
 - `status` shows the run's number in the chain and the count against the cap. A run's end (`run-done`, `run-stopped`) is now in `.claude/goal-loop.log` too.
 
+## Ultracode
+
+A run works in ultracode: standing dynamic-workflow orchestration, where the model writes and runs a workflow of subagents for each substantive task.
+
+- **Turning it on.** At a run's start, at a resume and at each next run, the session that owns the run runs `/effort ultracode on`. The prompt waits for it, for up to a minute.
+  - The flag belongs to the session, so a session that adopts the run, or a reload, asks again.
+  - The effort level stays as it was. A person can turn ultracode off; the next run or resume turns it on again.
+  - The log gets an `ultracode` event. A refused command (`ultracode-refused`) is retried on the next ticks, then told once, and the run goes on without it.
+  - The engine answers the command with no text, so a session where ultracode is unavailable (workflows off, a model without it) shows that only in its transcript.
+  - The `ultracode` option (on by default) turns all of this off.
+- **Waiting on a workflow.** A workflow runs in the background. The turn that starts it usually ends before it finishes, and its result opens a new turn.
+  - The milestone is judged at that later Stop, not the first. A Stop whose `background_tasks` still holds a running workflow or subagent runs no check, asks no judge and counts no failed check. The log gets a `background` event.
+  - While one runs, the session counts as busy, not idle, for the watchdog's prompts, planning reminders, held kickoffs, standby wakes and adoption.
+  - A background shell task does not count, because a server never ends. After 2 h a workflow no longer holds the run, so a hung one cannot park it.
+- **Worktrees.** The kickoff and the milestone policy tell the model to give every agent the milestone's worktree path and no `isolation: 'worktree'`. An agent's tool calls pass the same guard as the main thread's, so an edit outside the worktree is refused.
+- **Cost.** Workflows spend many more tokens per task. Turn the option off for a run that should stay cheap.
+
 ## Always on
 
 With `--always-on` (or the `alwaysOn` option), a run does not end when its final check passes. It **stands by**: still on, but with no model turn, while the driver polls what can give it work. Each new thing becomes a queue line, and a queue line wakes the run for a new **cycle**. The design follows [Building always-on agents](https://claude.com/resources/articles/building-always-on-agents): sleep without tokens, wake on events and timers, keep memory outside the conversation, send little.
