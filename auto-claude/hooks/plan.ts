@@ -69,6 +69,18 @@ export const MIN_MILESTONES = 2
 // "the server starts only after migrations" is not a wait.
 const PROSE_WAIT = /^\([^)]*\bstarts? only (after|when|once)\b/i
 
+// Paths into a milestone worktree (`worktrees/goal-77-...`): such a worktree is
+// removed once its branch merges, so a wait that tests or cds into it fails for
+// good. Measured in kyte-portal on 2026-11-17: two `:: after: cd .../worktrees/
+// goal-77-... && test ...` lines sat 3.5 h and 4 h after their milestones merged.
+const WORKTREE_PATH = /(?:[^\s'"`;&|()<>]*\/)?worktrees\/goal-[^\s'"`;&|()<>]+/g
+
+export function worktreeRefs(command: string): string[] {
+  return [...new Set(command.match(WORKTREE_PATH) ?? [])]
+}
+
+export const WORKTREE_WAIT_HINT = 'milestone worktrees are removed once their branch merges, so test the default branch instead: `git cat-file -e origin/main:<path>` for a file that lands, `git merge-base --is-ancestor <sha> origin/main` for a commit'
+
 const SHIPPING = /\b(merged|merge[sd]? (in)?to|pushed|push(ed)? to|pull request|PR (is )?(open|opened|created|merged)|deployed|is live)\b|머지|병합|푸시|배포(됨|되었|된|완료)/i
 
 // The plan Claude wrote is the contract the run holds it to: a final check,
@@ -91,6 +103,8 @@ export function validatePlan(plan: string | undefined, queue: string | undefined
     if (item.check === undefined) errors.push(`milestone without a check: "${item.condition.slice(0, 80)}"`)
     // A line put back to wait (wait_until) keeps the branch it was built on.
     if (item.base !== undefined && item.after === undefined) errors.push(`milestones take no ":: base:" (auto-claude sets the base): "${item.condition.slice(0, 80)}"`)
+    const refs = [item.after, item.alive].flatMap(c => (c === undefined ? [] : worktreeRefs(c)))
+    if (refs.length > 0) errors.push(`a wait that reads ${refs[0]} never passes after that worktree is removed; ${WORKTREE_WAIT_HINT}: "${item.condition.slice(0, 80)}"`)
     if (item.after === undefined && PROSE_WAIT.test(item.condition)) {
       errors.push(`a start condition in prose is never checked, so the line starts at once: write it as ":: after: <shell command that exits 0 once it holds>" after the check (e.g. :: after: grep -q DONE ~/data/x/cache.log): "${item.condition.slice(0, 80)}"`)
     }
@@ -106,6 +120,11 @@ export function validatePlan(plan: string | undefined, queue: string | undefined
 }
 
 export const READY_TOOL = 'auto_plan_ready'
+// A run being planned that finds nothing worth a run left ends with this instead.
+export const RUN_DONE_TOOL = 'auto_run_done'
+
+// The run before a continued one: its number, its archived plan and queue, its Result line.
+export type PreviousRun = { runNo: number; plan: string; queue: string; result: string }
 
 // How the plan states its deploy; `fixed` names the command .claude/auto-deploy.json already set.
 function deployRules(fixed: string | undefined): string[] {
@@ -123,10 +142,22 @@ function deployRules(fixed: string | undefined): string[] {
   ]
 }
 
-export function kickoffText(hint: string, base: string, noRemote = false, fixedDeploy?: string, linearBrief?: string): string {
+export function kickoffText(hint: string, base: string, noRemote = false, fixedDeploy?: string, linearBrief?: string, previous?: PreviousRun): string {
+  const opening =
+    previous === undefined
+      ? [
+          '[auto-claude] The person started an autonomous run of this repository. Plan it now; build nothing yet.',
+          hint !== '' ? `Their aim: ${hint}` : 'No aim was given: finish what this repository is evidently for.',
+        ]
+      : [
+          `[auto-claude] Run ${previous.runNo - 1} finished, so auto-claude goes on by itself: plan run ${previous.runNo} now; build nothing yet. Nobody restarts runs by hand overnight; this is that restart.`,
+          `Run ${previous.runNo - 1}: ${previous.result}`,
+          `Its plan and milestones are archived in ${previous.plan} and ${previous.queue}. Read its ## Goal, ## Decisions and ## Result first; never plan again what it met.`,
+          hint !== '' ? `The person's aim for these runs: ${hint}. Plan the next most valuable step toward its long-term end state.` : 'No aim was given: plan the next most valuable step toward what this repository is evidently for.',
+          `If nothing worth a run is left that can be done without the person (what remains needs credentials, a decision, hardware or money), call mcp__auto-claude__${RUN_DONE_TOOL} with that reason instead of planning busywork.`,
+        ]
   return [
-    '[auto-claude] The person started an autonomous run of this repository. Plan it now; build nothing yet.',
-    hint !== '' ? `Their aim: ${hint}` : 'No aim was given: finish what this repository is evidently for.',
+    ...opening,
     'Read the situation: README and docs, plan.md / IMPROVEMENTS.md / TODO notes, git log and status, open PRs and issues (Linear too if this repo maps to a project), and failing tests.',
     'Aim at the long-term end state of the whole work, not a first step. Then write two files in the repository root:',
     '1. .claude/auto-plan.md: ## Goal (the end state, with its quality bar), a line `Final check: <one shell command that passes only when the whole goal is met>`, the deploy lines below, ## Milestones (ordered, why each), ## Decisions (empty for now).',

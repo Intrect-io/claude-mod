@@ -220,9 +220,9 @@ const turnStart = ($: Engine) => $.turn.start({ text: '', turnId: 't' } as never
 const turnEnd = ($: Engine) => $.turn.complete({ answer: 'waiting', reason: 'answer', turnId: 't', durationMs: 1, isAborted: false } as never)
 
 // Starts a run, plans it and lets the first milestone start (its worktree and kickoff).
-async function planned($: Engine, w: W, plan = PLAN) {
+async function planned($: Engine, w: W, plan = PLAN, start = 'start --once') {
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-  await cmd($, 'start')
+  await cmd($, start)
   w.files.set('/repo/.claude/auto-plan.md', plan)
   w.files.set(GOALS, QUEUE)
   await ready($)
@@ -245,7 +245,7 @@ describe('a run, local CI', () => {
   test('plan → the loop builds each milestone → merged into main one at a time → final check → done', async ($, on) => {
     const w = world(on)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    expect((await cmd($, 'start add and sub')).text).toContain('local CI, merges into main, deploys as the plan says')
+    expect((await cmd($, 'start --once add and sub')).text).toContain('local CI, merges into main, deploys as the plan says')
     await w.clock.advance(200)
     expect(w.prompts[0]).toContain('Their aim: add and sub')
     // No files to steer a loop in another plugin any more.
@@ -281,6 +281,8 @@ describe('a run, local CI', () => {
     expect(w.files.get('/repo/.claude/auto-plan.md')).toContain('Nothing deployed: a library; nothing runs anywhere.')
     expect(w.notifies.at(-1)).toContain('finished: the final check passed after 1 round(s). 2 merged, 0 held')
     expect((await cmd($, 'status')).text).toContain('auto-claude off · phase done')
+    expect((await cmd($, 'status')).text).toContain('ends when done (started with --once)')
+    expect(w.files.get(LOG)).toContain('"event":"run-done"')
   })
 
   test('a loop log at its 2000-line cap still yields every new event', async ($, on) => {
@@ -302,7 +304,7 @@ describe('a run, local CI', () => {
     w.originHead = ''
     w.remoteHead = 'master'
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    expect((await cmd($, 'start')).text).toContain('merges into master')
+    expect((await cmd($, 'start --once')).text).toContain('merges into master')
     w.files.set('/repo/.claude/auto-plan.md', PLAN)
     w.files.set(GOALS, QUEUE)
     await ready($)
@@ -1196,18 +1198,45 @@ describe('a run that deploys (P6)', () => {
     const SARIF = '/home/auto-claude-codeql-repo-python.sarif'
     const w = world(on)
     w.files.set(SARIF, JSON.stringify({ runs: [{ results: [{ ruleId: 'py/sql-injection', level: 'error' }] }] }))
+    // Where the run started, nothing was found: the result is the run's own.
+    w.files.set(SARIF.replace('.sarif', '-base.sarif'), JSON.stringify({ runs: [{ results: [] }] }))
     await planned($, w, PLAN_DEPLOY.replace('CodeQL: none (a test fixture)', 'CodeQL: python'))
     await meet($, w)
     await w.clock.advance(TICK)
     expect(w.runs.some(r => r.startsWith('codeql database create /home/auto-claude-codeql-repo-python --language=python --source-root /repo/worktrees/auto-deploy'))).toBe(true)
     expect(deployRuns(w)).toEqual([])
-    expect(w.files.get(GOALS) ?? '').toContain('CodeQL found 1 error-level result(s) in python (py/sql-injection ?:?)')
+    expect(w.files.get(GOALS) ?? '').toContain('CodeQL found 1 new error-level result(s) in python (py/sql-injection ?:?)')
     w.files.set(SARIF, JSON.stringify({ runs: [{ results: [{ ruleId: 'py/log-injection', level: 'warning' }] }] }))
     await w.clock.advance(TICK)
     await meet($, w)
     await w.clock.advance(TICK)
     expect(deployRuns(w)).toContain('bash -lc bash scripts/deploy.sh')
     expect(w.notifies.some(n => n.includes('CodeQL python: 1 warning(s), no errors'))).toBe(true)
+  })
+
+  test('CodeQL: results already there where the run started are told, not blocking; a result the run adds still blocks (intrect-platform 2026-11-17)', async ($, on) => {
+    const SARIF = '/home/auto-claude-codeql-repo-python.sarif'
+    const old = { ruleId: 'py/clear-text-logging-sensitive-data', level: 'error', partialFingerprints: { primaryLocationLineHash: 'aa:1' }, locations: [{ physicalLocation: { artifactLocation: { uri: 'mon.py' }, region: { startLine: 193 } } }] }
+    const added = { ruleId: 'py/command-line-injection', level: 'error', partialFingerprints: { primaryLocationLineHash: 'bb:1' }, locations: [{ physicalLocation: { artifactLocation: { uri: 'decode.py' }, region: { startLine: 323 } } }] }
+    const w = world(on)
+    w.files.set(SARIF, JSON.stringify({ runs: [{ results: [old] }] }))
+    w.files.set(SARIF.replace('.sarif', '-base.sarif'), JSON.stringify({ runs: [{ results: [{ ...old, locations: [{ physicalLocation: { artifactLocation: { uri: 'mon.py' }, region: { startLine: 180 } } }] }] }] }))
+    await planned($, w, PLAN_DEPLOY.replace('CodeQL: none (a test fixture)', 'CodeQL: python'))
+    await meet($, w)
+    await w.clock.advance(TICK)
+    // The commit the run started from is scanned once, and the old result (moved 13 lines) is not new.
+    const baseScans = () => w.runs.filter(r => r.includes('worktree add --detach /repo/worktrees/auto-codeql-base tip-of-origin/main')).length
+    expect(baseScans()).toBe(1)
+    expect(deployRuns(w)).toContain('bash -lc bash scripts/deploy.sh')
+    expect(w.notifies.some(n => n.includes('CodeQL python: 1 error-level result(s) were there before') && n.includes('py/clear-text-logging-sensitive-data mon.py:193'))).toBe(true)
+    // The next merge brings a result of its own: that one blocks; the old one is known without a new scan.
+    w.files.set(SARIF, JSON.stringify({ runs: [{ results: [old, added] }] }))
+    const deploys = deployRuns(w).length
+    await meet($, w)
+    await w.clock.advance(TICK)
+    expect(deployRuns(w)).toHaveLength(deploys)
+    expect(baseScans()).toBe(1)
+    expect(w.files.get(GOALS) ?? '').toContain('CodeQL found 1 new error-level result(s) in python (py/command-line-injection decode.py:323); 1 error-level result(s) were there before (the last deploy CodeQL pass')
   })
 
   test('a broken deploy file keeps the run from starting', async ($, on) => {
@@ -1452,7 +1481,7 @@ describe('waits on compute (:: after:, wait_until)', () => {
     const w = world(on)
     w.cmdExit.set(AFTER, 1)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    await cmd($, 'start')
+    await cmd($, 'start --once')
     w.files.set('/repo/.claude/auto-plan.md', PLAN)
     w.files.set(GOALS, `- [ ] add() returns a+b :: check: python3 -m unittest -q test_add\n- [ ] record the cache :: check: true :: after: ${AFTER} :: within: 30m\n`)
     await ready($)
@@ -1465,6 +1494,35 @@ describe('waits on compute (:: after:, wait_until)', () => {
     for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
     expect(finals(w)).toBe(1)
     expect((await cmd($, 'status')).text).toContain('1 merged, 1 held')
+  })
+
+  test('a wait that reads a removed milestone worktree is put to the model at once, not hours later; plan and wait_until refuse such paths (kyte-portal 2026-11-17)', { timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    const GONE = '/repo/worktrees/goal-77-milestones'
+    const BROKEN = `cd ${GONE} && test -f ui/src/pages/milestones/App.svelte`
+    w.cmdExit.set(AFTER, 1)
+    w.cmdExit.set(BROKEN, 1)
+    w.missing.add(GONE)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start --once')
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set(GOALS, `- [ ] add() returns a+b :: check: python3 -m unittest -q test_add\n- [ ] docs page :: check: true :: after: ${BROKEN}\n`)
+    expect(String((await ready($)).result)).toContain('never passes after that worktree is removed')
+    w.files.set(GOALS, `- [ ] add() returns a+b :: check: python3 -m unittest -q test_add\n- [ ] docs page :: check: true :: after: ${AFTER}\n`)
+    expect(String((await ready($)).result)).toContain('Plan accepted')
+    await w.clock.advance(1_200)
+    const call = (input: Record<string, string>) => $.tool.call({ tool: 'mcp__auto-claude__wait_until', ...input } as never)
+    expect((await call({ until: `test -f ${WT1}/out.json`, reason: 'x' })).deny).toContain('will not be there when this is polled')
+    // The model rewrites the waiting line by hand, onto a milestone worktree.
+    w.files.set(GOALS, (w.files.get(GOALS) ?? '').replace(`:: after: ${AFTER}`, `:: after: ${BROKEN}`))
+    await meet($, w)
+    for (let i = 0; i < 4; i++) await w.clock.advance(3 * MIN)
+    const asked = w.prompts.filter(p => p.includes('A wait looks broken'))
+    expect(asked).toHaveLength(1)
+    expect(asked[0]).toContain(`${GONE} does not exist`)
+    expect(asked[0]).toContain('git cat-file -e origin/main:<path>')
+    for (let i = 0; i < 4; i++) await w.clock.advance(30 * MIN)
+    expect(w.prompts.filter(p => p.includes('A wait looks broken'))).toHaveLength(1)
   })
 
   test('wait_until: refused when done already or uncommitted; applied at the next stop, the line waits on its branch, others go on, then it resumes there', { timeoutMs: 60_000 }, async ($, on) => {
@@ -1640,7 +1698,7 @@ describe('always on (standby)', () => {
   test('stop and resume in standby; standby turns a finished run always on', { timeoutMs: 60_000 }, async ($, on) => {
     const w = world(on)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    await cmd($, 'start')
+    await cmd($, 'start --once')
     w.files.set('/repo/.claude/auto-plan.md', PLAN)
     w.files.set(GOALS, QUEUE)
     await ready($)
@@ -1656,5 +1714,75 @@ describe('always on (standby)', () => {
     expect((await cmd($, 'status')).text).toContain('auto-claude off · phase stopped')
     expect((await cmd($, 'resume')).text).toContain('Resumed: standing by')
     expect((await cmd($, 'status')).text).toContain('phase standby')
+  })
+})
+
+describe('runs that go on by themselves', () => {
+  test('a finished run plans the next one toward the same aim, its plan and queue kept; the planner may end it with auto_run_done', async ($, on) => {
+    const w = world(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect((await cmd($, 'start add and sub')).text).toContain('the next run toward the same aim plans itself (at most 6 runs in 24 h')
+    expect((await cmd($, 'status')).text).toContain('run 1 · the next run plans itself when this one is done (1/6 runs in 24 h')
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set(GOALS, QUEUE)
+    await ready($)
+    await w.clock.advance(1_200)
+    await meet($, w)
+    await w.clock.advance(TICK)
+    await meet($, w)
+    for (let i = 0; i < 6; i++) await w.clock.advance(TICK)
+    // Run 1 is done: its plan (with its Result) and queue are kept, and run 2 plans itself.
+    const kept = [...w.files.keys()].filter(k => /^\/repo\/\.claude\/(auto-plan|goals)\.\d{8}-\d{4}\.md$/.test(k)).sort()
+    expect(kept).toHaveLength(2)
+    expect(w.files.get(kept[0]!)).toContain('Nothing deployed: a library; nothing runs anywhere.')
+    expect(w.files.has('/repo/.claude/auto-plan.md')).toBe(false)
+    expect(w.files.has(GOALS)).toBe(false)
+    expect(w.files.get('/repo/.git/info/exclude')).toContain('.claude/auto-plan.*.md')
+    expect(w.notifies.some(n => /finished: the final check passed after 1 round\(s\)\. 2 merged, 0 held\. Run 2 plans itself (now|once the session is free) toward the same aim \(2\/6 runs in 24 h\)/.test(n))).toBe(true)
+    expect(w.prompts.filter(p => p.includes('plan run 2 now'))).toHaveLength(1)
+    const kickoff = w.prompts.at(-1) ?? ''
+    expect(kickoff).toContain('Run 1 finished, so auto-claude goes on by itself: plan run 2 now')
+    expect(kickoff).toContain('Final check passed: `python3 -m unittest -q`')
+    expect(kickoff).toContain(kept[0]!.replace('/repo/', ''))
+    expect(kickoff).toContain("The person's aim for these runs: add and sub")
+    expect(kickoff).toContain('mcp__auto-claude__auto_run_done')
+    expect(w.files.get(LOG)).toContain('"event":"next-run"')
+    let status = (await cmd($, 'status')).text ?? ''
+    expect(status).toContain('auto-claude on · phase plan · round 1')
+    expect(status).toContain('run 2 · the next run plans itself when this one is done (2/6 runs in 24 h')
+    // The planner finds nothing left that does not need the person.
+    const done = (input: Record<string, string>) => $.tool.call({ tool: 'mcp__auto-claude__auto_run_done', ...input } as never)
+    expect(String((await done({})).result)).toContain('reason is required')
+    expect(String((await done({ reason: 'only the AWS credentials step is left' })).result)).toContain('The run ended as done')
+    status = (await cmd($, 'status')).text ?? ''
+    expect(status).toContain('auto-claude off · phase done')
+    expect(status).toContain('nothing worth a run is left without the person: only the AWS credentials step is left')
+    expect(w.files.get(LOG)).toContain('"event":"run-done"')
+  })
+
+  test('the next run waits for a free session to plan: a person talking in it is not interrupted', async ($, on) => {
+    const w = world(on)
+    await planned($, w, PLAN, 'start')
+    await meet($, w)
+    await w.clock.advance(TICK)
+    // The person talks in the session while the last milestone lands.
+    await turnStart($)
+    await meet($, w)
+    for (let i = 0; i < 12; i++) await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.includes('Run 2 plans itself once the session is free'))).toBe(true)
+    expect(w.prompts.some(p => p.includes('plan run 2 now'))).toBe(false)
+    await turnEnd($)
+    for (let i = 0; i < 6; i++) await w.clock.advance(TICK)
+    expect(w.prompts.filter(p => p.includes('plan run 2 now'))).toHaveLength(1)
+    expect(w.prompts.some(p => p.includes('Reminder 1/'))).toBe(false)
+    expect((await cmd($, 'status')).text).toContain('auto-claude on · phase plan')
+  })
+
+  test('auto_run_done is only for a run being planned', async ($, on) => {
+    const w = world(on)
+    await planned($, w, PLAN, 'start')
+    const result = String((await $.tool.call({ tool: 'mcp__auto-claude__auto_run_done', reason: 'x' } as never)).result)
+    expect(result).toContain('Only a run being planned can end this way (phase run, round 1)')
+    expect((await cmd($, 'status')).text).toContain('auto-claude on · phase run')
   })
 })

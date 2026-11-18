@@ -6,8 +6,8 @@ import { parseVerdict, transcriptTail } from './evaluator'
 import { checkBash, checkPath, deploysSomething, uncommitted, waitsLong } from './guard'
 import { guardRefusal, maxBranchSeq } from './loop'
 import type { ShipState } from '../types'
-import { ciEvent, cycleLine, DAY_MS, dayCapHit, dueSources, eventLines, failedRuns, issueEvent, lineGhIssues, MAX_EVENT_LINES, nextTimers, openIssues, recentMerges, sourcesOf, withCycle } from './standby'
-import { deployFixLine, deployOf, finalCheckOf, fixLine, kickoffText, POLICY, validatePlan } from './plan'
+import { ciEvent, cycleLine, DAY_MS, dayCapHit, dueSources, eventLines, failedRuns, issueEvent, lineGhIssues, MAX_EVENT_LINES, nextRunBlock, nextTimers, openIssues, recentMerges, sourcesOf, withCycle } from './standby'
+import { deployFixLine, deployOf, finalCheckOf, fixLine, kickoffText, POLICY, validatePlan, worktreeRefs } from './plan'
 import { markItem, nextPending, parseDuration, parseQueue, requeueItem, slugify, summarize, waitingItems } from './queue'
 import { capReached, onlyWaiting, causeOf, ciAction, httpsOf, idleDue, inFlight, isWaiting, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, unfinished, MAX_AHEAD, wakeDue } from './ship'
 
@@ -283,8 +283,23 @@ describe('deploy', () => {
         },
       ],
     })
-    expect(countSarif(sarif)).toEqual({ errors: 1, warnings: 1, top: ['py/clear-text-logging-sensitive-data broker.py:12'] })
+    expect(countSarif(sarif)).toMatchObject({ errors: 1, warnings: 1, top: ['py/clear-text-logging-sensitive-data broker.py:12'] })
     expect(countSarif('{')).toBeUndefined()
+  })
+
+  test('each error-level result gets a key that survives a line move; two alike stay two', () => {
+    const at = (line: number, hash = 'h1:1') => ({ ruleId: 'py/x', level: 'error', partialFingerprints: { primaryLocationLineHash: hash }, locations: [{ physicalLocation: { artifactLocation: { uri: 'a.py' }, region: { startLine: line } } }] })
+    const one = countSarif(JSON.stringify({ runs: [{ results: [at(10)] }] }))!
+    const moved = countSarif(JSON.stringify({ runs: [{ results: [at(40)] }] }))!
+    expect(moved.keys).toEqual(one.keys)
+    expect(moved.labels[moved.keys[0]!]).toBe('py/x a.py:40')
+    const twice = countSarif(JSON.stringify({ runs: [{ results: [at(10), at(10)] }] }))!
+    expect(new Set(twice.keys).size).toBe(2)
+    expect(countSarif(JSON.stringify({ runs: [{ results: [at(10, 'h2:1')] }] }))!.keys).not.toEqual(one.keys)
+    // No fingerprint: the message stands in for it.
+    const plain = (text: string) => countSarif(JSON.stringify({ runs: [{ results: [{ ruleId: 'py/x', level: 'error', message: { text } }] }] }))!.keys
+    expect(plain('a')).toEqual(plain('a'))
+    expect(plain('a')).not.toEqual(plain('b'))
   })
 })
 
@@ -506,6 +521,18 @@ describe('waits (:: after:)', () => {
     expect(validatePlan(PLAN, '- [ ] the server starts only after migrations finish :: check: x\n- [ ] b :: check: y\n', true).ok).toBe(true)
   })
 
+  test('a wait on a milestone worktree is refused at planning: the worktree goes once its branch merges', () => {
+    expect(worktreeRefs('cd /home/u/dev/kyte/worktrees/goal-77-milestones && test -f ui/App.svelte')).toEqual(['/home/u/dev/kyte/worktrees/goal-77-milestones'])
+    expect(worktreeRefs('test -f "worktrees/goal-03-x/out.json"')).toEqual(['worktrees/goal-03-x/out.json'])
+    expect(worktreeRefs('git cat-file -e origin/main:docs/m22/final.json')).toEqual([])
+    // Only milestone worktrees: a repository's own worktrees/ folder of other things is not refused.
+    expect(worktreeRefs('test -f ~/runs/worktrees/m21/DONE')).toEqual([])
+    const after = validatePlan(PLAN, '- [ ] a :: check: x :: after: cd /r/worktrees/goal-07-a && test -f b\n- [ ] b :: check: y\n', true)
+    expect(!after.ok && after.errors.join(' ')).toContain('git cat-file -e origin/main:<path>')
+    expect(validatePlan(PLAN, '- [ ] a :: check: x :: after: grep -q DONE ~/d/c.log :: alive: test -d /r/worktrees/goal-07-a\n- [ ] b :: check: y\n', true).ok).toBe(false)
+    expect(validatePlan(PLAN, '- [ ] a :: check: x :: after: git merge-base --is-ancestor abc origin/main\n- [ ] b :: check: y\n', true).ok).toBe(true)
+  })
+
   test('only waiting is not idle, and waiting time is left out of the time cap up to its own cap', () => {
     const r = { started: 2, finished: 2, ships: [], waitCount: 1 }
     expect(onlyWaiting(r)).toBe(true)
@@ -582,6 +609,17 @@ describe('standby (always on)', () => {
     expect(many.lines.length).toBe(MAX_EVENT_LINES)
     // The ones past the cap stay unseen, so the next poll queues them.
     expect(eventLines([1, 2, 3, 4, 5, 6, 7].map(n => ev(n)), many.seen, many.followUps).lines.length).toBe(2)
+  })
+
+  test('a finished run goes on while it merged something and the 24 h caps hold', () => {
+    const now = 10 * DAY_MS
+    const cfg = { maxRunsPerDay: 3, maxMergesPerDay: 4 }
+    expect(nextRunBlock({ merges: 2, startedAt: now - 1 }, now, cfg)).toBeUndefined()
+    expect(nextRunBlock({ merges: 0, startedAt: now - 1 }, now, cfg)).toContain('merged nothing')
+    expect(nextRunBlock({ merges: 1, startedAt: 0, runTimes: [now - 3, now - 2, now - 1] }, now, cfg)).toContain('3 runs started in the last 24 h')
+    // Runs older than 24 h no longer count.
+    expect(nextRunBlock({ merges: 1, startedAt: 0, runTimes: [now - DAY_MS - 1, now - 2, now - 1] }, now, cfg)).toBeUndefined()
+    expect(nextRunBlock({ merges: 1, startedAt: now - 1, mergeTimes: [now - 4, now - 3, now - 2, now - 1] }, now, cfg)).toContain('4 merges in the last 24 h')
   })
 
   test('the rolling cap counts merges of the last 24 h; caps count per cycle', () => {

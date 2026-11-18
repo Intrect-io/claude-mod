@@ -62,11 +62,23 @@ export function scriptsOf(command: string): string[] {
     .filter(t => !t.startsWith('/'))
 }
 
-export type SarifCount = { errors: number; warnings: number; top: string[] }
+// `keys`: one per error-level result, stable across line moves (the rule, the
+// file and CodeQL's primaryLocationLineHash, else the message), so a result
+// already there before a run is told apart from one the run introduced.
+// `labels`: a readable `rule file:line` for each key.
+export type SarifCount = { errors: number; warnings: number; top: string[]; keys: string[]; labels: Record<string, string> }
+
+type SarifResult = {
+  ruleId?: string
+  level?: string
+  message?: { text?: string }
+  partialFingerprints?: Record<string, string>
+  locations?: Array<{ physicalLocation?: { artifactLocation?: { uri?: string }; region?: { startLine?: number } } }>
+}
 
 // Results whose level (its own, else its rule's default) is `error` block a deploy.
 export function countSarif(text: string): SarifCount | undefined {
-  let sarif: { runs?: Array<{ results?: Array<{ ruleId?: string; level?: string; locations?: Array<{ physicalLocation?: { artifactLocation?: { uri?: string }; region?: { startLine?: number } } }> }>; tool?: { driver?: { rules?: Array<{ id?: string; defaultConfiguration?: { level?: string } }> } } }> }
+  let sarif: { runs?: Array<{ results?: SarifResult[]; tool?: { driver?: { rules?: Array<{ id?: string; defaultConfiguration?: { level?: string } }> } } }> }
   try {
     sarif = JSON.parse(text)
   } catch {
@@ -75,6 +87,8 @@ export function countSarif(text: string): SarifCount | undefined {
   let errors = 0
   let warnings = 0
   const top: string[] = []
+  const keys: string[] = []
+  const labels: Record<string, string> = {}
   for (const r of sarif.runs ?? []) {
     const ruleLevel = new Map((r.tool?.driver?.rules ?? []).map(rule => [rule.id, rule.defaultConfiguration?.level]))
     for (const result of r.results ?? []) {
@@ -82,12 +96,20 @@ export function countSarif(text: string): SarifCount | undefined {
       if (level === 'error') {
         errors++
         const loc = result.locations?.[0]?.physicalLocation
-        if (top.length < 5) top.push(`${result.ruleId ?? '?'} ${loc?.artifactLocation?.uri ?? '?'}:${loc?.region?.startLine ?? '?'}`)
+        const label = `${result.ruleId ?? '?'} ${loc?.artifactLocation?.uri ?? '?'}:${loc?.region?.startLine ?? '?'}`
+        if (top.length < 5) top.push(label)
+        const print = result.partialFingerprints?.primaryLocationLineHash ?? (result.message?.text ?? '').slice(0, 200)
+        const base = `${result.ruleId ?? '?'}|${loc?.artifactLocation?.uri ?? '?'}|${print}`
+        let key = base
+        // Two results with one fingerprint stay two keys.
+        for (let n = 2; key in labels; n++) key = `${base}#${n}`
+        keys.push(key)
+        labels[key] = label
       } else if (level === 'warning') warnings++
     }
   }
 
-  return { errors, warnings, top }
+  return { errors, warnings, top, keys, labels }
 }
 
 export function codeqlSuite(language: string): string {

@@ -152,6 +152,19 @@ export type AutoRecord = {
   dayCapTold?: boolean
   // The standby whose entry already compacted the session (its standbyAt).
   compactedFor?: number
+  // The default branch's commit when the run started: CodeQL results already
+  // there do not block its deploys (deploy-run.ts codeqlGate).
+  baseSha?: string
+  // Error-level CodeQL results known to predate the run, by language (keys from deploy.ts countSarif).
+  codeqlKnown?: Record<string, string[]>
+  // Once its final check passes, the run plans the next run toward the same aim
+  // by itself (not with --once); the run's number in that chain, and when each
+  // run of it started in the last 24 h, for the daily cap.
+  continues?: boolean
+  runNo?: number
+  runTimes?: number[]
+  // The first prompt of a run that went on by itself, held while a person used the session.
+  kickoff?: string
 }
 
 // One waiting queue line, as the driver polls it.
@@ -167,6 +180,8 @@ export type WaitState = {
   // The model was asked to look (the job looks dead, or `within` passed), once each.
   askedDead?: boolean
   askedLate?: boolean
+  // It reads a removed milestone worktree, so it can never pass; asked at once.
+  askedBroken?: boolean
 }
 
 // A goal of the loop: one queue line being built in its own worktree.

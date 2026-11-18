@@ -1,7 +1,7 @@
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { AutoRecord, ShipItem, WaitState } from '../types'
-import { deployFixLine, finalCheckOf, fixLine, kickoffText, parseQueue, planNudgeText, POLICY, READY_TOOL, replanText, validatePlan } from './plan'
+import { deployFixLine, finalCheckOf, fixLine, kickoffText, parseQueue, planNudgeText, POLICY, READY_TOOL, replanText, RUN_DONE_TOOL, validatePlan, WORKTREE_WAIT_HINT, worktreeRefs } from './plan'
 import { segment } from './segment'
 import { DEPLOY_FILE, parseDeploy, specOfPlan } from './deploy'
 import type { DeploySpec } from './deploy'
@@ -15,7 +15,7 @@ import type { QueueItem } from './queue'
 import { baseline, getIssue, isOpen, lineIssues, onHeld, onMerged, onStart, projectOf, readChanges, SYNC_MS } from './linear'
 import type { StallFacts } from './ship'
 import type { Caps } from './ship'
-import { COMPACT_PERCENT, cycleLine, dayCapHit, dueSources, eventLines, HEALTH_FAILS, lineGhIssues, nextTimers, pollGithub, pollHealth, recentMerges, sourcesOf, WAKE_QUIET_MS, withCycle } from './standby'
+import { COMPACT_PERCENT, cycleLine, dayCapHit, dueSources, eventLines, HEALTH_FAILS, lineGhIssues, nextRunBlock, nextTimers, pollGithub, pollHealth, recentMerges, sourcesOf, WAKE_QUIET_MS, withCycle } from './standby'
 import type { StandbyConfig } from './standby'
 
 // auto-claude: an unattended run of one repository. Claude plans the
@@ -35,11 +35,12 @@ import type { StandbyConfig } from './standby'
 const COMMAND = 'auto-claude'
 // The ready tool's full name, as the tool.call matcher sees it.
 const READY_TOOL_ID = 'mcp__auto-claude__auto_plan_ready'
+const RUN_DONE_TOOL_ID = `mcp__auto-claude__${RUN_DONE_TOOL}`
 const STORE = (root: string) => `auto:${root}`
 // The owner's pulse, written on every timer fire even while a long tick (a
 // deploy, CodeQL) runs, apart from the record so it never overwrites it.
 const BEAT = (root: string) => `beat:${root}`
-const EXCLUDES = ['.claude/auto-plan.md', '.claude/auto-claude.stop', '.claude/auto-claude.stop.cleared', '.claude/auto-claude.on', ...LOOP_EXCLUDES]
+const EXCLUDES = ['.claude/auto-plan.md', '.claude/auto-plan.*.md', '.claude/goals.*.md', '.claude/auto-claude.stop', '.claude/auto-claude.stop.cleared', '.claude/auto-claude.on', ...LOOP_EXCLUDES]
 const DENY = ['\\bgh\\s+pr\\s+merge\\b', '\\bgh\\s+release\\b', '\\bgit\\s+push\\b.*\\bHEAD:(main|master)\\b']
 
 // A run whose owning session has not ticked for this long is orphaned.
@@ -100,6 +101,8 @@ let tickError: string | undefined
 const TICK_FAIL_TELL = 3
 // Set by register from the plugin's options: how an always-on run polls in standby.
 let standbyCfg: StandbyConfig = { healthMs: 30 * 60_000, githubMs: 10 * 60_000, issueLabel: 'auto-claude', maxMergesPerDay: 20 }
+// Runs going on by themselves (continueRun): on by default, and at most this many started in 24 h.
+let runCfg = { continueRuns: true, maxRunsPerDay: 6 }
 
 async function readRecord($: EngineInterface, root: string): Promise<AutoRecord | undefined> {
   const v = await $.store.get(STORE(root))
@@ -376,6 +379,8 @@ async function stopRun($: EngineInterface, r: AutoRecord, why: string, phase: 's
   const next: AutoRecord = { ...r, on: false, phase, note: why, pausedPhase: r.phase === 'plan' || r.phase === 'standby' ? r.phase : 'run' }
   await stopLoop($, r.root)
   await writeRecord($, next)
+  // The log is where a run's history is read back; its end was missing there.
+  await appendLog($, r.root, { event: `run-${phase}`, reason: why })
   await tell($, next, `${phase === 'done' ? 'finished' : 'stopped'}: ${why}. ${summary(next.merges, next.held, next.ships)}`)
   return next
 }
@@ -555,7 +560,7 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
       holdStreak: 0,
       holdCause: undefined,
       ...(item.repair === true ? { repair: undefined } : {}),
-      ...(r.alwaysOn === true ? { mergeTimes: [...recentMerges(r.mergeTimes, mergedAt), mergedAt] } : {}),
+      ...(r.alwaysOn === true || continuesOf(r) ? { mergeTimes: [...recentMerges(r.mergeTimes, mergedAt), mergedAt] } : {}),
     }
     await tell($, next, `merged ${landed}: ${item.goal.slice(0, 80)}`)
     // A labelled GitHub issue the milestone resolved is closed with the evidence.
@@ -592,6 +597,7 @@ async function appendQueue($: EngineInterface, root: string, line: string): Prom
 
 async function deployAfter($: EngineInterface, r: AutoRecord, spec: DeploySpec, landed: string): Promise<AutoRecord> {
   const result = await deployMerged($, r, spec)
+  if (result.codeqlKnown !== undefined) r = { ...r, codeqlKnown: result.codeqlKnown }
   if (result.kind === 'ok') {
     await tell($, r, `deployed after ${landed}${spec.smoke !== undefined ? '; smoke check passed' : ''}`)
     return { ...r, deploys: (r.deploys ?? 0) + 1, deployFails: 0, deployDue: false }
@@ -630,6 +636,7 @@ async function finalCheck($: EngineInterface, r: AutoRecord, caps: Caps): Promis
     const spec = r.deploy
     if (spec !== undefined && r.deployDue === true) {
       const result = await deployMerged($, r, spec)
+      if (result.codeqlKnown !== undefined) r = { ...r, codeqlKnown: result.codeqlKnown }
       if (result.kind === 'skipped') return stopRun($, r, `the final check passed, but the deploy never became runnable: ${result.why}`)
       if (result.kind === 'failed') {
         const next = await deployFailed($, { ...r, phase: 'run' }, spec, `the final deploy failed: ${result.why}`)
@@ -641,11 +648,15 @@ async function finalCheck($: EngineInterface, r: AutoRecord, caps: Caps): Promis
     }
     const plan2 = (await readText($, FILES(r.root).plan)) ?? ''
     const live = r.deploy !== undefined ? ` Deployed ${r.deploys ?? 0} time(s) with \`${r.deploy.command}\`.` : r.deployNone !== undefined ? ` Nothing deployed: ${r.deployNone}.` : ''
+    const result = `Finished ${new Date().toISOString()}: round ${r.round}, ${summary(r.merges, r.held, r.ships)}. Final check passed: \`${check}\`.${live}`
     // A cycle an always-on run woke for logs one line under ## Cycles; the planned run its Result.
-    if ((r.cycle ?? 0) === 0) await $.fs.write(FILES(r.root).plan, `${plan2.trimEnd()}\n\n## Result\n\nFinished ${new Date().toISOString()}: round ${r.round}, ${summary(r.merges, r.held, r.ships)}. Final check passed: \`${check}\`.${live}\n`)
+    if ((r.cycle ?? 0) === 0) await $.fs.write(FILES(r.root).plan, `${plan2.trimEnd()}\n\n## Result\n\n${result}\n`)
     if (r.alwaysOn === true && (r.cycle ?? 0) > 0) await $.fs.write(FILES(r.root).plan, withCycle(plan2, cycleLine(r, new Date().toISOString())))
     if (r.alwaysOn === true) return enterStandby($, r, `the final check passed${(r.cycle ?? 0) > 0 ? ` (cycle ${r.cycle})` : ` after ${r.round} round(s)`}`)
-    return stopRun($, r, `the final check passed after ${r.round} round(s)${r.deploy !== undefined ? ' and what was merged is deployed' : ''}`, 'done')
+    const why = `the final check passed after ${r.round} round(s)${r.deploy !== undefined ? ' and what was merged is deployed' : ''}`
+    if (!continuesOf(r)) return stopRun($, r, why, 'done')
+    const next = await continueRun($, r, why, result)
+    return typeof next === 'string' ? stopRun($, r, `${why}; no next run: ${next}`, 'done') : next
   }
   if (r.round >= caps.maxRounds) return stopRun($, r, `the final check still fails after ${r.round} round(s)`)
   let next: AutoRecord = { ...r, phase: 'plan', round: r.round + 1, queueEmpty: false, phaseAt: await $.clock.now(), nudges: 0 }
@@ -680,6 +691,15 @@ function planNudgeDue(r: AutoRecord, now: number): boolean {
 // Planning: remind a model that has not accepted a plan, then give up.
 async function planTick($: EngineInterface, r: AutoRecord): Promise<void> {
   const now = await $.clock.now()
+  // A run that went on by itself while a person used the session: its first
+  // prompt waits until the session is free, and reminders count from then.
+  if (r.kickoff !== undefined) {
+    if (!sessionQuiet(now)) return
+    const text = r.kickoff
+    await writeRecord($, { ...r, kickoff: undefined, phaseAt: now, nudges: 0 })
+    $.prompt.submit({ text }).catch(() => {})
+    return
+  }
   if (planNudgeDue(r, now)) {
     const nudges = r.phaseAt === undefined ? 0 : (r.nudges ?? 0) + 1
     if (nudges > MAX_NUDGES) {
@@ -841,7 +861,11 @@ async function pollWaits($: EngineInterface, r: AutoRecord): Promise<AutoRecord>
         }
         const dead = (w.aliveFails ?? 0) >= ALIVE_FAILS
         const late = waited > (item.withinMs ?? WAIT_ASK_MS)
-        if (dead && w.askedDead !== true) {
+        // A wait on a removed worktree never passes: asked at once, not hours later.
+        const gone = w.askedBroken === true ? [] : await missingPaths($, r.root, worktreeRefs(`${after} ${item.alive ?? ''}`))
+        if (gone.length > 0) {
+          if (await askWait($, r, item, { ...w, out: `${gone.join(', ')} does not exist; ${w.out ?? ''}` }, 'broken')) w = { ...w, askedBroken: true }
+        } else if (dead && w.askedDead !== true) {
           if (await askWait($, r, item, w, 'dead')) w = { ...w, askedDead: true }
         } else if (late && w.askedLate !== true) {
           if (await askWait($, r, item, w, 'late')) w = { ...w, askedLate: true }
@@ -858,17 +882,31 @@ async function pollWaits($: EngineInterface, r: AutoRecord): Promise<AutoRecord>
   return next
 }
 
+// The paths a wait names that are not there; `~/` and repository-relative ones resolved.
+async function missingPaths($: EngineInterface, root: string, paths: readonly string[]): Promise<string[]> {
+  if (paths.length === 0) return []
+  const home = (await $.env.get('HOME')) ?? ''
+  const gone: string[] = []
+  for (const p of paths) {
+    const abs = p.startsWith('~/') ? `${home}${p.slice(1)}` : p.startsWith('/') ? p : `${root}/${p}`
+    if ((await run($, ['test', '-e', abs], root, 15_000)).exitCode !== 0) gone.push(p)
+  }
+  return gone
+}
+
 const hours = (ms: number) => (ms >= 3_600_000 ? `${(ms / 3_600_000).toFixed(1)} h` : `${Math.round(ms / 60_000)} min`)
 
 // A wait that looks dead or late goes to the model, which can look at the job
 // (logs, tmux, the GPU) and relaunch it or fix the line. Not while it builds a
 // milestone: asked at a later poll instead.
-async function askWait($: EngineInterface, r: AutoRecord, item: QueueItem, w: WaitState, why: 'dead' | 'late'): Promise<boolean> {
+async function askWait($: EngineInterface, r: AutoRecord, item: QueueItem, w: WaitState, why: 'dead' | 'late' | 'broken'): Promise<boolean> {
   if ((await readLoop($, r.root))?.current !== undefined) return false
   const since = hours((await $.clock.now()) - w.since)
   const text = [
-    `[auto-claude] A wait looks ${why === 'dead' ? 'dead' : 'late'}: "${item.condition.slice(0, 160)}" has waited ${since} on \`${item.after ?? ''}\`.`,
-    why === 'dead'
+    `[auto-claude] A wait looks ${why}: "${item.condition.slice(0, 160)}" has waited ${since} on \`${item.after ?? ''}\`.`,
+    why === 'broken'
+      ? `It reads a worktree that no longer exists, so it can never pass: ${WORKTREE_WAIT_HINT}. Rewrite the line's \`:: after:\` (and \`:: alive:\`) in .claude/goals.md now.`
+      : why === 'dead'
       ? `Its alive check \`${item.alive ?? ''}\` failed ${w.aliveFails ?? 0} polls in a row: the job it waits for may have died (a crash, a reboot).`
       : item.withinMs !== undefined
         ? `That is longer than its within (${hours(item.withinMs)}).`
@@ -876,7 +914,7 @@ async function askWait($: EngineInterface, r: AutoRecord, item: QueueItem, w: Wa
     `Last poll: ${(w.out ?? '').slice(0, 600)}`,
     'Find out from here whether the job is still running (its log, tmux, the GPU). Relaunch it if it died, or fix the line\'s `:: after:` / `:: alive:` in .claude/goals.md if they test the wrong thing. Do not wait for it and do not defer it: end the turn, and auto-claude keeps polling. Note what you found under ## Decisions in .claude/auto-plan.md.',
   ].join('\n')
-  await tell($, r, `${why === 'dead' ? 'a waited-on job looks dead' : 'a wait is late'} (${since}): ${item.condition.slice(0, 80)}; the model was asked to look`)
+  await tell($, r, `${why === 'dead' ? 'a waited-on job looks dead' : why === 'broken' ? 'a wait reads a removed worktree' : 'a wait is late'} (${since}): ${item.condition.slice(0, 80)}; the model was asked to look`)
   $.prompt.submit({ text }).catch(() => {})
   return true
 }
@@ -906,6 +944,109 @@ async function enterStandby($: EngineInterface, r: AutoRecord, why: string): Pro
   }
   await writeRecord($, next)
   await tell($, next, `${why}; standing by (${summary(next.merges, next.held, next.ships)}). Wakes on ${sourceNames(next)}`)
+  return next
+}
+
+// Whether a run plans the next one itself once its final check passes: every
+// run unless started with --once (or continueRuns is off); always-on runs
+// stand by instead, and a build-only run has no plan to continue.
+function continuesOf(r: AutoRecord): boolean {
+  return r.buildOnly !== true && r.alwaysOn !== true && (r.continues ?? runCfg.continueRuns)
+}
+
+// A new run's record: what its start (or the run before it) fixed, nothing done yet.
+type RunBase = Pick<AutoRecord, 'root' | 'sessionId' | 'hint' | 'remote' | 'defaultBranch' | 'ciMode'> & Partial<AutoRecord>
+function freshRun(base: RunBase, now: number, logLines: readonly string[]): AutoRecord {
+  return {
+    on: true,
+    phase: 'plan',
+    round: 1,
+    startedAt: now,
+    logOffset: logLines.length,
+    logLast: logLines.at(-1),
+    started: 0,
+    finished: 0,
+    beatAt: now,
+    phaseAt: now,
+    nudges: 0,
+    worktrees: {},
+    ships: [],
+    fixes: {},
+    merges: 0,
+    held: 0,
+    queueEmpty: false,
+    ...base,
+  }
+}
+
+async function headSha($: EngineInterface, r: { root: string; remote: string; defaultBranch: string }): Promise<string | undefined> {
+  const sha = (await run($, ['git', '-C', r.root, 'rev-parse', '--verify', '--quiet', refOf(r)], r.root, 15_000)).stdout.trim()
+  return sha === '' ? undefined : sha
+}
+
+// The run after a finished one, planned by the same session toward the same
+// aim. It is what the person did by hand (an aimless /auto-claude start: 50 of
+// 83 starts, 2026-11-11..18); 4 of that week's 10 runs ended between 22:00 and
+// 08:00 and none was followed by another before a person came back.
+// It goes on only while the runs make progress and stay under the daily caps;
+// otherwise it returns why not, and the run ends as done.
+async function continueRun($: EngineInterface, r: AutoRecord, why: string, result: string): Promise<AutoRecord | string> {
+  const now = await $.clock.now()
+  const blocked = nextRunBlock(r, now, { maxRunsPerDay: runCfg.maxRunsPerDay, maxMergesPerDay: standbyCfg.maxMergesPerDay })
+  if (blocked !== undefined) return blocked
+  if (await $.fs.exists(FILES(r.root).stop).catch(() => false)) return 'a .claude/auto-claude.stop is in place'
+  const runs = recentMerges(r.runTimes ?? [r.startedAt], now)
+  // What it deploys is read again, as a start reads it.
+  const deployText = await readText($, `${r.root}/${DEPLOY_FILE}`)
+  const deploy = deployText === undefined ? undefined : parseDeploy(deployText)
+  if (deploy !== undefined && 'error' in deploy) return `${DEPLOY_FILE}: ${deploy.error}`
+  // The finished run's plan and queue are kept beside the new ones.
+  const stamp = new Date(now).toISOString().slice(0, 16).replace(/[-:]/g, '').replace('T', '-')
+  const f = FILES(r.root)
+  const kept = { plan: `.claude/auto-plan.${stamp}.md`, queue: `.claude/goals.${stamp}.md` }
+  for (const [from, to] of [[f.plan, kept.plan], [f.queue, kept.queue]] as const) {
+    const moved = await run($, ['mv', '-n', from, `${r.root}/${to}`], r.root, 15_000)
+    if (moved.exitCode !== 0) return `${from} could not be archived as ${to}: ${out(moved)}`
+  }
+  await fetchRemote($, r, r.root)
+  const logLines = ((await readText($, f.log)) ?? '').split('\n').filter(l => l.trim() !== '')
+  const next = freshRun(
+    {
+      root: r.root,
+      sessionId: r.sessionId,
+      hint: r.hint,
+      remote: r.remote,
+      defaultBranch: r.defaultBranch,
+      ciMode: r.ciMode,
+      continues: true,
+      runNo: (r.runNo ?? 1) + 1,
+      runTimes: [...runs, now],
+      baseSha: await headSha($, r),
+      ...(r.mergeTimes !== undefined ? { mergeTimes: r.mergeTimes } : {}),
+      ...(r.codeqlKnown !== undefined ? { codeqlKnown: r.codeqlKnown } : {}),
+      ...(deploy === undefined ? {} : { deploy, deploys: 0 }),
+    },
+    now,
+    logLines,
+  )
+  const kick = await linearKickoff($, r.root)
+  if (kick.linear !== undefined) next.linear = kick.linear
+  const text = kickoffText(r.hint, refOf(r), r.remote === LOCAL, deploy?.command, kick.brief, { runNo: next.runNo!, plan: kept.plan, queue: kept.queue, result })
+  // A person talking in the session keeps it: the prompt waits for a free session.
+  const free = sessionQuiet(now)
+  if (!free) next.kickoff = text
+  // A run from before 1.6.0 has no exclude line for the kept files yet.
+  await ensureLines($, f.exclude, EXCLUDES, '# auto-claude')
+  await stopLoop($, r.root, true)
+  await writeRecord($, next)
+  clearSessionGoal($)
+  await appendLog($, r.root, { event: 'next-run', run: next.runNo, after: why })
+  await tell($, next, `finished: ${why}. ${summary(r.merges, r.held, r.ships)}. Run ${next.runNo} plans itself ${free ? 'now' : 'once the session is free'} toward the same aim (${runs.length + 1}/${runCfg.maxRunsPerDay} runs in 24 h); /${COMMAND} stop ends it`)
+  if (free) {
+    $.clock.after(100, () => {
+      $.prompt.submit({ text }).catch(() => $.ui.toast('auto-claude: the planning prompt was not submitted; send any message to go on.'))
+    })
+  }
   return next
 }
 
@@ -1200,7 +1341,7 @@ async function clearStop($: EngineInterface, root: string): Promise<{ cleared: b
 
 const clearedNote = (c: { cleared: boolean }) => (c.cleared ? ' A leftover .claude/auto-claude.stop was moved to .claude/auto-claude.stop.cleared.' : '')
 
-async function startCommand($: EngineInterface, hint: string, ciMode: string, buildOnly: boolean, alwaysOn = false): Promise<string> {
+async function startCommand($: EngineInterface, hint: string, ciMode: string, buildOnly: boolean, alwaysOn = false, once = false): Promise<string> {
   const where = await sessionRoot($)
   let root = where.root
   const notes: string[] = []
@@ -1270,34 +1411,24 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string, bu
   if ('error' in stop) return `Not started: ${stop.error}.`
   await ensureLines($, f.deny, DENY, '# auto-claude: merging and releases are the driver\'s')
   const now = await $.clock.now()
-  const r: AutoRecord = {
-    on: true,
-    phase: buildOnly ? 'run' : 'plan',
-    root,
-    sessionId: await $.session.id(),
-    hint,
-    round: 1,
-    startedAt: now,
-    remote,
-    defaultBranch,
-    ciMode: mode,
-    logOffset: logLines.length,
-    logLast: logLines.at(-1),
-    started: 0,
-    finished: 0,
-    beatAt: now,
-    phaseAt: now,
-    nudges: 0,
-    worktrees: {},
-    ships: [],
-    fixes: {},
-    merges: 0,
-    held: 0,
-    queueEmpty: false,
-    ...(buildOnly ? { buildOnly: true } : {}),
-    ...(alwaysOn && !buildOnly ? { alwaysOn: true, cycle: 0 } : {}),
-    ...(deploy === undefined ? {} : { deploy, deploys: 0 }),
-  }
+  const r = freshRun(
+    {
+      root,
+      sessionId: await $.session.id(),
+      hint,
+      remote,
+      defaultBranch,
+      ciMode: mode,
+      phase: buildOnly ? 'run' : 'plan',
+      baseSha: await headSha($, { root, remote, defaultBranch }),
+      ...(buildOnly ? { buildOnly: true } : {}),
+      ...(alwaysOn && !buildOnly ? { alwaysOn: true, cycle: 0 } : {}),
+      ...(buildOnly || alwaysOn ? {} : { continues: !once, runNo: 1, runTimes: [now] }),
+      ...(deploy === undefined ? {} : { deploy, deploys: 0 }),
+    },
+    now,
+    logLines,
+  )
   // The Linear baseline first: a tick between two writes would lose it.
   const kick = buildOnly ? {} : await linearKickoff($, root)
   if (kick.linear !== undefined) r.linear = kick.linear
@@ -1317,7 +1448,9 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string, bu
 
   const moved = where.used === where.cwd ? '' : ` (the session's directory ${where.cwd} no longer exists; used ${where.used})`
   const deploys = deploy === undefined ? ', deploys as the plan says' : `, deploys after each merge with \`${deploy.command}\`${deploy.codeql.length > 0 ? ` after a CodeQL scan (${deploy.codeql.join(', ')})` : ''}`
-  const always = r.alwaysOn === true ? ' Always on: once the final check passes, it stands by and wakes for new work.' : ''
+  const always = r.alwaysOn === true
+    ? ' Always on: once the final check passes, it stands by and wakes for new work.'
+    : continuesOf(r) ? ` Once its final check passes, the next run toward the same aim plans itself (at most ${runCfg.maxRunsPerDay} runs in 24 h; --once ends at the first).` : ''
   return `auto-claude on in ${root}${moved} (${mode} CI, merges into ${defaultBranch}${deploys}). Claude plans the run now.${always}${clearedNote(stop)}${notes.length > 0 ? ` ${notes.join(' ')}` : ''}`
 }
 
@@ -1367,6 +1500,14 @@ async function standbyStatus($: EngineInterface, r: AutoRecord): Promise<string>
   return `always on · standing by ${hours(now - (r.standbyAt ?? now))} after cycle ${r.cycle ?? 0} · wakes on ${sourceNames(r)}${next.length > 0 ? ` · next poll: ${next.join(', ')}` : ''} · ${dayMerges}${r.githubError !== undefined ? ` · github error: ${r.githubError}` : ''}`
 }
 
+// Whether the run goes on by itself after this one, for status.
+async function chainStatus($: EngineInterface, r: AutoRecord): Promise<string> {
+  const runs = recentMerges(r.runTimes ?? [r.startedAt], await $.clock.now()).length
+  return continuesOf(r)
+    ? `run ${r.runNo ?? 1} · the next run plans itself when this one is done (${runs}/${runCfg.maxRunsPerDay} runs in 24 h; it ends if a run merges nothing)`
+    : `run ${r.runNo ?? 1} · ends when done (${r.continues === false ? 'started with --once' : 'continueRuns is off'})`
+}
+
 async function statusText($: EngineInterface): Promise<string> {
   const root = activeRoot ?? (await sessionRoot($)).root
   const r = root === undefined ? undefined : await readRecord($, root)
@@ -1390,6 +1531,7 @@ async function statusText($: EngineInterface): Promise<string> {
       ? `linear: project ${r.linear.project} · ${Object.keys(r.linear.seen).length} issue(s) covered · last sync ${r.linear.syncedAt !== undefined ? `${Math.round(((await $.clock.now()) - r.linear.syncedAt) / 60_000)} min ago` : 'never'}${r.linear.error !== undefined ? ` · error: ${r.linear.error}` : ''}`
       : r.buildOnly === true ? undefined : 'linear: off (this folder maps to no project in ~/.claude/linear.json repo_mapping: add projectId or projectName)',
     r.alwaysOn === true ? await standbyStatus($, r) : undefined,
+    r.alwaysOn !== true && r.buildOnly !== true ? await chainStatus($, r) : undefined,
     r.note !== undefined ? `note: ${r.note}` : undefined,
     await stallLine($, r),
   ]
@@ -1442,14 +1584,21 @@ export const register: Register = (on, options) => {
     issueLabel: typeof options.issueLabel === 'string' ? options.issueLabel.trim() : 'auto-claude',
     maxMergesPerDay: Number(options.maxMergesPerDay ?? 20),
   }
+  runCfg = { continueRuns: options.continueRuns !== false, maxRunsPerDay: Math.max(Number(options.maxRunsPerDay ?? 6) || 6, 1) }
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    await $.command.register({ name: COMMAND, description: 'Unattended run of this repository: /auto-claude start [aim] | start --always-on [aim] | start --queue | standby | status | stop | resume' })
+    await $.command.register({ name: COMMAND, description: 'Unattended run of this repository: /auto-claude start [aim] | start --once [aim] | start --always-on [aim] | start --queue | standby | status | stop | resume' })
     await $.tool.register({
       name: READY_TOOL,
       description: 'auto-claude: call once .claude/auto-plan.md (with its Final check and Deploy lines) and .claude/goals.md (milestone lines with checks) are written. It validates them and starts or continues the run.',
       inputSchema: { type: 'object', properties: {} },
+      isDeferred: false,
+    })
+    await $.tool.register({
+      name: RUN_DONE_TOOL,
+      description: 'auto-claude: call instead of auto_plan_ready while planning a run, when nothing worth a run is left that can be done without the person (what remains needs credentials, a decision, hardware or money). The run ends as done with your reason.',
+      inputSchema: { type: 'object', properties: { reason: { type: 'string', description: 'What is left and why it needs the person, in one or two sentences.' } }, required: ['reason'] },
       isDeferred: false,
     })
     await $.tool.register({
@@ -1578,6 +1727,18 @@ export const register: Register = (on, options) => {
     }
   })
 
+  on('tool.call', { tool: RUN_DONE_TOOL_ID }, async ($, e): Promise<{ result: string }> => {
+    const reasonRaw = (e as unknown as { reason?: unknown }).reason
+    const reason = typeof reasonRaw === 'string' ? reasonRaw.trim() : ''
+    const r = activeRoot === undefined ? undefined : await readRecord($, activeRoot)
+    if (r === undefined || !r.on) return { result: `No auto-claude run is on; /${COMMAND} start first.` }
+    // Only a run still being planned: one under way finishes through its final check.
+    if (r.phase !== 'plan' || r.round !== 1) return { result: `Only a run being planned can end this way (phase ${r.phase}, round ${r.round}).` }
+    if (reason === '') return { result: 'reason is required: what is left and why it needs the person.' }
+    await stopRun($, r, `nothing worth a run is left without the person: ${reason}`, 'done')
+    return { result: 'The run ended as done. Tell the person in two or three lines what is left for them and why, then end the turn.' }
+  })
+
   // Refusals: while a run is on in this session, and while a milestone is built in it.
   on('tool.call', async ($, e, next) => {
     const view = await loopView($)
@@ -1594,8 +1755,9 @@ export const register: Register = (on, options) => {
     const [action = 'status', ...rest] = e.args.trim().split(/\s+/).filter(w => w !== '')
     if (action === 'start') {
       const buildOnly = rest.includes('--queue')
-      const alwaysOn = rest.includes('--always-on') || (alwaysOnDefault && !rest.includes('--once'))
-      return { text: await startCommand($, rest.filter(w => w !== '--queue' && w !== '--always-on' && w !== '--once').join(' '), ciMode, buildOnly, alwaysOn) }
+      const once = rest.includes('--once')
+      const alwaysOn = rest.includes('--always-on') || (alwaysOnDefault && !once)
+      return { text: await startCommand($, rest.filter(w => w !== '--queue' && w !== '--always-on' && w !== '--once').join(' '), ciMode, buildOnly, alwaysOn, once) }
     }
     if (action === 'status') return { text: await statusText($) }
     const root = activeRoot ?? (await sessionRoot($)).root
@@ -1628,6 +1790,6 @@ export const register: Register = (on, options) => {
       if (r.on && r.sessionId === (await $.session.id())) return { text: 'The run is already on in this session.' }
       return { text: await takeOver($, r, 'resumed by the person') }
     }
-    return { text: `Usage: /${COMMAND} start [aim] | start --always-on [aim] | start --queue | standby | status | stop | resume` }
+    return { text: `Usage: /${COMMAND} start [aim] | start --once [aim] | start --always-on [aim] | start --queue | standby | status | stop | resume` }
   })
 }
