@@ -530,6 +530,18 @@ describe('a run, local CI', () => {
     expect(text).toContain('no "Deploy:')
   })
 
+  test('a reload while the session sits in a removed worktree keeps ticking the run', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    await meet($, w)
+    const beat = () => (JSON.parse(w.files.get('/repo/.claude/auto-claude.on') ?? '{}') as { at?: number }).at ?? 0
+    w.gone.add('/repo/worktrees/goal-01-landed')
+    await $.session.start({ cwd: '/repo/worktrees/goal-01-landed', surface: 'terminal', isInteractive: true })
+    const before = beat()
+    await w.clock.advance(TICK)
+    expect(beat()).toBeGreaterThan(before)
+  })
+
   test('start from a session whose directory was a removed worktree finds the repository above it', async ($, on) => {
     const w = world(on)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
