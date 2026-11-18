@@ -188,9 +188,17 @@ async function show($: EngineInterface, r: AutoRecord | undefined) {
 // used to read as "Not inside a git repository".
 async function sessionRoot($: EngineInterface): Promise<{ root?: string; cwd: string; used: string }> {
   const cwd = await $.session.cwd()
+  const dir = await existingDir($, cwd)
+  return { root: await repoRoot($, dir), cwd, used: dir }
+}
+
+// The session's directory, or the nearest one above it that still exists: a
+// session left in a milestone worktree the driver removed after its merge has a
+// directory git cannot start in.
+async function existingDir($: EngineInterface, cwd: string): Promise<string> {
   let dir = cwd
   while (dir !== '/' && !(await $.fs.exists(dir).catch(() => true))) dir = dir.slice(0, dir.lastIndexOf('/')) || '/'
-  return { root: await repoRoot($, dir), cwd, used: dir }
+  return dir
 }
 
 const notInRepo = (s: { cwd: string; used: string }) =>
@@ -1339,7 +1347,9 @@ export const register: Register = (on, options) => {
     setOnFinish(() => {
       $.clock.after(100, () => void tick($, caps, pollMs))
     })
-    const root = await repoRoot($, e.cwd).catch(() => undefined)
+    // A reload while the session sits in a removed worktree used to leave no root:
+    // every tick returned at once, and the run stood still without a word.
+    const root = await repoRoot($, await existingDir($, e.cwd)).catch(() => undefined)
     activeRoot = root
     const r = root === undefined ? undefined : await readRecord($, root)
     if (r?.on === true && r.phase === 'run' && r.sessionId === (await $.session.id())) await recoverLoop($, r).catch(() => undefined)
