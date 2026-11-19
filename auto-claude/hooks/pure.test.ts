@@ -7,6 +7,7 @@ import { checkBash, checkPath, deploysSomething, uncommitted, waitsLong } from '
 import { guardRefusal, maxBranchSeq } from './loop'
 import type { ShipState } from '../types'
 import { ciEvent, cycleLine, DAY_MS, dayCapHit, dueSources, eventLines, failedRuns, issueEvent, lineGhIssues, MAX_EVENT_LINES, nextRunBlock, nextTimers, openIssues, recentMerges, sourcesOf, withCycle } from './standby'
+import { hostLoadWait } from './plan'
 import { deployFixLine, deployOf, finalCheckOf, fixLine, kickoffText, POLICY, validatePlan, worktreeRefs } from './plan'
 import { markItem, nextPending, parseDuration, parseQueue, requeueItem, slugify, summarize, waitingItems } from './queue'
 import { capReached, onlyWaiting, causeOf, ciAction, httpsOf, idleDue, inFlight, isWaiting, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, unfinished, MAX_AHEAD, wakeDue } from './ship'
@@ -641,5 +642,22 @@ describe('standby (always on)', () => {
     expect(once).toBe('## Goal\ng\n\n## Cycles\n\n- cycle 2, T: woke for KT-4, ci:9; merged 2, held 0, deployed 2\n')
     const twice = withCycle(`${once}\n## Result\nx\n`, '- cycle 3')
     expect(twice).toContain('deployed 2\n- cycle 3\n\n## Result')
+  })
+})
+
+describe('host-load waits (intrect-plugin 2026-11-19)', () => {
+  test('load and uptime tests are recognised, waits on the job itself are not', () => {
+    expect(hostLoadWait(`test "$(sysctl -n vm.loadavg | awk '{print int($3)}')" -lt 8`)).toBe(true)
+    expect(hostLoadWait('uptime | grep -q "load average: [0-7]\\."')).toBe(true)
+    expect(hostLoadWait('cat /proc/loadavg | cut -d" " -f3 | grep -q "^[0-4]"')).toBe(true)
+    expect(hostLoadWait('gh pr checks 76 --json bucket -q \'all(.bucket != "pending")\'')).toBe(false)
+    expect(hostLoadWait('git cat-file -e origin/main:docs/m22/final.json')).toBe(false)
+    expect(hostLoadWait('grep -q "CACHE DONE" ~/data/m21/cache.log')).toBe(false)
+  })
+  test('the plan check refuses such a line', () => {
+    const plan = 'x\nFinal check: `true`\nDeploy: none\n'
+    const goals = '- [ ] a :: check: true\n- [ ] b :: check: true :: after: test "$(sysctl -n vm.loadavg | awk \'{print int($3)}\')" -lt 8\n- [ ] c :: check: true\n'
+    const verdict = validatePlan(plan, goals, true)
+    expect(JSON.stringify(verdict)).toContain("wait on the host's load")
   })
 })
