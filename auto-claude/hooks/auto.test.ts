@@ -1567,7 +1567,7 @@ describe('waits on compute (:: after:, wait_until)', () => {
     expect(w.prompts.at(-1)).toContain('Milestone #3: add() returns a+b')
   })
 
-  test('a wait with no within or alive is still asked about once after 12 h, and never held', { timeoutMs: 60_000 }, async ($, on) => {
+  test('a wait with no within or alive is still asked about once after 2 h, and never held (it was 12 h: two overnight waits sat 10-11 h unasked, 2026-11-19)', { timeoutMs: 60_000 }, async ($, on) => {
     const w = world(on)
     w.cmdExit.set(AFTER, 1)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
@@ -1577,7 +1577,7 @@ describe('waits on compute (:: after:, wait_until)', () => {
     await ready($)
     await w.clock.advance(1_200)
     await meet($, w)
-    for (let i = 0; i < 11; i++) await w.clock.advance(60 * MIN)
+    await w.clock.advance(60 * MIN)
     expect(w.prompts.some(p => p.includes('A wait looks late'))).toBe(false)
     for (let i = 0; i < 2; i++) await w.clock.advance(60 * MIN)
     const asked = w.prompts.filter(p => p.includes('A wait looks late'))

@@ -89,8 +89,10 @@ const WAIT_POLL_MS = 3 * 60_000
 const WAIT_PROBE_MS = 30_000
 const ALIVE_FAILS = 2
 // A wait with no `within` of its own still goes to the model after this long,
-// so a job that died without an alive check is not waited on in silence.
-const WAIT_ASK_MS = 12 * 3_600_000
+// so a job that died, or a condition that cannot pass, is not waited on in
+// silence. 2 h, not 12: two waits sat 10 h 14 min and 11 h 24 min overnight
+// (intrect-plugin, 2026-11-19) and were never asked about.
+const WAIT_ASK_MS = 2 * 3_600_000
 
 let ticker: Timer | undefined
 let ticking = false

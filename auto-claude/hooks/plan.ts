@@ -79,6 +79,19 @@ export function worktreeRefs(command: string): string[] {
   return [...new Set(command.match(WORKTREE_PATH) ?? [])]
 }
 
+// A wait on the host's load average never passes while the person's own jobs run
+// there. Measured 2026-11-19 (intrect-plugin on the Mac): `test "$(sysctl -n
+// vm.loadavg | ...)" -lt 8` held a milestone from 01:13 to 11:27 with the load
+// at 50-88 from a Python job, CodeQL and Ableton; the same night CC-Router waited
+// on `-lt 20` for 19 min. Nothing else may be waiting on it.
+const HOST_LOAD = /\b(?:vm\.loadavg|loadavg|uptime)\b|load average/i
+
+export function hostLoadWait(command: string): boolean {
+  return HOST_LOAD.test(command)
+}
+
+export const HOST_LOAD_HINT = 'the host runs the person\'s own jobs, so a load or uptime test may stay false all night; wait on the awaited job itself (a CI run, a file, a commit on origin/main) and give the line a `:: within:`'
+
 export const WORKTREE_WAIT_HINT = 'milestone worktrees are removed once their branch merges, so test the default branch instead: `git cat-file -e origin/main:<path>` for a file that lands, `git merge-base --is-ancestor <sha> origin/main` for a commit'
 
 const SHIPPING = /\b(merged|merge[sd]? (in)?to|pushed|push(ed)? to|pull request|PR (is )?(open|opened|created|merged)|deployed|is live)\b|머지|병합|푸시|배포(됨|되었|된|완료)/i
@@ -105,6 +118,7 @@ export function validatePlan(plan: string | undefined, queue: string | undefined
     if (item.base !== undefined && item.after === undefined) errors.push(`milestones take no ":: base:" (auto-claude sets the base): "${item.condition.slice(0, 80)}"`)
     const refs = [item.after, item.alive].flatMap(c => (c === undefined ? [] : worktreeRefs(c)))
     if (refs.length > 0) errors.push(`a wait that reads ${refs[0]} never passes after that worktree is removed; ${WORKTREE_WAIT_HINT}: "${item.condition.slice(0, 80)}"`)
+    if (hostLoadWait(`${item.after ?? ''} ${item.alive ?? ''}`)) errors.push(`a wait on the host's load never passes while the person works there; ${HOST_LOAD_HINT}: "${item.condition.slice(0, 80)}"`)
     if (item.after === undefined && PROSE_WAIT.test(item.condition)) {
       errors.push(`a start condition in prose is never checked, so the line starts at once: write it as ":: after: <shell command that exits 0 once it holds>" after the check (e.g. :: after: grep -q DONE ~/data/x/cache.log): "${item.condition.slice(0, 80)}"`)
     }
@@ -162,7 +176,7 @@ export function kickoffText(hint: string, base: string, noRemote = false, fixedD
     'Aim at the long-term end state of the whole work, not a first step. Then write two files in the repository root:',
     '1. .claude/auto-plan.md: ## Goal (the end state, with its quality bar), a line `Final check: <one shell command that passes only when the whole goal is met>`, the deploy lines below, ## Milestones (ordered, why each), ## Decisions (empty for now).',
     `2. .claude/goals.md: one line per milestone, in order: \`- [ ] <milestone end state> :: check: <shell command that proves it>\`. Each milestone is one reviewable PR, built in its own worktree from ${base} after the earlier milestones are merged, so each check must pass from such a checkout. State only what is true on the milestone's own branch: never \"merged\", \"pushed\", \"PR opened\" or \"deployed\" (that happens after it is met).`,
-    'A milestone that needs something with its own clock first (a training run, a cache build, a file an earlier milestone lands on the default branch) adds, after its check, `:: after: <shell command that exits 0 once it is done>` and optionally `:: alive: <command that fails if the job died>` and `:: within: <12h>`. Examples: `:: after: grep -q "CACHE DONE" ~/data/m21/cache.log :: alive: tmux has-session -t m21cache :: within: 8h`, `:: after: git cat-file -e origin/main:docs/m22/final.json`. auto-claude polls it, builds other milestones meanwhile and starts the line when it passes; the run does not end while lines wait. Never write such a condition in prose.',
+    'A milestone that needs something with its own clock first (a training run, a cache build, a file an earlier milestone lands on the default branch) adds, after its check, `:: after: <shell command that exits 0 once it is done>` and optionally `:: alive: <command that fails if the job died>` and `:: within: <12h>`. Examples: `:: after: grep -q "CACHE DONE" ~/data/m21/cache.log :: alive: tmux has-session -t m21cache :: within: 8h`, `:: after: git cat-file -e origin/main:docs/m22/final.json`. auto-claude polls it, builds other milestones meanwhile and starts the line when it passes; the run does not end while lines wait. Never write such a condition in prose, and never test the host\'s load or uptime (the person\'s own jobs keep it busy all night).',
     ...deployRules(fixedDeploy),
     ...(linearBrief !== undefined ? [linearBrief] : []),
     `Then call mcp__auto-claude__${READY_TOOL}. It checks the files and starts the run: auto-claude builds each milestone in a worktree, pushes it, opens a PR, waits for CI, merges when green and deploys.`,

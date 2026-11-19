@@ -14,7 +14,7 @@ import type { Goal, LoopCurrent, LoopRecord, LoopView } from '../types'
 import { clip, evaluate } from './evaluator'
 import type { StopFields } from './evaluator'
 import { checkBash, checkPath, stripProse, uncommitted, WAIT_MAX_S, waitsLong } from './guard'
-import { WORKTREE_WAIT_HINT, worktreeRefs } from './plan'
+import { HOST_LOAD_HINT, hostLoadWait, WORKTREE_WAIT_HINT, worktreeRefs } from './plan'
 import { markItem, nextPending, parseDuration, parseQueue, requeueItem, slugify, waitingItems } from './queue'
 import type { QueueItem } from './queue'
 
@@ -387,6 +387,7 @@ export async function waitCall($: EngineInterface, input: Record<string, unknown
   if (reason === '') return { deny: 'reason is required.' }
   const refs = worktreeRefs(`${until} ${alive}`)
   if (refs.length > 0) return { deny: `${refs[0]} will not be there when this is polled: ${WORKTREE_WAIT_HINT}.` }
+  if (hostLoadWait(`${until} ${alive}`)) return { deny: `A wait on the host's load or uptime may never pass: ${HOST_LOAD_HINT}.` }
   if (within !== '' && parseDuration(within) === undefined) return { deny: `within must be a duration like 90m, 12h or 2d, not "${within}".` }
   // Run where the driver polls it: the repository root (the worktree may be gone by then).
   const probe = await run($, ['bash', '-lc', until], view.repoRoot, WAIT_PROBE_MS).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
