@@ -510,15 +510,32 @@ async function readDenyFile($: EngineInterface, root: string): Promise<string[]>
     .filter(line => line !== '' && !line.startsWith('#'))
 }
 
-export async function appendLog($: EngineInterface, root: string, entry: Record<string, unknown>): Promise<void> {
-  try {
-    const text = (await readText($, logPath(root))) ?? ''
-    const lines = text.split('\n').filter(line => line !== '')
-    lines.push(JSON.stringify({ ts: isoNow(), ...entry }))
-    await $.fs.write(logPath(root), `${lines.slice(-LOG_MAX_LINES).join('\n')}\n`)
-  } catch {
-    // Logging never stops the loop.
+// Appends run one after another: each reads and rewrites the whole file, so
+// two at once in this process (the Stop hook's and the driver tick's) lost
+// one of the lines (measured in 1.11.0's tests: the loop's met line).
+export function serial(): <T>(job: () => Promise<T>) => Promise<T> {
+  let chain: Promise<unknown> = Promise.resolve()
+  return <T>(job: () => Promise<T>): Promise<T> => {
+    const next = chain.then(job, job)
+    chain = next.catch(() => undefined)
+    return next
   }
+}
+
+const logQueue = serial()
+
+export function appendLog($: EngineInterface, root: string, entry: Record<string, unknown>): Promise<void> {
+  const line = JSON.stringify({ ts: isoNow(), ...entry })
+  return logQueue(async () => {
+    try {
+      const text = (await readText($, logPath(root))) ?? ''
+      const lines = text.split('\n').filter(l => l !== '')
+      lines.push(line)
+      await $.fs.write(logPath(root), `${lines.slice(-LOG_MAX_LINES).join('\n')}\n`)
+    } catch {
+      // Logging never stops the loop.
+    }
+  })
 }
 
 function newGoal(condition: string, check: string | undefined, setAt: number): Goal {

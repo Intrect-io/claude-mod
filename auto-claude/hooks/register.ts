@@ -11,6 +11,8 @@ import { ensureLines, FILES, fetchRemote, LOCAL, out, readText, refOf, repoRoot,
 import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, WAIT_TOOL, WAIT_TOOL_ID, waitCall, guardRefusal, LOOP_EXCLUDES, LOOP_POLICY, loopView, MIN_CHECKS_TO_DEFER, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop, AGENT_PARKS, backgroundBusy, noteBackground } from './loop'
 import { capReached, causeOf, ciAction, diagnose, httpsOf, idleDue, inFlight, isWaiting, onlyWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, summary, unfinished, wakeDue } from './ship'
 import { markItem, nextPending, waitingItems } from './queue'
+import { classifyDiff, diffAction, judgeDiffText, restorePlan } from './verify'
+import { judgeDiff } from './evaluator'
 import { activityDue, activityOf, statsDays, statsText, summarizeStats } from './stats'
 import type { Activity } from './stats'
 import type { QueueItem } from './queue'
@@ -455,6 +457,55 @@ async function verifyFresh($: EngineInterface, r: AutoRecord, item: ShipItem, re
   return checked.exitCode === 0 ? undefined : `check failed in a fresh checkout of ${ref} (it passed in the builder's worktree): ${out(checked)}`
 }
 
+// The diff gate (1.12.0), run after verifyFresh and before anything lands:
+// what the branch's diff did to the tests and their runner, the check re-run
+// with those files put back as the base had them, and a judge reading the
+// diff. Returns why to hold, or a note to tell, or nothing.
+export const NEEDS_HUMAN_LABEL = 'auto-claude:needs-human'
+
+async function diffGate($: EngineInterface, r: AutoRecord, item: ShipItem, ref: string): Promise<{ hold?: string; note?: string }> {
+  if (!diffJudgeOn) return {}
+  const base = (await run($, ['git', '-C', r.root, 'merge-base', refOf(r), ref], r.root)).stdout.trim()
+  if (!/^[0-9a-f]{7,40}$/.test(base)) {
+    await appendLog($, r.root, { event: 'diff-judge', run: r.startedAt, goal: item.goal, verdict: 'skipped', reason: `no merge base of ${ref} and ${refOf(r)}` })
+    return {}
+  }
+  const nameStatus = (await run($, ['git', '-C', r.root, 'diff', '--name-status', '-M', base, ref], r.root, 60_000)).stdout
+  const patch = (await run($, ['git', '-C', r.root, 'diff', '-M', base, ref], r.root, 60_000)).stdout
+  const classified = classifyDiff(nameStatus, patch, item.check)
+  const plan = restorePlan(nameStatus, item.check)
+  let baseRerun: string | undefined
+  if (item.check !== undefined && plan.restore.length + plan.remove.length > 0) {
+    const dir = `${r.root}/worktrees/auto-verify`
+    await run($, ['git', '-C', r.root, 'worktree', 'remove', '--force', dir], r.root)
+    const made = await run($, ['git', '-C', r.root, 'worktree', 'add', '--detach', dir, ref], r.root, 60_000)
+    if (made.exitCode !== 0) baseRerun = `could not be made: ${out(made)}`
+    else {
+      if (plan.restore.length > 0) await run($, ['git', '-C', dir, 'checkout', base, '--', ...plan.restore], dir)
+      if (plan.remove.length > 0) await run($, ['git', '-C', dir, 'rm', '-q', '-f', '--ignore-unmatch', '--', ...plan.remove], dir)
+      const checked = await run($, ['bash', '-lc', item.check], dir, 600_000)
+      baseRerun = `exit ${checked.exitCode}${checked.exitCode === 0 ? '' : `: ${out(checked)}`}`
+      await run($, ['git', '-C', r.root, 'worktree', 'remove', '--force', dir], r.root)
+    }
+  }
+  const verdict = await judgeDiff($, { goal: item.goal, check: item.check, classified, baseRerun, diff: judgeDiffText(patch, classified) })
+  const action = diffAction(verdict, classified)
+  await appendLog($, r.root, { event: 'diff-judge', run: r.startedAt, goal: item.goal, ...(item.pr !== undefined ? { pr: item.pr } : {}), verdict: verdict.verdict, action, reason: verdict.reason, testInfra: classified.testInfra, testsModified: classified.testsModified, assertsRemoved: classified.assertsRemoved, ...(baseRerun !== undefined ? { baseRerun: baseRerun.slice(0, 200) } : {}) })
+  const why = `diff judge: ${verdict.verdict}: ${verdict.reason}`
+  if (action === 'go') return {}
+  if (action === 'note') return { note: why }
+  if (item.pr !== undefined && r.remote !== LOCAL) {
+    const slug = repoSlug((await run($, ['git', '-C', r.root, 'remote', 'get-url', r.remote], r.root, 15_000)).stdout)
+    const repo = slug === undefined ? [] : ['--repo', slug]
+    await run($, ['gh', 'label', 'create', NEEDS_HUMAN_LABEL, ...repo, '--color', 'B60205', '--description', 'auto-claude held this PR for a person', '--force'], r.root, 30_000)
+    await run($, ['gh', 'pr', 'edit', String(item.pr), ...repo, '--add-label', NEEDS_HUMAN_LABEL], r.root, 30_000)
+    const touched = [...classified.testInfra, ...classified.testsModified]
+    await run($, ['gh', 'pr', 'comment', String(item.pr), ...repo, '--body', `[auto-claude] Held for a person before merging. ${why}${touched.length > 0 ? `\n\nTest files and test infrastructure this PR changed: ${touched.join(', ')}` : ''}${baseRerun !== undefined ? `\n\nThe check re-run with them restored from the base: ${baseRerun.slice(0, 400)}` : ''}`], r.root, 30_000)
+  }
+
+  return { hold: why }
+}
+
 // A milestone given up on: held, told, and counted for the circuit breaker
 // (two in a row for one cause stop the run, in tick).
 async function hold($: EngineInterface, r: AutoRecord, item: ShipItem, note: string): Promise<{ r: AutoRecord; item: ShipItem }> {
@@ -535,6 +586,11 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
       const head = (await run($, ['git', '-C', wt, 'rev-parse', 'HEAD'], wt)).stdout.trim()
       failure = await verifyFresh($, r, item, head === '' ? item.branch : head)
       if (failure === undefined) {
+        const gate = await diffGate($, r, item, head === '' ? item.branch : head)
+        if (gate.hold !== undefined) return hold($, r, item, gate.hold)
+        if (gate.note !== undefined) await tell($, r, gate.note)
+      }
+      if (failure === undefined) {
         const pushed = await run($, ['git', '-C', wt, 'push', r.remote, `HEAD:${r.defaultBranch}`], wt)
         if (pushed.exitCode !== 0) failure = `push to ${r.defaultBranch} failed: ${out(pushed)}`
       }
@@ -577,6 +633,11 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
         // CI judged the PR; the milestone's own check is judged on the pushed head too.
         await run($, ['git', '-C', r.root, 'fetch', '-q', r.remote, item.headRef], r.root)
         failure = await verifyFresh($, r, item, `${r.remote}/${item.headRef}`)
+        if (failure === undefined) {
+          const gate = await diffGate($, r, item, `${r.remote}/${item.headRef}`)
+          if (gate.hold !== undefined) return hold($, r, item, gate.hold)
+          if (gate.note !== undefined) await tell($, r, gate.note)
+        }
       }
       if (failure === undefined && !state.merged) {
         const merged = await run($, ['gh', 'pr', 'merge', String(item.pr), ...repo, '--squash', '--delete-branch'], wt)
@@ -1238,6 +1299,9 @@ async function standbyTick($: EngineInterface, r: AutoRecord): Promise<void> {
 // What the run is doing, logged for /auto-claude stats on each change and at
 // least every stats.HEARTBEAT_MS. Kept in memory: after a reload the state is
 // logged again, which the summarizer reads as the same state going on.
+// Set from the diffJudge option at register.
+let diffJudgeOn = true
+
 let lastActivity: { root: string; run: number; state: Activity; at: number } | undefined
 
 async function logActivity($: EngineInterface, r: AutoRecord): Promise<void> {
@@ -1725,6 +1789,7 @@ export const register: Register = (on, options) => {
   }
   runCfg = { continueRuns: options.continueRuns !== false, maxRunsPerDay: Math.max(Number(options.maxRunsPerDay ?? 6) || 6, 1) }
   ultracodeWanted = options.ultracode !== false
+  diffJudgeOn = options.diffJudge !== false
   ultracodeKey = undefined
   ultracodePending = false
 
