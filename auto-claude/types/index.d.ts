@@ -51,6 +51,18 @@ export type LinearSync = {
   error?: string
 }
 
+// The Linear agent session bridge (hooks/bridge.ts): the Worker's event cursor, each delegated
+// issue's session, the issues stopped in their session, and the last plan sent.
+export type AgentBridge = {
+  cursor: number
+  sessions: Record<string, string>
+  stopped?: string[]
+  planSig?: string
+  polledAt?: number
+  // The Worker's last failure, told once when it starts failing.
+  error?: string
+}
+
 // standby: an always-on run between cycles; it is on, but owns nothing and runs no model turn.
 export type AutoPhase = 'plan' | 'run' | 'final' | 'done' | 'stopped' | 'standby'
 
@@ -123,6 +135,8 @@ export type AutoRecord = {
   idleNudgedAt?: number
   // Linear sync; unset when the repository maps to no project.
   linear?: LinearSync
+  // The Linear agent session bridge; unset until ~/.claude/linear-agent.json exists and a poll ran.
+  agent?: AgentBridge
   // Queue lines waiting on their `:: after:` command, by condition (register.ts pollWaits).
   waits?: Record<string, WaitState>
   // How many pending lines wait, as of the last tick: while only waits are left the run is not idle.
