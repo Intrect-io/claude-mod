@@ -136,6 +136,30 @@ Each verdict is a `diff-judge` event in `.claude/goal-loop.log`. `/auto-claude s
 
 So the judge was right on all 22 judgements, with no false holds. The fixtures are small and each diff is obvious on its own, so this is a floor, not a measure of real repository diffs. The recorded runs are a file the builder wrote, so a person runs the script once more before trusting the gate. Re-run with `bun auto-claude/eval/judge-eval.ts [--model <id>]`; it costs 11 sonnet calls.
 
+## Protected paths
+
+Some files decide whether a run's own work is accepted: its detectors, its judges, its CI. A run that may merge changes to them can weaken what judges it. In Anthropic's "Natural emergent misalignment from reward hacking", a model trained to reward-hack, working in a real codebase through Claude Code, tried to sabotage the classifier meant to catch it 12% of the time. So from 1.15.0 a PR that touches a protected path is left for a person.
+
+- **What is protected.**
+  - The globs in `.claude/protected.json` (`{"paths": ["<glob>", ...], "reason": "..."}`). Before each ship they are read with `git show <remote>/<default>:.claude/protected.json`, never from the milestone branch, so a branch cannot unprotect itself.
+  - Always, built in: `.github/workflows/**`, `.claude/protected.json`, `.claude/auto-deploy.json`, `.claude/architecture.json`, `.claude/goal-loop.deny`.
+  - Globs take `**`, `*`, `?` and `{a,b}`. A rename counts on both its old and new path. A broken file is told, and only the built-in globs apply.
+- **What happens.** After CI is green, and before the fresh-checkout check and the diff judge, the driver looks at the PR's diff. If it touches a protected path:
+  - the driver neither merges nor holds the PR;
+  - it labels the PR `auto-claude:needs-human` and comments with the protected files it changed;
+  - it logs an `awaiting-human` event;
+  - the ship item waits as `awaiting-human`, and the driver polls it on every tick.
+- **A person decides.**
+  - Merging it by hand continues it exactly as the driver's own merge would: the deploy, then Linear.
+  - Closing it holds the milestone.
+- **Other milestones.**
+  - A milestone stacked on the waiting PR's branch depends on it, so it waits with it.
+  - A milestone started afterwards from the default branch is built and shipped as usual.
+  - The run does not finish while a PR waits, because its final check needs what the PR brings. The time spent counts as waiting-after in `/auto-claude stats`, not as idle.
+- **Local mode (no remote).** There is no PR to wait on, so such a milestone is held with a note to merge its branch by hand.
+
+This repository's own `.claude/protected.json` protects the harness guards and `tamper.ts`, auto-claude's `guard.ts`, `loop.ts`, `evaluator.ts` and `verify.ts`, `scripts/ci.sh`, `fixtures/**` and `.github/workflows/**`.
+
 ## Ultracode
 
 A run works in ultracode: standing dynamic-workflow orchestration, where the model writes and runs a workflow of subagents for each substantive task.

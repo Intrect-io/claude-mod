@@ -93,6 +93,8 @@ function world(on: On, store: Record<string, unknown> = {}) {
     compacts: 0,
     // The diff gate: `git merge-base` (empty: none, so the gate is skipped), `git diff --name-status` and the patch.
     mergeBase: '',
+    // .claude/protected.json as `git show <default>:.claude/protected.json` prints it (empty: none).
+    protectedJson: '',
     nameStatus: '',
     patch: '',
     clock: mock.clock(on, { now: 1_000 }),
@@ -163,6 +165,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
       return ok()
     }
     if (a.includes('for-each-ref')) return ok(w.branches)
+    if (a.includes(':.claude/protected.json')) return w.protectedJson === '' ? ok('', 128, 'fatal: path does not exist') : ok(w.protectedJson)
     if (a.includes(' merge-base ')) return ok(w.mergeBase ? `${w.mergeBase}\n` : '', w.mergeBase ? 0 : 1)
     if (a.includes(' diff --name-status ')) return ok(w.nameStatus)
     if (a.includes(' diff -M ')) return ok(w.patch)
@@ -970,6 +973,66 @@ describe('the diff judge (1.12.0)', () => {
     await meet($, w)
     expect(w.merged).toHaveLength(1)
     expect(activity(w)).toContain('"verdict":"skipped"')
+  })
+})
+
+describe('protected paths (1.15.0)', () => {
+  const touch = (w: W, files: string[]) => {
+    w.nameStatus = files.map(f => `M\t${f}`).join('\n')
+  }
+
+  test('protected: a PR touching a built-in protected path is labelled and left for a person, then goes on as merged once they land it', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    await planned($, w)
+    touch(w, ['.github/workflows/ci.yml', 'src/a.py'])
+    await meet($, w)
+    expect(w.merged).toHaveLength(0)
+    expect(w.runs.some(r => r.startsWith('gh pr edit 7') && r.includes('auto-claude:needs-human'))).toBe(true)
+    expect(w.runs.some(r => r.startsWith('gh pr comment 7') && r.includes('.github/workflows/ci.yml') && !r.includes('src/a.py'))).toBe(true)
+    expect(w.notifies.some(n => n.includes('changes protected files') && n.includes('waits for a person'))).toBe(true)
+    expect(w.files.get(LOG)).toContain('"event":"awaiting-human"')
+    // Still open: polled, never merged by the driver, and the run does not finish.
+    for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
+    expect(w.merged).toHaveLength(0)
+    expect((await cmd($, 'status')).text).toContain('auto-claude on')
+    // A person merges it.
+    w.prState = 'MERGED'
+    await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.includes('was landed by a person'))).toBe(true)
+    expect(w.notifies.some(n => n.includes('merged PR #7'))).toBe(true)
+    expect(w.merged).toHaveLength(0)
+  })
+
+  test('protected: the globs come from .claude/protected.json on the remote default branch, never the milestone branch', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    w.protectedJson = '{"paths": ["harness/hooks/{guards,tamper}.ts", "fixtures/**"], "reason": "detectors"}'
+    await planned($, w)
+    touch(w, ['fixtures/tamper-v1/cases.json'])
+    await meet($, w)
+    expect(w.runs).toContain('git -C /repo show origin/main:.claude/protected.json')
+    expect(w.runs.some(r => r.includes(' show ') && r.includes('goal/01'))).toBe(false)
+    expect(w.merged).toHaveLength(0)
+    expect(w.files.get(LOG)).toContain('fixtures/tamper-v1/cases.json')
+  })
+
+  test('protected: a PR a person closes holds its milestone; one touching nothing protected merges as before', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    await planned($, w)
+    touch(w, ['.claude/auto-deploy.json'])
+    await meet($, w)
+    expect(w.merged).toHaveLength(0)
+    w.prState = 'CLOSED'
+    await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.includes('held') && n.includes('a person closed PR #7'))).toBe(true)
+    w.prState = 'OPEN'
+    touch(w, ['src/b.py'])
+    await w.clock.advance(TICK)
+    await meet($, w)
+    await w.clock.advance(TICK)
+    expect(w.merged.length).toBeGreaterThan(0)
   })
 })
 

@@ -35,7 +35,8 @@ export function activityOf(input: {
   if (input.phase === 'standby') return 'standby'
   if (input.busy) return 'building'
   if (input.ships.some(s => WAITING_CI.has(s.state))) return 'waiting-ci'
-  if ((input.waitCount ?? 0) > 0 || input.finalCiSince !== undefined) return 'waiting-after'
+  // A PR awaiting a person (protected files, 1.15.0) is awaited too.
+  if ((input.waitCount ?? 0) > 0 || input.finalCiSince !== undefined || input.ships.some(s => s.state === 'awaiting-human')) return 'waiting-after'
 
   return 'idle-quiet'
 }

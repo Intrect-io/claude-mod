@@ -1,6 +1,8 @@
 // stacked: built on the branch of a milestone still shipping; it waits for
 // that one to land (or be held), is rebased onto the default branch, then pushed.
-export type ShipState = 'stacked' | 'push' | 'ci' | 'fixing' | 'merged' | 'held'
+// awaiting-human (1.15.0): the PR touches protected files; the driver neither
+// merges nor holds it, and polls it until a person lands or closes it.
+export type ShipState = 'stacked' | 'push' | 'ci' | 'fixing' | 'merged' | 'held' | 'awaiting-human'
 
 export type ShipItem = {
   // The goal-mode queue line this milestone came from.
@@ -35,6 +37,8 @@ export type ShipItem = {
   askedAt?: number
   // The repair of a broken deploy: it ships ahead of every stacked milestone.
   repair?: boolean
+  // awaiting-human: the protected files its diff touches.
+  protectedFiles?: string[]
 }
 
 // The run's Linear sync (hooks/linear.ts): the project, the change stamp each

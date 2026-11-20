@@ -9,9 +9,9 @@ import { deployMerged } from './deploy-run'
 import { bootstrapRepo } from './bootstrap'
 import { ensureLines, FILES, fetchRemote, LOCAL, out, readText, refOf, repoRoot, run, tell } from './io'
 import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, WAIT_TOOL, WAIT_TOOL_ID, waitCall, guardRefusal, LOOP_EXCLUDES, loopPolicy, loopView, DEFER_CATEGORIES, deferRule, setDeferAfter, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop, AGENT_PARKS, backgroundBusy, noteBackground } from './loop'
-import { capReached, causeOf, ciAction, diagnose, httpsOf, idleDue, inFlight, isWaiting, onlyWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, summary, unfinished, wakeDue } from './ship'
+import { awaitingHuman, nextStacked, capReached, causeOf, ciAction, diagnose, httpsOf, idleDue, inFlight, isWaiting, onlyWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, summary, unfinished, wakeDue } from './ship'
 import { markItem, nextPending, waitingItems } from './queue'
-import { classifyDiff, diffAction, judgeDiffText, restorePlan } from './verify'
+import { BUILTIN_PROTECTED, classifyDiff, diffAction, judgeDiffText, parseNameStatus, parseProtected, protectedHits, restorePlan } from './verify'
 import { judgeDiff } from './evaluator'
 import { activityDue, activityOf, statsDays, statsText, summarizeStats } from './stats'
 import type { Activity } from './stats'
@@ -457,6 +457,32 @@ async function verifyFresh($: EngineInterface, r: AutoRecord, item: ShipItem, re
   return checked.exitCode === 0 ? undefined : `check failed in a fresh checkout of ${ref} (it passed in the builder's worktree): ${out(checked)}`
 }
 
+// Protected paths (1.15.0): the globs in .claude/protected.json as the remote
+// default branch has it (never the milestone branch's copy, which the builder
+// could edit), plus BUILTIN_PROTECTED; and the ones the branch's diff touches.
+async function protectedFor($: EngineInterface, r: AutoRecord, ref: string): Promise<{ hits: string[] }> {
+  await fetchRemote($, r, r.root)
+  const shown = await run($, ['git', '-C', r.root, 'show', `${refOf(r)}:.claude/protected.json`], r.root, 15_000)
+  const parsed = parseProtected(shown.exitCode === 0 ? shown.stdout : undefined)
+  if (parsed.error !== undefined) await tell($, r, `${parsed.error}; only the built-in protected paths apply`)
+  const ns = (await run($, ['git', '-C', r.root, 'diff', '--name-status', '-M', `${refOf(r)}...${ref}`], r.root, 60_000)).stdout
+  const paths = parseNameStatus(ns).flatMap(e => (e.from !== undefined ? [e.path, e.from] : [e.path]))
+
+  return { hits: protectedHits(paths, [...BUILTIN_PROTECTED, ...parsed.paths]) }
+}
+
+// A PR touching protected files is left for a person: labelled, told, and
+// polled as awaiting-human. Milestones that do not depend on it go on.
+async function awaitHuman($: EngineInterface, r: AutoRecord, item: ShipItem, hits: string[], repo: string[], wt: string): Promise<{ r: AutoRecord; item: ShipItem }> {
+  await run($, ['gh', 'label', 'create', NEEDS_HUMAN_LABEL, ...repo, '--color', 'B60205', '--description', 'auto-claude held this PR for a person', '--force'], wt, 30_000)
+  await run($, ['gh', 'pr', 'edit', String(item.pr), ...repo, '--add-label', NEEDS_HUMAN_LABEL], wt, 30_000)
+  await run($, ['gh', 'pr', 'comment', String(item.pr), ...repo, '--body', `[auto-claude] This PR changes protected files, so auto-claude does not merge it. A person reviews and merges it (auto-claude then deploys and goes on as after its own merge), or closes it (the milestone is held).\n\nProtected files changed:\n${hits.map(h => `- \`${h}\``).join('\n')}`], wt, 30_000)
+  await appendLog($, r.root, { event: 'awaiting-human', run: r.startedAt, goal: item.goal, ...(item.pr !== undefined ? { pr: item.pr } : {}), files: hits })
+  await tell($, r, `PR #${item.pr ?? '?'} changes protected files (${hits.slice(0, 5).join(', ')}${hits.length > 5 ? ', …' : ''}): it waits for a person to merge or close it; other milestones go on`)
+
+  return { r, item: { ...item, state: 'awaiting-human', protectedFiles: hits, since: await $.clock.now(), note: undefined } }
+}
+
 // The diff gate (1.12.0), run after verifyFresh and before anything lands:
 // what the branch's diff did to the tests and their runner, the check re-run
 // with those files put back as the base had them, and a judge reading the
@@ -551,7 +577,7 @@ async function allQueued($: EngineInterface, wt: string, repo: string[], headRef
 // One step of a milestone through push, CI and merge.
 async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promise<{ r: AutoRecord; item: ShipItem }> {
   const update = (patch: Partial<ShipItem>) => ({ ...item, ...patch })
-  if (item.state !== 'push' && item.state !== 'ci') return { r, item }
+  if (item.state !== 'push' && item.state !== 'ci' && item.state !== 'awaiting-human') return { r, item }
   const where = await worktreeOf($, r, item)
   if ('gone' in where) return hold($, r, item, where.gone)
   const wt = where.wt
@@ -584,6 +610,8 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
     } else {
       // The rebased commit is what lands, so that is what the check judges.
       const head = (await run($, ['git', '-C', wt, 'rev-parse', 'HEAD'], wt)).stdout.trim()
+      const guarded = await protectedFor($, r, head === '' ? item.branch : head)
+      if (guarded.hits.length > 0) return hold($, r, item, `protected files changed, so a person lands it (git merge ${item.branch} by hand): ${guarded.hits.join(', ')}`)
       failure = await verifyFresh($, r, item, head === '' ? item.branch : head)
       if (failure === undefined) {
         const gate = await diffGate($, r, item, head === '' ? item.branch : head)
@@ -596,55 +624,68 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
       }
     }
   } else {
-    // A CI that does not finish (no runner takes it) is re-run once, then held.
-    const queued = now - (item.rerunAt ?? item.since) >= 30 * 60_000 ? await allQueued($, wt, repo, item.headRef) : false
-    const action = ciAction(item, now, queued)
-    if (action === 'rerun') {
-      await rerunCi($, wt, repo, item.headRef)
-      await tell($, r, `PR #${item.pr ?? '?'}: CI did not finish in ${Math.round((now - item.since) / 60_000)} min; cancelled and re-ran its runs`)
-      return { r, item: update({ rerunAt: now }) }
-    }
-    if (action === 'hold') return hold($, r, item, `CI did not finish: waited ${Math.round((now - item.since) / 60_000)} min, re-run once`)
-    // Only required checks decide; with none required, every check does.
-    let asked = await run($, ['gh', 'pr', 'checks', String(item.pr), ...repo, '--required', '--json', 'bucket'], wt)
-    if (noRequired(asked)) asked = await run($, ['gh', 'pr', 'checks', String(item.pr), ...repo, '--json', 'bucket'], wt)
-    const checks = parseChecks(asked.stdout)
-    if (checks === 'pending') return { r, item }
-    // The runs the driver cancelled to re-run them read as cancelled for a while.
-    if (checks === 'red' && item.rerunAt !== undefined && onlyCancelled(asked.stdout)) return { r, item }
-    // Asked right after the PR was opened, GitHub has usually not registered
-    // its checks yet: that is pending too, until the grace runs out.
-    if (checks === 'none' && now - item.since < NO_CI_GRACE_MS) return { r, item }
-    if (checks === 'red') failure = 'CI failed (gh pr checks --required)'
-    if (failure === undefined) {
-      // Looked at again right before merging.
+    // A PR awaiting a person (protected files): polled until they land or close it.
+    let byHand = false
+    if (item.state === 'awaiting-human') {
       const state = mergeable((await run($, ['gh', 'pr', 'view', String(item.pr), ...repo, '--json', 'state,mergeable'], wt)).stdout)
-      if (state.unknown) return { r, item }
-      // A merge whose reply was lost (a 502 after GitHub merged it) has landed.
-      if (state.merged) {
-        // Fall through to the merged bookkeeping below.
-      } else if (!state.open) {
-        // Closed by someone or something: opened again once, then held.
-        if ((item.tried ?? []).includes('reopen')) return hold($, r, item, 'the PR is no longer open')
-        await run($, ['gh', 'pr', 'reopen', String(item.pr), ...repo], wt)
-        return { r, item: update({ tried: [...(item.tried ?? []), 'reopen'], since: now }) }
-      } else if (state.conflict) failure = `conflicts with ${r.defaultBranch}`
-      else {
-        // CI judged the PR; the milestone's own check is judged on the pushed head too.
-        await run($, ['git', '-C', r.root, 'fetch', '-q', r.remote, item.headRef], r.root)
-        failure = await verifyFresh($, r, item, `${r.remote}/${item.headRef}`)
-        if (failure === undefined) {
-          const gate = await diffGate($, r, item, `${r.remote}/${item.headRef}`)
-          if (gate.hold !== undefined) return hold($, r, item, gate.hold)
-          if (gate.note !== undefined) await tell($, r, gate.note)
-        }
+      if (state.unknown || (state.open && !state.merged)) return { r, item }
+      if (!state.merged) return hold($, r, item, `a person closed PR #${item.pr ?? '?'}, which touched protected files`)
+      byHand = true
+      await tell($, r, `PR #${item.pr ?? '?'} was landed by a person; going on as after a merge`)
+    }
+    if (!byHand) {
+      // A CI that does not finish (no runner takes it) is re-run once, then held.
+      const queued = now - (item.rerunAt ?? item.since) >= 30 * 60_000 ? await allQueued($, wt, repo, item.headRef) : false
+      const action = ciAction(item, now, queued)
+      if (action === 'rerun') {
+        await rerunCi($, wt, repo, item.headRef)
+        await tell($, r, `PR #${item.pr ?? '?'}: CI did not finish in ${Math.round((now - item.since) / 60_000)} min; cancelled and re-ran its runs`)
+        return { r, item: update({ rerunAt: now }) }
       }
-      if (failure === undefined && !state.merged) {
-        const merged = await run($, ['gh', 'pr', 'merge', String(item.pr), ...repo, '--squash', '--delete-branch'], wt)
-        if (merged.exitCode !== 0) {
-          // The reply may be lost after GitHub merged it (measured: a 502): asked again before it counts as a failure.
-          const again = mergeable((await run($, ['gh', 'pr', 'view', String(item.pr), ...repo, '--json', 'state,mergeable'], wt)).stdout)
-          if (!again.merged) return { r, item: update({ note: `merge failed: ${out(merged)}` }) }
+      if (action === 'hold') return hold($, r, item, `CI did not finish: waited ${Math.round((now - item.since) / 60_000)} min, re-run once`)
+      // Only required checks decide; with none required, every check does.
+      let asked = await run($, ['gh', 'pr', 'checks', String(item.pr), ...repo, '--required', '--json', 'bucket'], wt)
+      if (noRequired(asked)) asked = await run($, ['gh', 'pr', 'checks', String(item.pr), ...repo, '--json', 'bucket'], wt)
+      const checks = parseChecks(asked.stdout)
+      if (checks === 'pending') return { r, item }
+      // The runs the driver cancelled to re-run them read as cancelled for a while.
+      if (checks === 'red' && item.rerunAt !== undefined && onlyCancelled(asked.stdout)) return { r, item }
+      // Asked right after the PR was opened, GitHub has usually not registered
+      // its checks yet: that is pending too, until the grace runs out.
+      if (checks === 'none' && now - item.since < NO_CI_GRACE_MS) return { r, item }
+      if (checks === 'red') failure = 'CI failed (gh pr checks --required)'
+      if (failure === undefined) {
+        // Looked at again right before merging.
+        const state = mergeable((await run($, ['gh', 'pr', 'view', String(item.pr), ...repo, '--json', 'state,mergeable'], wt)).stdout)
+        if (state.unknown) return { r, item }
+        // A merge whose reply was lost (a 502 after GitHub merged it) has landed.
+        if (state.merged) {
+          // Fall through to the merged bookkeeping below.
+        } else if (!state.open) {
+          // Closed by someone or something: opened again once, then held.
+          if ((item.tried ?? []).includes('reopen')) return hold($, r, item, 'the PR is no longer open')
+          await run($, ['gh', 'pr', 'reopen', String(item.pr), ...repo], wt)
+          return { r, item: update({ tried: [...(item.tried ?? []), 'reopen'], since: now }) }
+        } else if (state.conflict) failure = `conflicts with ${r.defaultBranch}`
+        else {
+          // CI judged the PR; the milestone's own check is judged on the pushed head too.
+          await run($, ['git', '-C', r.root, 'fetch', '-q', r.remote, item.headRef], r.root)
+          const guarded = await protectedFor($, r, `${r.remote}/${item.headRef}`)
+          if (guarded.hits.length > 0) return awaitHuman($, r, item, guarded.hits, repo, wt)
+          failure = await verifyFresh($, r, item, `${r.remote}/${item.headRef}`)
+          if (failure === undefined) {
+            const gate = await diffGate($, r, item, `${r.remote}/${item.headRef}`)
+            if (gate.hold !== undefined) return hold($, r, item, gate.hold)
+            if (gate.note !== undefined) await tell($, r, gate.note)
+          }
+        }
+        if (failure === undefined && !state.merged) {
+          const merged = await run($, ['gh', 'pr', 'merge', String(item.pr), ...repo, '--squash', '--delete-branch'], wt)
+          if (merged.exitCode !== 0) {
+            // The reply may be lost after GitHub merged it (measured: a 502): asked again before it counts as a failure.
+            const again = mergeable((await run($, ['gh', 'pr', 'view', String(item.pr), ...repo, '--json', 'state,mergeable'], wt)).stdout)
+            if (!again.merged) return { r, item: update({ note: `merge failed: ${out(merged)}` }) }
+          }
         }
       }
     }
@@ -848,12 +889,18 @@ async function planTick($: EngineInterface, r: AutoRecord): Promise<void> {
 // its CI already green is pushed, opened, landed and followed by the next
 // start in this one tick.
 async function shipSteps($: EngineInterface, r: AutoRecord): Promise<AutoRecord> {
+  // PRs awaiting a person are polled first: one they landed deploys and goes on.
+  for (const waiting of awaitingHuman(r.ships)) {
+    const step = await advance($, r, waiting)
+    r = { ...step.r, ships: step.r.ships.map(s => (s.headRef === waiting.headRef ? step.item : s)) }
+    if (!r.on) return r
+  }
   for (let steps = 0; steps < MAX_STEPS && r.on; steps++) {
     let item = inFlight(r.ships)
     if (item === undefined) {
       // The milestone ahead landed or was held: the first stacked one goes next,
       // unless the deploy is being repaired (nothing merges on top of it).
-      const waiting = r.repair === undefined ? r.ships.find(s => s.state === 'stacked') : undefined
+      const waiting = r.repair === undefined ? nextStacked(r.ships) : undefined
       if (waiting === undefined) break
       const moved = await unstack($, r, waiting)
       r = { ...moved.r, ships: moved.r.ships.map(s => (s.headRef === waiting.headRef ? moved.item : s)) }
@@ -929,7 +976,8 @@ async function nextOrFinish($: EngineInterface, r: AutoRecord, caps: Caps): Prom
   // them when what they wait for is done.
   if (waitingItems(items, readyOf(r)).length > 0) return
   const building = (await readLoop($, r.root))?.current !== undefined
-  if (unfinished(r.ships).length === 0 && !building && r.started <= r.finished) {
+  // A PR awaiting a person is not done either: the final check needs what it brings.
+  if (unfinished(r.ships).length === 0 && awaitingHuman(r.ships).length === 0 && !building && r.started <= r.finished) {
     // The run is not done while Linear has changes it has not queued.
     const synced = await linearSync($, r, true)
     if (synced.r.linear !== r.linear) await writeRecord($, synced.r)

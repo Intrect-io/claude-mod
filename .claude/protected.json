@@ -1,0 +1,17 @@
+{
+  "paths": [
+    "harness/hooks/guards.ts",
+    "harness/hooks/doc-guards.ts",
+    "harness/hooks/tamper.ts",
+    "harness/hooks/extra-guards.ts",
+    "harness/hooks/linear-guard.ts",
+    "auto-claude/hooks/guard.ts",
+    "auto-claude/hooks/loop.ts",
+    "auto-claude/hooks/evaluator.ts",
+    "auto-claude/hooks/verify.ts",
+    "scripts/ci.sh",
+    "fixtures/**",
+    ".github/workflows/**"
+  ],
+  "reason": "The detectors, the judges, the CI gate and the pinned fixtures decide whether auto-claude's work is accepted, so a change to them is landed by a person, never merged by the run that it would judge."
+}
