@@ -8,12 +8,12 @@ import { guardRefusal, maxBranchSeq, serial } from './loop'
 import type { ShipState } from '../types'
 import { ciEvent, cycleLine, DAY_MS, dayCapHit, dueSources, eventLines, failedRuns, issueEvent, lineGhIssues, MAX_EVENT_LINES, nextRunBlock, nextTimers, openIssues, recentMerges, sourcesOf, withCycle } from './standby'
 import { hostLoadWait } from './plan'
-import { diffAction, judgeDiffText, parseNameStatus, restorePlan } from './verify'
+import { BUILTIN_PROTECTED, diffAction, globToRegExp, judgeDiffText, parseNameStatus, parseProtected, protectedHits, restorePlan } from './verify'
 import { diffJudgePrompt, parseDiffVerdict } from './evaluator'
 import { activityDue, activityOf, HEARTBEAT_MS, idleShare, MAX_GAP_MS, statsDays, statsText, summarizeStats } from './stats'
 import { deployFixLine, deployOf, finalCheckOf, fixLine, kickoffText, POLICY, validatePlan, worktreeRefs } from './plan'
 import { markItem, nextPending, parseDuration, parseQueue, requeueItem, slugify, summarize, waitingItems } from './queue'
-import { capReached, onlyWaiting, causeOf, ciAction, httpsOf, idleDue, inFlight, isWaiting, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, unfinished, MAX_AHEAD, wakeDue } from './ship'
+import { awaitingHuman, nextStacked, capReached, onlyWaiting, causeOf, ciAction, httpsOf, idleDue, inFlight, isWaiting, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, unfinished, MAX_AHEAD, wakeDue } from './ship'
 
 const PLAN = '## Goal\nadd and sub work\n\nFinal check: `python3 -m unittest -q`\nDeploy: `bash scripts/deploy.sh`\nSmoke check: `curl -fsS http://localhost:8080/health`\nScan: bandit -q -r src\n\n## Milestones\n1. add\n2. sub\n\n## Decisions\n'
 const QUEUE = '- [ ] add() returns a+b :: check: python3 -m unittest -q test_add\n- [ ] sub() returns a-b :: check: python3 -m unittest -q test_sub\n'
@@ -783,5 +783,31 @@ describe('diff judge: goal-loop.log appends', () => {
     // A job that throws does not stop the ones after it.
     const after = await Promise.all([queue(async () => { throw new Error('x') }).then(() => 'ok', e => String(e)), queue(async () => 'next')])
     expect(after).toEqual(['Error: x', 'next'])
+  })
+})
+
+describe('protected paths (pure)', () => {
+  test('protected: globs match git paths with **, *, ? and {a,b}', () => {
+    expect(globToRegExp('.github/workflows/**').test('.github/workflows/ci.yml')).toBe(true)
+    expect(globToRegExp('a/**/b.ts').test('a/b.ts')).toBe(true)
+    expect(globToRegExp('a/**/b.ts').test('a/x/y/b.ts')).toBe(true)
+    expect(globToRegExp('*.md').test('x/y.md')).toBe(false)
+    expect(globToRegExp('harness/hooks/{guards,tamper}.ts').test('harness/hooks/tamper.ts')).toBe(true)
+    expect(globToRegExp('harness/hooks/{guards,tamper}.ts').test('harness/hooks/tamperx.ts')).toBe(false)
+    expect(protectedHits(['src/a.py', '.claude/protected.json', '.claude/goal-loop.deny', 'x/.claude/protected.json'], BUILTIN_PROTECTED)).toEqual(['.claude/goal-loop.deny', '.claude/protected.json'])
+  })
+  test('protected: protected.json parses to its globs, and a broken one says why', () => {
+    expect(parseProtected('{"paths": ["a/**"], "reason": "r"}')).toEqual({ paths: ['a/**'] })
+    expect(parseProtected(undefined)).toEqual({ paths: [] })
+    expect(parseProtected('{"paths": "a"}').error).toContain('needs')
+    expect(parseProtected('{').error).toContain('does not parse')
+  })
+  test('protected: a milestone stacked behind a PR awaiting a person waits with it; one from the default branch does not, and awaiting is not idle', () => {
+    const item = (headRef: string, state: ShipState, onto?: string) => ({ goal: headRef, headRef, branch: headRef, state, red: 0, since: 0, ...(onto !== undefined ? { onto } : {}) })
+    const ships = [item('a', 'awaiting-human'), item('b', 'stacked', 'tip-a'), item('c', 'stacked')]
+    expect(nextStacked(ships)?.headRef).toBe('c')
+    expect(nextStacked([item('a', 'merged'), item('b', 'stacked', 'tip-a')])?.headRef).toBe('b')
+    expect(awaitingHuman(ships).map(s => s.headRef)).toEqual(['a'])
+    expect(onlyWaiting({ started: 1, finished: 1, ships: [item('a', 'awaiting-human')] })).toBe(true)
   })
 })

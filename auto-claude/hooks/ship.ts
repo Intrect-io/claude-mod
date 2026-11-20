@@ -136,7 +136,19 @@ export function capReached(r: { merges: number; startedAt: number; waitedMs?: nu
 // Only waits are left: nothing is being built or shipped, and at least one
 // pending line waits on its `:: after:`. The run is waiting, not idle.
 export function onlyWaiting(r: Pick<AutoRecord, 'started' | 'finished' | 'ships' | 'waitCount' | 'finalCiSince'>): boolean {
-  return ((r.waitCount ?? 0) > 0 || r.finalCiSince !== undefined) && r.started <= r.finished && unfinished(r.ships).length === 0
+  return ((r.waitCount ?? 0) > 0 || r.finalCiSince !== undefined || awaitingHuman(r.ships).length > 0) && r.started <= r.finished && unfinished(r.ships).length === 0
+}
+
+// PRs that touch protected files, waiting for a person to land or close them (1.15.0).
+export function awaitingHuman(ships: readonly ShipItem[]): ShipItem[] {
+  return ships.filter(s => s.state === 'awaiting-human')
+}
+
+// The first stacked milestone that may go next. One built on a branch behind a
+// PR awaiting a person depends on that PR, so it waits with it; a milestone
+// started later from the default branch does not.
+export function nextStacked(ships: readonly ShipItem[]): ShipItem | undefined {
+  return ships.find((s, i) => s.state === 'stacked' && !(s.onto !== undefined && ships.slice(0, i).some(p => p.state === 'awaiting-human')))
 }
 
 // Why a run that is on is not moving, with its evidence; undefined when it

@@ -156,3 +156,57 @@ export function diffAction(v: DiffVerdict, c: Classified): 'hold' | 'note' | 'go
 
   return 'go'
 }
+
+// ---- protected paths (1.15.0) ------------------------------------------------
+// Files whose change a person lands: the detectors, the CI and the run's own
+// rules. An agent that may merge changes to what judges it can weaken it
+// (Anthropic, "Natural emergent misalignment from reward hacking": a
+// hack-trained model sabotaged its detector 12% of the time).
+
+export const BUILTIN_PROTECTED = ['.github/workflows/**', '.claude/protected.json', '.claude/auto-deploy.json', '.claude/architecture.json', '.claude/goal-loop.deny']
+
+// A glob as git paths use it: `**` any depth, `*` within one segment, `?` one
+// character, `{a,b}` alternatives.
+export function globToRegExp(glob: string): RegExp {
+  let re = ''
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i]!
+    if (c === '*') {
+      if (glob[i + 1] === '*') {
+        i++
+        if (glob[i + 1] === '/') {
+          i++
+          re += '(?:.*/)?'
+        } else re += '.*'
+      } else re += '[^/]*'
+    } else if (c === '?') re += '[^/]'
+    else if (c === '{') {
+      const end = glob.indexOf('}', i)
+      if (end < 0) re += '\\{'
+      else {
+        re += `(?:${glob.slice(i + 1, end).split(',').map(x => x.replace(/[.+^$()|[\]\\]/g, '\\$&')).join('|')})`
+        i = end
+      }
+    } else re += c.replace(/[.+^$()|[\]\\]/g, '\\$&')
+  }
+
+  return new RegExp(`^${re}$`)
+}
+
+export function protectedHits(paths: readonly string[], globs: readonly string[]): string[] {
+  const res = globs.map(globToRegExp)
+
+  return [...new Set(paths.filter(p => res.some(r => r.test(p))))].sort()
+}
+
+// .claude/protected.json as read from the default branch: its globs, or why it was not read.
+export function parseProtected(text: string | undefined): { paths: string[]; error?: string } {
+  if (text === undefined || text.trim() === '') return { paths: [] }
+  try {
+    const raw = JSON.parse(text) as { paths?: unknown }
+    if (!Array.isArray(raw.paths) || raw.paths.some(p => typeof p !== 'string')) return { paths: [], error: '.claude/protected.json needs {"paths": ["<glob>", ...]}' }
+    return { paths: raw.paths as string[] }
+  } catch (error) {
+    return { paths: [], error: `.claude/protected.json does not parse: ${String(error).slice(0, 120)}` }
+  }
+}
