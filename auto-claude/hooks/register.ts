@@ -463,7 +463,7 @@ async function hold($: EngineInterface, r: AutoRecord, item: ShipItem, note: str
   await tell($, r, `held: ${item.goal.slice(0, 60)}${item.pr !== undefined ? ` (PR #${item.pr})` : ''}: ${note.slice(0, 160)}; going on with the next milestone`)
   const ids = lineIssues(item.goal)
   if (r.linear !== undefined && ids.length > 0) r = { ...r, linear: await onHeld($, r.linear, ids, `${item.pr !== undefined ? `PR #${item.pr}: ` : ''}${note}`) }
-  await appendLog($, r.root, { event: 'held', run: r.startedAt, goal: item.goal, ...(item.pr !== undefined ? { pr: item.pr } : {}), cause })
+  await appendActivity($, r.root, { event: 'held', run: r.startedAt, goal: item.goal, ...(item.pr !== undefined ? { pr: item.pr } : {}), cause })
   // A held repair frees the stacked milestones; their deploys count toward the stop.
   return { r: { ...r, held: r.held + 1, holdCause: cause, holdStreak: streak, ...(item.repair === true ? { repair: undefined } : {}) }, item: { ...item, state: 'held', note } }
 }
@@ -605,7 +605,7 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
       ...(r.alwaysOn === true || continuesOf(r) ? { mergeTimes: [...recentMerges(r.mergeTimes, mergedAt), mergedAt] } : {}),
     }
     await tell($, next, `merged ${landed}: ${item.goal.slice(0, 80)}`)
-    await appendLog($, r.root, { event: 'merged', run: r.startedAt, goal: item.goal, ...(item.pr !== undefined ? { pr: item.pr } : {}) })
+    await appendActivity($, r.root, { event: 'merged', run: r.startedAt, goal: item.goal, ...(item.pr !== undefined ? { pr: item.pr } : {}) })
     // A labelled GitHub issue the milestone resolved is closed with the evidence.
     for (const n of lineGhIssues(item.goal)) {
       await run($, ['gh', 'issue', 'close', String(n), ...repo, '--comment', `[auto-claude] Resolved by ${landed}: ${item.goal.slice(0, 160)}`], r.root, 30_000)
@@ -1246,7 +1246,25 @@ async function logActivity($: EngineInterface, r: AutoRecord): Promise<void> {
   const last = lastActivity?.root === r.root && lastActivity.run === r.startedAt ? lastActivity : undefined
   if (!activityDue(last, state, now)) return
   lastActivity = { root: r.root, run: r.startedAt, state, at: now }
-  await appendLog($, r.root, { event: 'activity', run: r.startedAt, state })
+  await appendActivity($, r.root, { event: 'activity', run: r.startedAt, state })
+}
+
+// The driver's own record for stats, apart from .claude/goal-loop.log: that log
+// is rewritten whole by the loop's Stop hook too, and a tick writing it at the
+// same moment lost the hook's `met` line (measured in the tests). Only the
+// driver writes this file.
+export const ACTIVITY_LOG = '.claude/auto-activity.log'
+const ACTIVITY_MAX_LINES = 5000
+
+async function appendActivity($: EngineInterface, root: string, entry: Record<string, unknown>): Promise<void> {
+  const path = `${root}/${ACTIVITY_LOG}`
+  try {
+    const lines = ((await readText($, path)) ?? '').split('\n').filter(l => l !== '')
+    lines.push(JSON.stringify({ ts: new Date(await $.clock.now()).toISOString(), ...entry }))
+    await $.fs.write(path, `${lines.slice(-ACTIVITY_MAX_LINES).join('\n')}\n`)
+  } catch {
+    // Stats never stop the run.
+  }
 }
 
 async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<void> {
@@ -1903,7 +1921,7 @@ export const register: Register = (on, options) => {
       const statsRoot = activeRoot ?? (await sessionRoot($)).root
       if (statsRoot === undefined) return { text: 'Not in a repository.' }
       const days = statsDays(rest)
-      const text = (await readText($, FILES(statsRoot).log)) ?? ''
+      const text = `${(await readText($, FILES(statsRoot).log)) ?? ''}\n${(await readText($, `${statsRoot}/${ACTIVITY_LOG}`)) ?? ''}`
       return { text: statsText(summarizeStats(text.split('\n'), await $.clock.now(), days), days) }
     }
     const root = activeRoot ?? (await sessionRoot($)).root

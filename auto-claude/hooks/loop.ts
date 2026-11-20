@@ -35,7 +35,7 @@ const KICKOFF_DELAY_MS = 1_000
 const CHECK_TIMEOUT_MS = 600_000
 export const MIN_CHECKS_TO_DEFER = 2
 export const LOG_MAX_LINES = 2_000
-export const LOOP_EXCLUDES = ['worktrees/', '.claude/goals.md', '.claude/goal-loop.log', '.claude/goal-loop.deny']
+export const LOOP_EXCLUDES = ['worktrees/', '.claude/goals.md', '.claude/goal-loop.log', '.claude/goal-loop.deny', '.claude/auto-activity.log']
 
 export const goalAtom = atom({ plugin: 'auto-claude', key: 'goal' } as const, null, { shape: 'goal-1' })
 export const viewAtom = atom({ plugin: 'auto-claude', key: 'view' } as const, null, { shape: 'view-1' })

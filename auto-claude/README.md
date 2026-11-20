@@ -76,7 +76,7 @@ That restart is now the driver's.
 
 ## Where the time goes
 
-`/auto-claude stats [days]` reads `.claude/goal-loop.log` and splits each run's wall time over the last `days` days (7 by default) into five states:
+`/auto-claude stats [days]` reads `.claude/goal-loop.log` and `.claude/auto-activity.log` and splits each run's wall time over the last `days` days (7 by default) into five states:
 
 | state | when |
 | --- | --- |
@@ -89,10 +89,10 @@ That restart is now the driver's.
 For each run it also prints its merges, holds and deferrals, and the idle-quiet share of the observed time.
 
 **How it is measured (1.11.0).**
-- On each tick the driver works out the state from the turn events (`turn.start`, `turn.complete`), the Stop hook, the background tasks and the run record. It appends an `activity` event when the state changes, and once every 30 min while it stays the same. The time between two activity events belongs to the earlier one.
+- On each tick the driver works out the state from the turn events (`turn.start`, `turn.complete`), the Stop hook, the background tasks and the run record. It appends an `activity` event to `.claude/auto-activity.log` (git-excluded, last 5000 lines) when the state changes, and once every 30 min while it stays the same. The time between two activity events belongs to the earlier one.
 - A gap longer than 60 min means the driver was not running (the session exited, or the machine slept). Only 60 min of it is counted to the state; the rest is shown as unobserved.
 - A run ends at its `run-done` or `run-stopped` event, or where the next run's first event comes. Stopped time inside a run is left out.
-- Merges and holds are logged by the driver (`merged`, `held`) from 1.11.0. Blocked lines and deferrals come from the loop's `blocked` and `deferred` events. Runs before 1.11.0 have no activity events, so they are not shown.
+- Merges and holds are logged by the driver (`merged`, `held`) in the same file from 1.11.0. It is a file of its own because the loop's Stop hook rewrites `goal-loop.log` whole, and a tick writing that log at the same moment lost the hook's `met` line (seen in the tests). Blocked lines and deferrals come from the loop's `blocked` and `deferred` events. Runs before 1.11.0 have no activity events, so they are not shown.
 - The log keeps its last 2000 lines, so stats covers about as far back as those reach.
 
 ## Ultracode
