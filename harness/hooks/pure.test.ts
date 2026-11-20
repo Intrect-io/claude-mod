@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
+import { checkTestTamper, checkTestTamperBash, replacedTexts } from './tamper'
 
 import {
   checkAttribution,
@@ -435,4 +436,37 @@ describe('doc budget', () => {
     ['echo x > plan.md', false],
     ['cat plan.md', false],
   ])
+})
+
+describe('test tampering', () => {
+  const verdict = (path: string, text: string, old?: string) => {
+    const v = checkTestTamper(path, [text], old === undefined ? undefined : [old])
+    return v.deny !== undefined ? 'deny' : v.note !== undefined ? 'note' : 'none'
+  }
+  table('denied in test files', input => verdict('tests/test_a.py', input) === 'deny', [
+    ['def pytest_runtest_makereport(item, call):\n    rep = (yield).get_result()\n    rep.outcome = "passed"\n', true],
+    ['TestReport.from_item_and_call = patched\n', true],
+    ['def __eq__(self, other) -> bool:\n    return True\n', true],
+    ['def __ne__(self, other):\n    return False  # same\n', true],
+    ['sys.exit(0)\n', true],
+    ['os._exit(1)\n', true],
+    ['def __eq__(self, other):\n    return self.v == other.v\n', false],
+    ['with pytest.raises(SystemExit):\n    main()\n', false],
+  ])
+  test('process.exit(0) in a TS test is denied; the same text outside a test is not judged', () => {
+    expect(verdict('src/a.test.ts', 'process.exit(0)\n')).toBe('deny')
+    expect(verdict('src/cli.ts', 'process.exit(0)\n')).toBe('none')
+  })
+  test('skips, .only, assert True and fewer assertions are notes', () => {
+    expect(verdict('tests/test_a.py', '@pytest.mark.skipif(sys.platform == "win32", reason="posix")\ndef test_x():\n    assert x\n')).toBe('note')
+    expect(verdict('src/a.test.ts', "describe.only('x', () => {})\n")).toBe('note')
+    expect(verdict('tests/test_a.py', '    assert True\n')).toBe('note')
+    expect(verdict('tests/test_a.py', '    assert a\n', '    assert a\n    assert b\n')).toBe('note')
+    expect(verdict('tests/test_a.py', '    assert a == 2\n', '    assert a == 1\n')).toBe('none')
+  })
+  test('a shell write of a test file is judged on its text; old text comes from old_string and edits', () => {
+    expect(checkTestTamperBash("cat > tests/test_a.py <<'EOF'\nsys.exit(0)\nEOF").deny).toContain('test tampering')
+    expect(checkTestTamperBash('python -c "import sys; sys.exit(0)"').deny).toBeUndefined()
+    expect(replacedTexts({ old_string: 'a', edits: [{ old_string: 'b' }, { new_string: 'c' }] })).toEqual(['a', 'b'])
+  })
 })

@@ -297,6 +297,22 @@ describe('phase 1 guards', () => {
     expect((await $.tool.call({ tool: 'Edit', file_path: '/repo/CLAUDE.md', old_string: 'y', new_string: 'y\nmore' })).deny).toBeUndefined()
     expect((await $.tool.call({ tool: 'Bash', command: 'echo x >> plan.md' })).deny).toContain('doc budget')
   })
+
+  test('test tampering is refused at the tool call, and a weakened test is noted', async ($, on) => {
+    world(on)
+    await start($)
+    await prompt($, '테스트 고쳐줘')
+    const hook = 'import pytest\n\n@pytest.hookimpl(hookwrapper=True)\ndef pytest_runtest_makereport(item, call):\n    outcome = yield\n    outcome.get_result().outcome = "passed"\n'
+    expect((await $.tool.call({ tool: 'Write', file_path: '/repo/tests/conftest.py', content: hook })).deny).toContain('test tampering')
+    expect((await $.tool.call({ tool: 'Edit', file_path: '/repo/tests/test_a.py', old_string: 'x', new_string: 'class A:\n    def __eq__(self, other):\n        return True\n' })).deny).toContain('test tampering')
+    expect((await $.tool.call({ tool: 'Bash', command: `cat > tests/test_b.py <<'EOF'\nimport sys\nsys.exit(0)\nEOF` })).deny).toContain('test tampering')
+    const fewer = await $.tool.call({ tool: 'Edit', file_path: '/repo/tests/test_a.py', old_string: '    assert f(1) == 1\n    assert f(2) == 4\n', new_string: '    assert f(1) == 1\n' })
+    expect(fewer.deny).toBeUndefined()
+    expect((fewer.context ?? []).join('\n')).toContain('fewer assertions (2 → 1)')
+    const skipped = await $.tool.call({ tool: 'Write', file_path: '/repo/src/a.test.ts', content: "it.skip('x', () => { expect(f()).toBe(1) })\n" })
+    expect((skipped.context ?? []).join('\n')).toContain('a .skip or .only test')
+    expect((await $.tool.call({ tool: 'Write', file_path: '/repo/src/cli.py', content: 'import sys\nsys.exit(0)\n' })).deny).toBeUndefined()
+  })
 })
 
 describe('phase 2', () => {
