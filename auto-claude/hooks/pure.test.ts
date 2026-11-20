@@ -8,6 +8,7 @@ import { guardRefusal, maxBranchSeq } from './loop'
 import type { ShipState } from '../types'
 import { ciEvent, cycleLine, DAY_MS, dayCapHit, dueSources, eventLines, failedRuns, issueEvent, lineGhIssues, MAX_EVENT_LINES, nextRunBlock, nextTimers, openIssues, recentMerges, sourcesOf, withCycle } from './standby'
 import { hostLoadWait } from './plan'
+import { activityDue, activityOf, HEARTBEAT_MS, idleShare, MAX_GAP_MS, statsDays, statsText, summarizeStats } from './stats'
 import { deployFixLine, deployOf, finalCheckOf, fixLine, kickoffText, POLICY, validatePlan, worktreeRefs } from './plan'
 import { markItem, nextPending, parseDuration, parseQueue, requeueItem, slugify, summarize, waitingItems } from './queue'
 import { capReached, onlyWaiting, causeOf, ciAction, httpsOf, idleDue, inFlight, isWaiting, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, unfinished, MAX_AHEAD, wakeDue } from './ship'
@@ -639,5 +640,86 @@ describe('host-load waits (intrect-plugin 2026-11-19)', () => {
     const goals = '- [ ] a :: check: true\n- [ ] b :: check: true :: after: test "$(sysctl -n vm.loadavg | awk \'{print int($3)}\')" -lt 8\n- [ ] c :: check: true\n'
     const verdict = validatePlan(plan, goals, true)
     expect(JSON.stringify(verdict)).toContain("wait on the host's load")
+  })
+})
+
+describe('stats', () => {
+  const T0 = Date.parse('2026-11-20T10:00:00Z')
+  const at = (min: number) => new Date(T0 + min * MIN).toISOString()
+  const line = (min: number, o: Record<string, unknown>) => JSON.stringify({ ts: at(min), ...o })
+  const act = (min: number, state: string, run = T0) => line(min, { event: 'activity', run, state })
+
+  test('stats: activityOf names what the run is doing, a running turn first', () => {
+    const base = { on: true, phase: 'run' as const, busy: false, ships: [] as { state: ShipState }[] }
+    expect(activityOf({ ...base, busy: true, ships: [{ state: 'ci' }] })).toBe('building')
+    expect(activityOf({ ...base, ships: [{ state: 'ci' }, { state: 'merged' }] })).toBe('waiting-ci')
+    expect(activityOf({ ...base, waitCount: 1 })).toBe('waiting-after')
+    expect(activityOf({ ...base, finalCiSince: T0 })).toBe('waiting-after')
+    expect(activityOf({ ...base, ships: [{ state: 'merged' }, { state: 'held' }] })).toBe('idle-quiet')
+    expect(activityOf({ ...base, phase: 'standby' })).toBe('standby')
+    expect(activityOf({ ...base, phase: 'done' })).toBe('off')
+    expect(activityOf({ ...base, on: false })).toBe('off')
+  })
+
+  test('stats: an activity is logged on a change and once a heartbeat, never off from nothing', () => {
+    expect(activityDue(undefined, 'building', T0)).toBe(true)
+    expect(activityDue(undefined, 'off', T0)).toBe(false)
+    expect(activityDue({ state: 'building', at: T0 }, 'building', T0 + HEARTBEAT_MS - 1)).toBe(false)
+    expect(activityDue({ state: 'building', at: T0 }, 'building', T0 + HEARTBEAT_MS)).toBe(true)
+    expect(activityDue({ state: 'building', at: T0 }, 'idle-quiet', T0 + 1)).toBe(true)
+  })
+
+  test('stats: wall time is split by state, with merges, holds and deferrals counted in the run', () => {
+    const log = [
+      act(0, 'building'),
+      line(5, { event: 'start', goal: 'a' }),
+      act(20, 'waiting-ci'),
+      act(30, 'idle-quiet'),
+      act(40, 'building'),
+      line(50, { event: 'merged', run: T0, goal: 'a', pr: 1 }),
+      line(55, { event: 'blocked', goal: 'b' }),
+      line(56, { event: 'held', run: T0, goal: 'c' }),
+      line(57, { event: 'deferred', goal: 'd' }),
+      act(60, 'waiting-after'),
+      line(70, { event: 'run-done', reason: 'final check passed' }),
+      line(80, { event: 'merged', run: T0, goal: 'after the end' }),
+      'not json',
+    ]
+    const [r] = summarizeStats(log, T0 + 90 * MIN)
+    expect(r.ms).toEqual({ building: 40 * MIN, 'waiting-ci': 10 * MIN, 'waiting-after': 10 * MIN, standby: 0, 'idle-quiet': 10 * MIN })
+    expect([r.merges, r.holds, r.deferrals, r.open]).toEqual([1, 2, 1, false])
+    expect(Math.abs(idleShare(r) - 10 / 70) < 1e-9).toBe(true)
+    expect(statsText([r], 7)).toContain('idle-quiet 14.3%; 1 merged, 2 held, 1 deferred')
+  })
+
+  test('stats: a gap past two heartbeats is unobserved, a stop between events ends the state, runs are kept apart', () => {
+    const R2 = T0 + 500 * MIN
+    const log = [
+      act(0, 'idle-quiet'),
+      act(200, 'building'),
+      line(210, { event: 'run-stopped', reason: 'stopped by the person' }),
+      act(400, 'building'),
+      act(410, 'standby'),
+      act(500, 'building', R2),
+    ]
+    const runs = summarizeStats(log, T0 + 520 * MIN)
+    expect(runs.map(r => r.run)).toEqual([T0, R2])
+    const [first, second] = runs
+    expect(first.ms['idle-quiet']).toBe(MAX_GAP_MS)
+    // idle-quiet 0-200 (140 min unobserved), standby 410-500 until the next run (30 min unobserved).
+    expect(first.unobservedMs).toBe(200 * MIN - MAX_GAP_MS + (90 * MIN - MAX_GAP_MS))
+    expect(first.ms.standby).toBe(MAX_GAP_MS)
+    expect(first.open).toBe(false)
+    expect(first.ms.building).toBe(10 * MIN + 10 * MIN)
+    expect(second.open).toBe(true)
+    expect(second.ms.building).toBe(20 * MIN)
+  })
+
+  test('stats: days and its argument', () => {
+    const log = [act(0, 'building'), line(10, { event: 'run-done', reason: 'x' })]
+    expect(summarizeStats(log, T0 + 8 * 86_400_000, 7)).toEqual([])
+    expect(summarizeStats(log, T0 + 8 * 86_400_000, 9)).toHaveLength(1)
+    expect([statsDays([]), statsDays(['3']), statsDays(['-1']), statsDays(['x'])]).toEqual([7, 3, 7, 7])
+    expect(statsText([], 7)).toContain('No auto-claude run')
   })
 })

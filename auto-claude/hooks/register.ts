@@ -11,6 +11,8 @@ import { ensureLines, FILES, fetchRemote, LOCAL, out, readText, refOf, repoRoot,
 import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, WAIT_TOOL, WAIT_TOOL_ID, waitCall, guardRefusal, LOOP_EXCLUDES, LOOP_POLICY, loopView, MIN_CHECKS_TO_DEFER, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop, AGENT_PARKS, backgroundBusy, noteBackground } from './loop'
 import { capReached, causeOf, ciAction, diagnose, httpsOf, idleDue, inFlight, isWaiting, onlyWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, summary, unfinished, wakeDue } from './ship'
 import { markItem, nextPending, waitingItems } from './queue'
+import { activityDue, activityOf, statsDays, statsText, summarizeStats } from './stats'
+import type { Activity } from './stats'
 import type { QueueItem } from './queue'
 import { baseline, getIssue, isOpen, lineIssues, onHeld, onMerged, onStart, projectOf, readChanges, SYNC_MS } from './linear'
 import type { StallFacts } from './ship'
@@ -461,6 +463,7 @@ async function hold($: EngineInterface, r: AutoRecord, item: ShipItem, note: str
   await tell($, r, `held: ${item.goal.slice(0, 60)}${item.pr !== undefined ? ` (PR #${item.pr})` : ''}: ${note.slice(0, 160)}; going on with the next milestone`)
   const ids = lineIssues(item.goal)
   if (r.linear !== undefined && ids.length > 0) r = { ...r, linear: await onHeld($, r.linear, ids, `${item.pr !== undefined ? `PR #${item.pr}: ` : ''}${note}`) }
+  await appendLog($, r.root, { event: 'held', run: r.startedAt, goal: item.goal, ...(item.pr !== undefined ? { pr: item.pr } : {}), cause })
   // A held repair frees the stacked milestones; their deploys count toward the stop.
   return { r: { ...r, held: r.held + 1, holdCause: cause, holdStreak: streak, ...(item.repair === true ? { repair: undefined } : {}) }, item: { ...item, state: 'held', note } }
 }
@@ -602,6 +605,7 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
       ...(r.alwaysOn === true || continuesOf(r) ? { mergeTimes: [...recentMerges(r.mergeTimes, mergedAt), mergedAt] } : {}),
     }
     await tell($, next, `merged ${landed}: ${item.goal.slice(0, 80)}`)
+    await appendLog($, r.root, { event: 'merged', run: r.startedAt, goal: item.goal, ...(item.pr !== undefined ? { pr: item.pr } : {}) })
     // A labelled GitHub issue the milestone resolved is closed with the evidence.
     for (const n of lineGhIssues(item.goal)) {
       await run($, ['gh', 'issue', 'close', String(n), ...repo, '--comment', `[auto-claude] Resolved by ${landed}: ${item.goal.slice(0, 160)}`], r.root, 30_000)
@@ -1231,6 +1235,20 @@ async function standbyTick($: EngineInterface, r: AutoRecord): Promise<void> {
   if (woke) $.clock.after(100, () => void tickNow?.())
 }
 
+// What the run is doing, logged for /auto-claude stats on each change and at
+// least every stats.HEARTBEAT_MS. Kept in memory: after a reload the state is
+// logged again, which the summarizer reads as the same state going on.
+let lastActivity: { root: string; run: number; state: Activity; at: number } | undefined
+
+async function logActivity($: EngineInterface, r: AutoRecord): Promise<void> {
+  const now = await $.clock.now()
+  const state = activityOf({ on: r.on, phase: r.phase, busy: watch.turnActive || watch.judging || backgroundBusy(now), ships: r.ships, waitCount: r.waitCount, finalCiSince: r.finalCiSince })
+  const last = lastActivity?.root === r.root && lastActivity.run === r.startedAt ? lastActivity : undefined
+  if (!activityDue(last, state, now)) return
+  lastActivity = { root: r.root, run: r.startedAt, state, at: now }
+  await appendLog($, r.root, { event: 'activity', run: r.startedAt, state })
+}
+
 async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<void> {
   if (ticking || activeRoot === undefined) return
   ticking = true
@@ -1249,6 +1267,7 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
     }
     if (!got.on) return
     let r: AutoRecord = { ...got, beatAt: await $.clock.now() }
+    await logActivity($, r)
     if ((await readText($, FILES(r.root).stop)) !== undefined) {
       await stopRun($, r, '.claude/auto-claude.stop appeared')
       return
@@ -1880,6 +1899,13 @@ export const register: Register = (on, options) => {
       return { text: await startCommand($, rest.filter(w => w !== '--queue' && w !== '--always-on' && w !== '--once').join(' '), ciMode, buildOnly, alwaysOn, once) }
     }
     if (action === 'status') return { text: await statusText($) }
+    if (action === 'stats') {
+      const statsRoot = activeRoot ?? (await sessionRoot($)).root
+      if (statsRoot === undefined) return { text: 'Not in a repository.' }
+      const days = statsDays(rest)
+      const text = (await readText($, FILES(statsRoot).log)) ?? ''
+      return { text: statsText(summarizeStats(text.split('\n'), await $.clock.now(), days), days) }
+    }
     const root = activeRoot ?? (await sessionRoot($)).root
     const r = root === undefined ? undefined : await readRecord($, root)
     if (r === undefined) return { text: 'No auto-claude run in this repository.' }
@@ -1910,6 +1936,6 @@ export const register: Register = (on, options) => {
       if (r.on && r.sessionId === (await $.session.id())) return { text: 'The run is already on in this session.' }
       return { text: await takeOver($, r, 'resumed by the person') }
     }
-    return { text: `Usage: /${COMMAND} start [aim] | start --once [aim] | start --always-on [aim] | start --queue | standby | status | stop | resume` }
+    return { text: `Usage: /${COMMAND} start [aim] | start --once [aim] | start --always-on [aim] | start --queue | standby | status | stats [days] | stop | resume` }
   })
 }
