@@ -245,6 +245,35 @@ A run keeps the repository's Linear project in step, through the session's own `
 - **Signal for other mods.** Each tick writes `.claude/auto-claude.on` (`{ on, phase, at }`, git-excluded), so other mods can tell whether a run owns the repository.
 - `--queue` runs neither read nor write Linear.
 
+## Linear agent sessions (1.16.0)
+
+The MCP sync above writes as the person, so Linear's agent model is out of its reach: delegating an issue, the agent session with its plan and activities, and questions back to the person. From 1.16.0 the run also speaks to Linear as its own app, `auto-claude`. It goes through the `linear-agent` Cloudflare Worker in this repository (see `linear-agent/README.md`).
+
+- **Config.** `~/.claude/linear-agent.json` holds `{"url": "https://linear-agent.example", "token": "<SESSION_TOKEN>"}`.
+  - The bridge runs only when this file exists and the repository maps to a project in `~/.claude/linear.json`. Without it nothing changes.
+  - The token goes into curl's argv only, because `$` has no HTTP API. It never reaches `goal-loop.log`, a told message, `goals.md` or `auto-plan.md`, and any text the Worker sends back is scrubbed of it.
+- **Polling.** About once a minute, on the driver's tick and in standby, the driver reads `GET <url>/v1/events?since=<cursor>&project=<projectId>`. The cursor and each issue's session are kept in the run record (`agent`).
+- **A delegated issue** becomes a queue line, `- [ ] [AGT-12] <title>: what Linear AGT-12 asks (delegated to auto-claude) is resolved on this branch`, unless a line already names it.
+  - The line is built from the title alone, and the title is untrusted text. Comment markers and colons are removed until the line parses back with no check.
+- **Activities.** Each moment of a milestone whose line names a mapped issue is sent to that issue's session:
+  - a start is an `action`;
+  - a hold, a deferral, a diff-judge hold or a PR waiting on a person for protected files is an `elicitation`, with the reason and the PR link. Linear marks such a session as awaiting input;
+  - a landing is a `response`, and the PR is added to the session's external links.
+- **Plan.** Whenever `goals.md` changes, every mapped session whose issue still has a line gets its plan replaced with the queue's lines, using `planOf` from `hooks/agent.ts`:
+  - `[x]` is completed, `[!]` is canceled, the milestone being built is in progress, and the rest are pending;
+  - at most 100 entries; an empty queue sends `null`.
+- **The person's reply.**
+  - When the issue still has an open line, the reply becomes a follow-up line for that issue. It is built on the issue's branch while its milestone has one.
+  - Otherwise the reply becomes a line under `## Decisions` in `auto-plan.md`.
+  - Either way it is logged (`agent-prompt`).
+- **Stop.** A `stop` from the session marks the issue's pending line `[!]` (`stopped in Linear`).
+  - A milestone already shipping is held at the driver's next step.
+  - A milestone that is met while stopped is not shipped.
+  - The session gets a final `response`, and the stop is logged (`agent-stop`).
+- **Failures.** An unreachable Worker or a non-2xx answer is told once, when it starts, and retried on the next poll. It never holds or stops the run.
+
+`hooks/agent.ts` holds the pure part (`planOf`, `eventLines`, `activityFor`), pinned by `fixtures/linear-agent-v1`. `hooks/bridge.ts` holds the I/O.
+
 ## Autonomy and its limits
 
 - **Choices.** Claude decides every choice itself and records it under `## Decisions`. Irreversible steps (credentials, payment, deleting data, a new public release) go through `mcp__auto-claude__defer_goal` and are never taken.
