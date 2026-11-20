@@ -1,0 +1,756 @@
+{
+  "secret": "lin_wh_fixture_only_not_a_real_secret_000000000000",
+  "now": 1795000000000,
+  "writeTimeoutMs": 200,
+  "everyByte": {
+    "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+    "signatures": [
+      "aabe33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c",
+      "a9aa33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c",
+      "a9beaaff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c",
+      "a9be33aa95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c",
+      "a9be33ffaab8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c",
+      "a9be33ff95aad0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c",
+      "a9be33ff95b8aae2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c",
+      "a9be33ff95b8d0aab70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c",
+      "a9be33ff95b8d0e2aa0bc90f8f7f01beff64572db1e2c50a45a58b61834e821c",
+      "a9be33ff95b8d0e2b7aac90f8f7f01beff64572db1e2c50a45a58b61834e821c",
+      "a9be33ff95b8d0e2b70baa0f8f7f01beff64572db1e2c50a45a58b61834e821c",
+      "a9be33ff95b8d0e2b70bc9aa8f7f01beff64572db1e2c50a45a58b61834e821c",
+      "a9be33ff95b8d0e2b70bc90faa7f01beff64572db1e2c50a45a58b61834e821c",
+      "a9be33ff95b8d0e2b70bc90f8faa01beff64572db1e2c50a45a58b61834e821c",
+      "a9be33ff95b8d0e2b70bc90f8f7faabeff64572db1e2c50a45a58b61834e821c",
+      "a9be33ff95b8d0e2b70bc90f8f7f01aaff64572db1e2c50a45a58b61834e821c",
+      "a9be33ff95b8d0e2b70bc90f8f7f01beaa64572db1e2c50a45a58b61834e821c",
+      "a9be33ff95b8d0e2b70bc90f8f7f01beffaa572db1e2c50a45a58b61834e821c",
+      "a9be33ff95b8d0e2b70bc90f8f7f01beff64aa2db1e2c50a45a58b61834e821c",
+      "a9be33ff95b8d0e2b70bc90f8f7f01beff6457aab1e2c50a45a58b61834e821c",
+      "a9be33ff95b8d0e2b70bc90f8f7f01beff64572daae2c50a45a58b61834e821c",
+      "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1aac50a45a58b61834e821c",
+      "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2aa0a45a58b61834e821c",
+      "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c5aa45a58b61834e821c",
+      "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50aaaa58b61834e821c",
+      "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45aa8b61834e821c",
+      "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a5aa61834e821c",
+      "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58baa834e821c",
+      "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61aa4e821c",
+      "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b6183aa821c",
+      "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834eaa1c",
+      "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e82aa"
+    ]
+  },
+  "cases": [
+    {
+      "name": "created: 200, written once with key created:<session>, one thought for that session",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-created",
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [
+          "sess-1"
+        ],
+        "event": {
+          "action": "created",
+          "sessionId": "sess-1",
+          "issueId": "iss-12",
+          "identifier": "AGT-12",
+          "title": "Add a health endpoint",
+          "url": "https://linear.app/example/issue/AGT-12/add-a-health-endpoint",
+          "prompt": "<issue identifier=\"AGT-12\"><title>Add a health endpoint</title></issue>",
+          "key": "created:sess-1",
+          "deliveryId": "d-created"
+        }
+      },
+      "signature": "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c"
+    },
+    {
+      "name": "prompted: written with the text from agentActivity.content.body and key prompted:<activity id>, no thought",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"prompted\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999998000,\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}},\"agentActivity\":{\"id\":\"act-1\",\"agentSessionId\":\"sess-1\",\"createdAt\":\"2026-11-20T00:00:01.000Z\",\"updatedAt\":\"2026-11-20T00:00:01.000Z\",\"userId\":\"user-1\",\"user\":{\"id\":\"user-1\",\"name\":\"Person\"},\"content\":{\"type\":\"prompt\",\"body\":\"Use port 8080.\"}}}",
+      "delivery": "d-prompted",
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [],
+        "event": {
+          "action": "prompted",
+          "sessionId": "sess-1",
+          "issueId": "iss-12",
+          "identifier": "AGT-12",
+          "title": "Add a health endpoint",
+          "url": "https://linear.app/example/issue/AGT-12/add-a-health-endpoint",
+          "prompt": "Use port 8080.",
+          "key": "prompted:act-1"
+        }
+      },
+      "signature": "49a3ca7dc4d2af2dc25a4892470496b8f6509ccbc99a6e954df0a3239b3903ad"
+    },
+    {
+      "name": "prompted: falls back to agentActivity.body when content has no body",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"prompted\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999998000,\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}},\"agentActivity\":{\"id\":\"act-2\",\"agentSessionId\":\"sess-1\",\"createdAt\":\"2026-11-20T00:00:01.000Z\",\"updatedAt\":\"2026-11-20T00:00:01.000Z\",\"userId\":\"user-1\",\"user\":{\"id\":\"user-1\",\"name\":\"Person\"},\"content\":{\"type\":\"prompt\"},\"body\":\"Use port 9090.\"}}",
+      "delivery": "d-prompted-2",
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [],
+        "event": {
+          "action": "prompted",
+          "prompt": "Use port 9090.",
+          "key": "prompted:act-2"
+        }
+      },
+      "signature": "6ec2adcf3062d34b47c01b43b6c9afb0da693418d82b14b7e67260c7c604c524"
+    },
+    {
+      "name": "prompted: content.body wins over agentActivity.body when both are present",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"prompted\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999998000,\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}},\"agentActivity\":{\"id\":\"act-3\",\"agentSessionId\":\"sess-1\",\"createdAt\":\"2026-11-20T00:00:01.000Z\",\"updatedAt\":\"2026-11-20T00:00:01.000Z\",\"userId\":\"user-1\",\"user\":{\"id\":\"user-1\",\"name\":\"Person\"},\"content\":{\"type\":\"prompt\",\"body\":\"Use port 8080.\"},\"body\":\"stale text\"}}",
+      "delivery": "d-prompted-3",
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [],
+        "event": {
+          "prompt": "Use port 8080."
+        }
+      },
+      "signature": "6324168f21c8d76a8a4a51c2104901a23de5392a13cdc3f99f9ce73e2013c1b8"
+    },
+    {
+      "name": "prompted with the stop signal: written with signal stop even when the text is empty",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"prompted\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999998000,\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}},\"agentActivity\":{\"id\":\"act-4\",\"agentSessionId\":\"sess-1\",\"createdAt\":\"2026-11-20T00:00:01.000Z\",\"updatedAt\":\"2026-11-20T00:00:01.000Z\",\"userId\":\"user-1\",\"user\":{\"id\":\"user-1\",\"name\":\"Person\"},\"content\":{\"type\":\"prompt\",\"body\":\"\"},\"signal\":\"stop\"}}",
+      "delivery": "d-stop",
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [],
+        "event": {
+          "action": "prompted",
+          "sessionId": "sess-1",
+          "issueId": "iss-12",
+          "identifier": "AGT-12",
+          "signal": "stop",
+          "key": "prompted:act-4"
+        }
+      },
+      "signature": "041a13ebe8b40de51a0717cd54a32fa83db74a783ae2df2d76635c07ba8df04a"
+    },
+    {
+      "name": "prompted with the stop signal and text: keeps both the signal and the text",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"prompted\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999998000,\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}},\"agentActivity\":{\"id\":\"act-6\",\"agentSessionId\":\"sess-1\",\"createdAt\":\"2026-11-20T00:00:01.000Z\",\"updatedAt\":\"2026-11-20T00:00:01.000Z\",\"userId\":\"user-1\",\"user\":{\"id\":\"user-1\",\"name\":\"Person\"},\"content\":{\"type\":\"prompt\",\"body\":\"please stop\"},\"signal\":\"stop\"}}",
+      "delivery": "d-stop-2",
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [],
+        "event": {
+          "signal": "stop",
+          "prompt": "please stop",
+          "key": "prompted:act-6"
+        }
+      },
+      "signature": "5053be4774b6ff11062c1212b05b119d07765861f7e5a3a9cfa05641f9328d7b"
+    },
+    {
+      "name": "prompted with another signal: the signal is carried as it is",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"prompted\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999998000,\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}},\"agentActivity\":{\"id\":\"act-7\",\"agentSessionId\":\"sess-1\",\"createdAt\":\"2026-11-20T00:00:01.000Z\",\"updatedAt\":\"2026-11-20T00:00:01.000Z\",\"userId\":\"user-1\",\"user\":{\"id\":\"user-1\",\"name\":\"Person\"},\"content\":{\"type\":\"prompt\",\"body\":\"go on\"},\"signal\":\"continue\"}}",
+      "delivery": "d-continue",
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [],
+        "event": {
+          "signal": "continue",
+          "prompt": "go on"
+        }
+      },
+      "signature": "58af077e5bd9c73c13a935e23eccf95ce21100acd0648587d2d98b4dcb356369"
+    },
+    {
+      "name": "prompted without an activity id: keyed by the delivery id",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"prompted\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999998000,\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}},\"agentActivity\":{\"agentSessionId\":\"sess-1\",\"createdAt\":\"2026-11-20T00:00:01.000Z\",\"updatedAt\":\"2026-11-20T00:00:01.000Z\",\"userId\":\"user-1\",\"user\":{\"id\":\"user-1\",\"name\":\"Person\"},\"content\":{\"type\":\"prompt\",\"body\":\"again\"}}}",
+      "delivery": "d-no-activity-id",
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [],
+        "event": {
+          "prompt": "again",
+          "key": "delivery:d-no-activity-id"
+        }
+      },
+      "signature": "d1ba103564a70871679b61ce7b05c6b5611eb402e4c2a2b6d4d0b9e44d3c1c5d"
+    },
+    {
+      "name": "type is not AgentSessionEvent but the body is a session event: still written",
+      "raw": "{\"type\":\"AgentSession\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-type",
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [
+          "sess-1"
+        ],
+        "event": {
+          "sessionId": "sess-1",
+          "key": "created:sess-1"
+        }
+      },
+      "signature": "4dbc7919bab2ae8d2143d934d1661cfabb9fbf909e202ff968b357ca85262f79"
+    },
+    {
+      "name": "session with issueId but no issue object: written with that issueId",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":null}}",
+      "delivery": "d-issue-id",
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [
+          "sess-1"
+        ],
+        "event": {
+          "sessionId": "sess-1",
+          "issueId": "iss-12"
+        }
+      },
+      "signature": "139a37d634bcb5b8e902dc313fdd9bcf42afdf611e7ec4367d7da47b5cfc7a94"
+    },
+    {
+      "name": "non-ASCII title and context, signed over the UTF-8 bytes: accepted and kept exactly",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>헬스 엔드포인트 추가 ✅</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"헬스 엔드포인트 추가 ✅ café\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-utf8",
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [
+          "sess-1"
+        ],
+        "event": {
+          "title": "헬스 엔드포인트 추가 ✅ café",
+          "prompt": "<issue identifier=\"AGT-12\"><title>헬스 엔드포인트 추가 ✅</title></issue>"
+        }
+      },
+      "signature": "666b3e14b99a4a4141da6a3c9e47ee62edd7a038992b2ada2cfec87ec5eebe17"
+    },
+    {
+      "name": "prompted on a session with no issue: 200, ignored",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"prompted\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999998000,\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":null,\"issue\":null},\"agentActivity\":{\"id\":\"act-8\",\"agentSessionId\":\"sess-1\",\"createdAt\":\"2026-11-20T00:00:01.000Z\",\"updatedAt\":\"2026-11-20T00:00:01.000Z\",\"userId\":\"user-1\",\"user\":{\"id\":\"user-1\",\"name\":\"Person\"},\"content\":{\"type\":\"prompt\",\"body\":\"x\"}}}",
+      "delivery": "d-prompt-noissue",
+      "expect": {
+        "status": 200,
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "3128d68e60ea63db1a16dd9f5ccb77f619f1ec0b2b5e1665abf50ccd7bfcedff"
+    },
+    {
+      "name": "missing Linear-Delivery on created: still written",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": null,
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [
+          "sess-1"
+        ],
+        "event": {
+          "key": "created:sess-1"
+        }
+      },
+      "signature": "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c"
+    },
+    {
+      "name": "duplicate (the write reports the key already queued): 200, no thought",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-created",
+      "enqueue": "duplicate",
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": []
+      },
+      "signature": "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c"
+    },
+    {
+      "name": "created whose write never finishes: 503 once the write timeout passes, no thought",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-hang",
+      "enqueue": "hang",
+      "expect": {
+        "status": 503,
+        "enqueued": 1,
+        "thoughts": [],
+        "within": 1700
+      },
+      "signature": "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c"
+    },
+    {
+      "name": "prompted whose write never finishes: 503 once the write timeout passes",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"prompted\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999998000,\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}},\"agentActivity\":{\"id\":\"act-5\",\"agentSessionId\":\"sess-1\",\"createdAt\":\"2026-11-20T00:00:01.000Z\",\"updatedAt\":\"2026-11-20T00:00:01.000Z\",\"userId\":\"user-1\",\"user\":{\"id\":\"user-1\",\"name\":\"Person\"},\"content\":{\"type\":\"prompt\",\"body\":\"x\"}}}",
+      "delivery": "d-hang-2",
+      "enqueue": "hang",
+      "expect": {
+        "status": 503,
+        "enqueued": 1,
+        "thoughts": [],
+        "within": 1700
+      },
+      "signature": "f2b0539188b3d73c35b716dcf220b7ad85c67f769984a39ada1865e0ed3f5292"
+    },
+    {
+      "name": "a write that takes 50 ms (under the timeout) is waited for: 200 and the thought",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-slow",
+      "enqueue": "slow",
+      "delayMs": 50,
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [
+          "sess-1"
+        ]
+      },
+      "signature": "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c"
+    },
+    {
+      "name": "without writeTimeoutMs a write that takes 2.5 s is still waited for",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-slow-2",
+      "enqueue": "slow",
+      "delayMs": 2500,
+      "omitTimeout": true,
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [
+          "sess-1"
+        ],
+        "within": 3000
+      },
+      "signature": "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c"
+    },
+    {
+      "name": "prompted whose write fails: 503 so Linear retries",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"prompted\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999998000,\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}},\"agentActivity\":{\"id\":\"act-9\",\"agentSessionId\":\"sess-1\",\"createdAt\":\"2026-11-20T00:00:01.000Z\",\"updatedAt\":\"2026-11-20T00:00:01.000Z\",\"userId\":\"user-1\",\"user\":{\"id\":\"user-1\",\"name\":\"Person\"},\"content\":{\"type\":\"prompt\",\"body\":\"x\"}}}",
+      "delivery": "d-fail-p",
+      "enqueue": "reject",
+      "expect": {
+        "status": 503,
+        "enqueued": 1,
+        "thoughts": []
+      },
+      "signature": "ca8dfec57cfa877601ab712456c18945c27e2d21e4fe9580675d7e58021400df"
+    },
+    {
+      "name": "a stop whose write fails: 503 so Linear retries",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"prompted\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999998000,\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}},\"agentActivity\":{\"id\":\"act-10\",\"agentSessionId\":\"sess-1\",\"createdAt\":\"2026-11-20T00:00:01.000Z\",\"updatedAt\":\"2026-11-20T00:00:01.000Z\",\"userId\":\"user-1\",\"user\":{\"id\":\"user-1\",\"name\":\"Person\"},\"content\":{\"type\":\"prompt\",\"body\":\"\"},\"signal\":\"stop\"}}",
+      "delivery": "d-fail-stop",
+      "enqueue": "reject",
+      "expect": {
+        "status": 503,
+        "enqueued": 1,
+        "thoughts": []
+      },
+      "signature": "d8f7517f4296f65da14cd718a76c36a51fe43d47ebf07386fa6ff6f89ccc7ba6"
+    },
+    {
+      "name": "created whose write fails: 503 so Linear retries, no thought",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-fail",
+      "enqueue": "reject",
+      "expect": {
+        "status": 503,
+        "enqueued": 1,
+        "thoughts": []
+      },
+      "signature": "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c"
+    },
+    {
+      "name": "the retry after that 503 (same delivery, the write now succeeds) is written and answered 200",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-fail",
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [
+          "sess-1"
+        ]
+      },
+      "signature": "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c"
+    },
+    {
+      "name": "created whose thought never finishes: the response does not wait for it",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-thought-hang",
+      "thought": "hang",
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [
+          "sess-1"
+        ],
+        "within": 300
+      },
+      "signature": "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c"
+    },
+    {
+      "name": "without writeTimeoutMs a hung write still gives 503 within about 3 s",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-default-timeout",
+      "enqueue": "hang",
+      "omitTimeout": true,
+      "expect": {
+        "status": 503,
+        "enqueued": 1,
+        "thoughts": [],
+        "within": 3800
+      },
+      "signature": "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c"
+    },
+    {
+      "name": "created whose thought fails: still 200 and written; the deferred work settles without rejecting",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-thought-fail",
+      "thought": "reject",
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [
+          "sess-1"
+        ]
+      },
+      "signature": "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c"
+    },
+    {
+      "name": "signature wrong in its first byte: 401",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "signature": "aabe33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c",
+      "delivery": "d-x1",
+      "expect": {
+        "status": 401,
+        "reason": "signature",
+        "enqueued": 0,
+        "thoughts": []
+      }
+    },
+    {
+      "name": "signature wrong in a middle byte: 401",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "signature": "a9be33ff95b8d0e2b70bc90f8f7f01beaa64572db1e2c50a45a58b61834e821c",
+      "delivery": "d-x1b",
+      "expect": {
+        "status": 401,
+        "reason": "signature",
+        "enqueued": 0,
+        "thoughts": []
+      }
+    },
+    {
+      "name": "signature wrong in its last byte: 401",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "signature": "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e82aa",
+      "delivery": "d-x1c",
+      "expect": {
+        "status": 401,
+        "reason": "signature",
+        "enqueued": 0,
+        "thoughts": []
+      }
+    },
+    {
+      "name": "wrongly signed body that is not JSON: 401 signature, not 400",
+      "raw": "{\"action\":\"created\",",
+      "signature": "0000000000000000000000000000000000000000000000000000000000000000",
+      "delivery": "d-x0",
+      "expect": {
+        "status": 401,
+        "reason": "signature",
+        "enqueued": 0,
+        "thoughts": []
+      }
+    },
+    {
+      "name": "missing signature: 401",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "signature": null,
+      "delivery": "d-x2",
+      "expect": {
+        "status": 401,
+        "reason": "signature",
+        "enqueued": 0,
+        "thoughts": []
+      }
+    },
+    {
+      "name": "non-hex signature: 401 without throwing",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "signature": "zz",
+      "delivery": "d-x3",
+      "expect": {
+        "status": 401,
+        "reason": "signature",
+        "enqueued": 0,
+        "thoughts": []
+      }
+    },
+    {
+      "name": "short hex signature: 401 without throwing",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "signature": "a9be33ff95b8d0e2b70bc90f8f7f01be",
+      "delivery": "d-x4",
+      "expect": {
+        "status": 401,
+        "reason": "signature",
+        "enqueued": 0,
+        "thoughts": []
+      }
+    },
+    {
+      "name": "signature over a re-serialized body does not match the raw bytes: 401",
+      "raw": "{\n  \"type\": \"AgentSessionEvent\",\n  \"action\": \"created\",\n  \"createdAt\": \"2026-11-20T00:00:00.000Z\",\n  \"organizationId\": \"org-1\",\n  \"oauthClientId\": \"client-1\",\n  \"appUserId\": \"app-user-1\",\n  \"webhookId\": \"wh-1\",\n  \"webhookTimestamp\": 1794999999000,\n  \"promptContext\": \"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\n  \"agentSession\": {\n    \"id\": \"sess-1\",\n    \"appUserId\": \"app-user-1\",\n    \"organizationId\": \"org-1\",\n    \"status\": \"pending\",\n    \"type\": \"commentThread\",\n    \"createdAt\": \"2026-11-20T00:00:00.000Z\",\n    \"updatedAt\": \"2026-11-20T00:00:00.000Z\",\n    \"issueId\": \"iss-12\",\n    \"issue\": {\n      \"id\": \"iss-12\",\n      \"identifier\": \"AGT-12\",\n      \"title\": \"Add a health endpoint\",\n      \"url\": \"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\n      \"description\": \"GET /health answers 200.\",\n      \"teamId\": \"team-agt\",\n      \"team\": {\n        \"id\": \"team-agt\",\n        \"key\": \"AGT\",\n        \"name\": \"Agentic Products\"\n      }\n    }\n  }\n}",
+      "signature": "a9be33ff95b8d0e2b70bc90f8f7f01beff64572db1e2c50a45a58b61834e821c",
+      "delivery": "d-x5",
+      "expect": {
+        "status": 401,
+        "reason": "signature",
+        "enqueued": 0,
+        "thoughts": []
+      }
+    },
+    {
+      "name": "stale timestamp (61 s old), signed: 401",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999939000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-x6",
+      "expect": {
+        "status": 401,
+        "reason": "timestamp",
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "17530034b272ec16a8219d179c0b0719d6b24183f8137613396e19a5a3adbd97"
+    },
+    {
+      "name": "future timestamp (61 s ahead), signed: 401",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1795000061000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-x7",
+      "expect": {
+        "status": 401,
+        "reason": "timestamp",
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "0ce54f916ea70458e95ced05e489a40a8d13fe6222f336740c1160e2de97ad97"
+    },
+    {
+      "name": "timestamp exactly 60 000 ms old is accepted",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999940000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-x8a",
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [
+          "sess-1"
+        ]
+      },
+      "signature": "6c8caa95d101661fc3be49f11c4e5667de75bd44e9d91c3257ea3ba4a55ad6d2"
+    },
+    {
+      "name": "timestamp 60 001 ms old: 401",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999939999,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-x8b",
+      "expect": {
+        "status": 401,
+        "reason": "timestamp",
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "88760e1a8e7480a1d110af9beec39d790b5730de93abbead004a62fa2ba668c7"
+    },
+    {
+      "name": "timestamp 60 001 ms ahead: 401",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1795000060001,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-x8c",
+      "expect": {
+        "status": 401,
+        "reason": "timestamp",
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "b1c2305fc7c6dab66f626bd064fc992fb8b485840deb24b00a54e620579e273c"
+    },
+    {
+      "name": "timestamp 59 s old is accepted",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999941000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-x8",
+      "expect": {
+        "status": 200,
+        "enqueued": 1,
+        "thoughts": [
+          "sess-1"
+        ]
+      },
+      "signature": "378d729290b32a4932a51644013b83c970b2f7097882eb638ab2df62cef8c6e2"
+    },
+    {
+      "name": "stale and wrongly signed: the signature is checked first",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999939000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "signature": "0000000000000000000000000000000000000000000000000000000000000000",
+      "delivery": "d-x9",
+      "expect": {
+        "status": 401,
+        "reason": "signature",
+        "enqueued": 0,
+        "thoughts": []
+      }
+    },
+    {
+      "name": "signed body that is not JSON: 400",
+      "raw": "{\"action\":\"created\",",
+      "delivery": "d-x10",
+      "expect": {
+        "status": 400,
+        "reason": "json",
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "bad6808ae9db748f145ca35bfb0f6e731f7372abcde60d97a42c92e0968ab31a"
+    },
+    {
+      "name": "signed JSON without webhookTimestamp: 401",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-x11",
+      "expect": {
+        "status": 401,
+        "reason": "timestamp",
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "d70d00a253eeb81627bec4750ab96899560b772d39d59cbf91f51f739171e4c0"
+    },
+    {
+      "name": "signed JSON whose webhookTimestamp is a numeric string: 401",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":\"1794999999000\",\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-x12",
+      "expect": {
+        "status": 401,
+        "reason": "timestamp",
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "7e42164f997d07f7957e72b1c960c7bd042ed30e7f822e53c7b61f681e8baa22"
+    },
+    {
+      "name": "signed JSON null: 401 timestamp without throwing",
+      "raw": "null",
+      "delivery": "d-scalar-null",
+      "expect": {
+        "status": 401,
+        "reason": "timestamp",
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "4c6cd9d924a8b77c907bb0c1ae1a925ca188fe17fd9ed2d63e3ef7349cd4246f"
+    },
+    {
+      "name": "signed JSON 123: 401 timestamp without throwing",
+      "raw": "123",
+      "delivery": "d-scalar-123",
+      "expect": {
+        "status": 401,
+        "reason": "timestamp",
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "007bf8e749d0a7ad910102f431e3fe4ed8e2e37c2c209ed90f1b243ad9cd6ec5"
+    },
+    {
+      "name": "signed JSON []: 401 timestamp without throwing",
+      "raw": "[]",
+      "delivery": "d-scalar-[]",
+      "expect": {
+        "status": 401,
+        "reason": "timestamp",
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "ad652d1e0d4f3ec6621726ee351d5cf1d9bf3975f993db14132202bd48c4791b"
+    },
+    {
+      "name": "signed JSON \"text\": 401 timestamp without throwing",
+      "raw": "\"text\"",
+      "delivery": "d-scalar-\"text\"",
+      "expect": {
+        "status": 401,
+        "reason": "timestamp",
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "c5ee1f927a949dca8af97f85dcf8020a0e5b6e0d299d37918b722e96cb9076f6"
+    },
+    {
+      "name": "inbox notification: 200, ignored",
+      "raw": "{\"type\":\"AppUserNotification\",\"action\":\"issueMention\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999500,\"notification\":{\"id\":\"n-1\",\"type\":\"issueMention\"}}",
+      "delivery": "d-n",
+      "expect": {
+        "status": 200,
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "ecf79061724a54c3ddae6f3d59509ac01c726db8364123698379687bdb287458"
+    },
+    {
+      "name": "permission change: 200, ignored",
+      "raw": "{\"type\":\"PermissionChange\",\"action\":\"teamAccessChanged\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999500,\"addedTeamIds\":[\"team-agt\"],\"removedTeamIds\":[],\"canAccessAllPublicTeams\":false}",
+      "delivery": "d-p",
+      "expect": {
+        "status": 200,
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "49d76fe1d218b414d11b34a05e6f6028c341d53aae59c4115c1a782f5f38ff0f"
+    },
+    {
+      "name": "OAuth app revoked: 200, ignored",
+      "raw": "{\"type\":\"OAuthApp\",\"action\":\"revoked\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999500}",
+      "delivery": "d-o",
+      "expect": {
+        "status": 200,
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "9d2494e1db867c27d3aee18b1d303cdd7091a8ba9c31954916f2c5d5d3b05803"
+    },
+    {
+      "name": "agent session event with an unknown action: 200, ignored",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"archived\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-u",
+      "expect": {
+        "status": 200,
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "db0fe53466751e450919c7395b073902b0bb0db1b107047145f59430e4fd6613"
+    },
+    {
+      "name": "agent session without an id: 200, ignored",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":\"iss-12\",\"issue\":{\"id\":\"iss-12\",\"identifier\":\"AGT-12\",\"title\":\"Add a health endpoint\",\"url\":\"https://linear.app/example/issue/AGT-12/add-a-health-endpoint\",\"description\":\"GET /health answers 200.\",\"teamId\":\"team-agt\",\"team\":{\"id\":\"team-agt\",\"key\":\"AGT\",\"name\":\"Agentic Products\"}}}}",
+      "delivery": "d-v",
+      "expect": {
+        "status": 200,
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "91c99e8b607fa44f359e4a4c137bb28aa539196d14d285f5a7f491b3aaeed706"
+    },
+    {
+      "name": "agent session with no issue at all: 200, ignored",
+      "raw": "{\"type\":\"AgentSessionEvent\",\"action\":\"created\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"organizationId\":\"org-1\",\"oauthClientId\":\"client-1\",\"appUserId\":\"app-user-1\",\"webhookId\":\"wh-1\",\"webhookTimestamp\":1794999999000,\"promptContext\":\"<issue identifier=\\\"AGT-12\\\"><title>Add a health endpoint</title></issue>\",\"agentSession\":{\"id\":\"sess-1\",\"appUserId\":\"app-user-1\",\"organizationId\":\"org-1\",\"status\":\"pending\",\"type\":\"commentThread\",\"createdAt\":\"2026-11-20T00:00:00.000Z\",\"updatedAt\":\"2026-11-20T00:00:00.000Z\",\"issueId\":null,\"issue\":null}}",
+      "delivery": "d-w",
+      "expect": {
+        "status": 200,
+        "enqueued": 0,
+        "thoughts": []
+      },
+      "signature": "bf7e8e06af91c002a8f0eed79accf2101873fc8e28e64c930f9f34801417ca5b"
+    }
+  ]
+}

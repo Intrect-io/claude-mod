@@ -1,0 +1,757 @@
+{
+  "fingerprint": [
+    {
+      "kind": "held",
+      "key": "wire the cron",
+      "expect": "auto-claude:fp=held:0b54ad7f0675"
+    },
+    {
+      "kind": "ci-red",
+      "key": "CI",
+      "expect": "auto-claude:fp=ci-red:fe8ee15bb86d"
+    },
+    {
+      "kind": "ci-red",
+      "key": "Deploy",
+      "expect": "auto-claude:fp=ci-red:4c236daafb44"
+    }
+  ],
+  "issueCandidates": [
+    {
+      "name": "a held milestone without an issue and a workflow red on two polls become candidates, held first",
+      "input": {
+        "held": [
+          {
+            "goal": "wire the cron",
+            "reason": "blocked",
+            "issues": []
+          },
+          {
+            "goal": "[AGT-12] add the bridge",
+            "reason": "blocked",
+            "issues": [
+              "AGT-12"
+            ]
+          }
+        ],
+        "ciRed": [
+          {
+            "workflow": "CI",
+            "sha": "abc123",
+            "polls": 2
+          },
+          {
+            "workflow": "Deploy",
+            "sha": "abc123",
+            "polls": 1
+          }
+        ],
+        "existing": [],
+        "createdToday": 0,
+        "cap": 3
+      },
+      "expect": [
+        {
+          "kind": "held",
+          "key": "wire the cron"
+        },
+        {
+          "kind": "ci-red",
+          "key": "CI"
+        }
+      ]
+    },
+    {
+      "name": "a held fingerprint already on an issue is not created again",
+      "input": {
+        "held": [
+          {
+            "goal": "wire the cron",
+            "reason": "blocked",
+            "issues": []
+          }
+        ],
+        "ciRed": [
+          {
+            "workflow": "CI",
+            "sha": "abc123",
+            "polls": 3
+          }
+        ],
+        "existing": [
+          "auto-claude:fp=held:0b54ad7f0675"
+        ],
+        "createdToday": 0,
+        "cap": 3
+      },
+      "expect": [
+        {
+          "kind": "ci-red",
+          "key": "CI"
+        }
+      ]
+    },
+    {
+      "name": "a ci-red fingerprint already on an issue is not created again",
+      "input": {
+        "held": [],
+        "ciRed": [
+          {
+            "workflow": "CI",
+            "sha": "abc123",
+            "polls": 3
+          }
+        ],
+        "existing": [
+          "auto-claude:fp=ci-red:fe8ee15bb86d"
+        ],
+        "createdToday": 0,
+        "cap": 3
+      },
+      "expect": []
+    },
+    {
+      "name": "the same workflow red twice in one call is one candidate",
+      "input": {
+        "held": [],
+        "ciRed": [
+          {
+            "workflow": "CI",
+            "sha": "a",
+            "polls": 2
+          },
+          {
+            "workflow": "CI",
+            "sha": "b",
+            "polls": 2
+          }
+        ],
+        "existing": [],
+        "createdToday": 0,
+        "cap": 3
+      },
+      "expect": [
+        {
+          "kind": "ci-red",
+          "key": "CI"
+        }
+      ]
+    },
+    {
+      "name": "the same goal held twice is one candidate",
+      "input": {
+        "held": [
+          {
+            "goal": "wire the cron",
+            "reason": "first",
+            "issues": []
+          },
+          {
+            "goal": "wire the cron",
+            "reason": "second",
+            "issues": []
+          }
+        ],
+        "ciRed": [],
+        "existing": [],
+        "createdToday": 0,
+        "cap": 3
+      },
+      "expect": [
+        {
+          "kind": "held",
+          "key": "wire the cron"
+        }
+      ]
+    },
+    {
+      "name": "goals that share a long prefix are keyed by the whole goal",
+      "input": {
+        "held": [
+          {
+            "goal": "wire the cron for the nightly backfill job, version A of the plan",
+            "reason": "blocked",
+            "issues": []
+          },
+          {
+            "goal": "wire the cron for the nightly backfill job, version B of the plan",
+            "reason": "blocked",
+            "issues": []
+          }
+        ],
+        "ciRed": [],
+        "existing": [],
+        "createdToday": 0,
+        "cap": 3
+      },
+      "expect": [
+        {
+          "kind": "held",
+          "key": "wire the cron for the nightly backfill job, version A of the plan"
+        },
+        {
+          "kind": "held",
+          "key": "wire the cron for the nightly backfill job, version B of the plan"
+        }
+      ]
+    },
+    {
+      "name": "the daily cap counts what was already created today",
+      "input": {
+        "held": [
+          {
+            "goal": "wire the cron",
+            "reason": "blocked",
+            "issues": []
+          }
+        ],
+        "ciRed": [
+          {
+            "workflow": "CI",
+            "sha": "abc123",
+            "polls": 2
+          }
+        ],
+        "existing": [],
+        "createdToday": 2,
+        "cap": 3
+      },
+      "expect": [
+        {
+          "kind": "held",
+          "key": "wire the cron"
+        }
+      ]
+    },
+    {
+      "name": "candidates skipped as existing do not use up the cap",
+      "input": {
+        "held": [
+          {
+            "goal": "a",
+            "reason": "blocked",
+            "issues": []
+          },
+          {
+            "goal": "b",
+            "reason": "blocked",
+            "issues": []
+          }
+        ],
+        "ciRed": [
+          {
+            "workflow": "CI",
+            "sha": "abc123",
+            "polls": 2
+          }
+        ],
+        "existing": [
+          "auto-claude:fp=held:ca978112ca1b",
+          "auto-claude:fp=held:3e23e8160039"
+        ],
+        "createdToday": 0,
+        "cap": 1
+      },
+      "expect": [
+        {
+          "kind": "ci-red",
+          "key": "CI"
+        }
+      ]
+    },
+    {
+      "name": "nothing once the cap is reached",
+      "input": {
+        "held": [
+          {
+            "goal": "wire the cron",
+            "reason": "blocked",
+            "issues": []
+          }
+        ],
+        "ciRed": [],
+        "existing": [],
+        "createdToday": 3,
+        "cap": 3
+      },
+      "expect": []
+    },
+    {
+      "name": "a very long goal still gets a title of at most 100 characters",
+      "input": {
+        "held": [
+          {
+            "goal": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "reason": "blocked",
+            "issues": []
+          }
+        ],
+        "ciRed": [],
+        "existing": [],
+        "createdToday": 0,
+        "cap": 1
+      },
+      "expect": [
+        {
+          "kind": "held",
+          "key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "name": "a very long workflow name still gets a title of at most 100 characters",
+      "input": {
+        "held": [],
+        "ciRed": [
+          {
+            "workflow": "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww",
+            "sha": "abc123",
+            "polls": 2
+          }
+        ],
+        "existing": [],
+        "createdToday": 0,
+        "cap": 1
+      },
+      "expect": [
+        {
+          "kind": "ci-red",
+          "key": "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww"
+        }
+      ]
+    },
+    {
+      "name": "held candidates keep input order, so the cap keeps the first",
+      "input": {
+        "held": [
+          {
+            "goal": "zeta step",
+            "reason": "blocked",
+            "issues": []
+          },
+          {
+            "goal": "alpha step",
+            "reason": "blocked",
+            "issues": []
+          }
+        ],
+        "ciRed": [],
+        "existing": [],
+        "createdToday": 0,
+        "cap": 1
+      },
+      "expect": [
+        {
+          "kind": "held",
+          "key": "zeta step"
+        }
+      ]
+    },
+    {
+      "name": "held candidates keep input order without a cap in the way",
+      "input": {
+        "held": [
+          {
+            "goal": "zeta step",
+            "reason": "blocked",
+            "issues": []
+          },
+          {
+            "goal": "alpha step",
+            "reason": "blocked",
+            "issues": []
+          }
+        ],
+        "ciRed": [],
+        "existing": [],
+        "createdToday": 0,
+        "cap": 3
+      },
+      "expect": [
+        {
+          "kind": "held",
+          "key": "zeta step"
+        },
+        {
+          "kind": "held",
+          "key": "alpha step"
+        }
+      ]
+    },
+    {
+      "name": "a held goal and a workflow with the same text are different candidates",
+      "input": {
+        "held": [
+          {
+            "goal": "CI",
+            "reason": "blocked",
+            "issues": []
+          }
+        ],
+        "ciRed": [
+          {
+            "workflow": "CI",
+            "sha": "abc123",
+            "polls": 2
+          }
+        ],
+        "existing": [],
+        "createdToday": 0,
+        "cap": 3
+      },
+      "expect": [
+        {
+          "kind": "held",
+          "key": "CI"
+        },
+        {
+          "kind": "ci-red",
+          "key": "CI"
+        }
+      ]
+    },
+    {
+      "name": "a held milestone whose line names an issue is not a candidate, whatever its goal text",
+      "input": {
+        "held": [
+          {
+            "goal": "add the bridge",
+            "reason": "blocked",
+            "issues": [
+              "AGT-12"
+            ]
+          }
+        ],
+        "ciRed": [],
+        "existing": [],
+        "createdToday": 0,
+        "cap": 3
+      },
+      "expect": []
+    },
+    {
+      "name": "goals whose titles cut to the same 100 characters are still two candidates",
+      "input": {
+        "held": [
+          {
+            "goal": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx A",
+            "reason": "blocked",
+            "issues": []
+          },
+          {
+            "goal": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx B",
+            "reason": "blocked",
+            "issues": []
+          }
+        ],
+        "ciRed": [],
+        "existing": [],
+        "createdToday": 0,
+        "cap": 3
+      },
+      "expect": [
+        {
+          "kind": "held",
+          "key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx A"
+        },
+        {
+          "kind": "held",
+          "key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx B"
+        }
+      ]
+    },
+    {
+      "name": "the key is the goal exactly, trailing space and leading tag included",
+      "input": {
+        "held": [
+          {
+            "goal": "wire the cron ",
+            "reason": "blocked",
+            "issues": []
+          },
+          {
+            "goal": "[AGT-3] wire the cron",
+            "reason": "blocked",
+            "issues": []
+          }
+        ],
+        "ciRed": [],
+        "existing": [
+          "auto-claude:fp=held:0b54ad7f0675"
+        ],
+        "createdToday": 0,
+        "cap": 3
+      },
+      "expect": [
+        {
+          "kind": "held",
+          "key": "wire the cron "
+        },
+        {
+          "kind": "held",
+          "key": "[AGT-3] wire the cron"
+        }
+      ]
+    },
+    {
+      "name": "existing is compared on the whole fingerprint, kind included",
+      "input": {
+        "held": [],
+        "ciRed": [
+          {
+            "workflow": "CI",
+            "sha": "abc123",
+            "polls": 2
+          }
+        ],
+        "existing": [
+          "auto-claude:fp=held:fe8ee15bb86d"
+        ],
+        "createdToday": 0,
+        "cap": 3
+      },
+      "expect": [
+        {
+          "kind": "ci-red",
+          "key": "CI"
+        }
+      ]
+    }
+  ],
+  "decomposeTargets": [
+    {
+      "name": "open lines tagged with nothing or only with the session's issue are targets; another issue's line, done and blocked lines are not",
+      "queue": "- [x] done thing :: check: true\n- [ ] [AGT-5] first step :: check: true\n- [ ] second step :: check: true\n- [ ] [AGT-7] someone else's issue :: check: true\n- [!] blocked step :: check: true\n",
+      "session": "AGT-5",
+      "expect": [
+        {
+          "line": 1,
+          "title": "first step"
+        },
+        {
+          "line": 2,
+          "title": "second step"
+        }
+      ]
+    },
+    {
+      "name": "line is the raw line number, counting headings and blank lines",
+      "queue": "# Goals\n\n- [ ] [AGT-5] first step :: check: true\n- [ ] second step :: check: true\n",
+      "session": "AGT-5",
+      "expect": [
+        {
+          "line": 2,
+          "title": "first step"
+        },
+        {
+          "line": 3,
+          "title": "second step"
+        }
+      ]
+    },
+    {
+      "name": "a line tagged with the session and another issue is not a target",
+      "queue": "- [ ] [AGT-5][AGT-7] shared step :: check: true\n- [ ] a :: check: true\n- [ ] b :: check: true\n",
+      "session": "AGT-5",
+      "expect": [
+        {
+          "line": 1,
+          "title": "a"
+        },
+        {
+          "line": 2,
+          "title": "b"
+        }
+      ]
+    },
+    {
+      "name": "lines tagged with other issues are not targets even when the session's tag appears nowhere",
+      "queue": "- [ ] [AGT-7] other :: check: true\n- [ ] [AGT-8] other2 :: check: true\n- [ ] mine :: check: true\n",
+      "session": "AGT-5",
+      "expect": []
+    },
+    {
+      "name": "a single target is not decomposed",
+      "queue": "- [x] done thing :: check: true\n- [ ] [AGT-5] only step :: check: true\n",
+      "session": "AGT-5",
+      "expect": []
+    },
+    {
+      "name": "an issue whose key starts with the session's is still another issue",
+      "queue": "- [ ] [AGT-50] theirs :: check: true\n- [ ] a :: check: true\n- [ ] b :: check: true\n",
+      "session": "AGT-5",
+      "expect": [
+        {
+          "line": 1,
+          "title": "a"
+        },
+        {
+          "line": 2,
+          "title": "b"
+        }
+      ]
+    },
+    {
+      "name": "a session whose key starts with a line's tag is still another issue",
+      "queue": "- [ ] [AGT-5] theirs :: check: true\n- [ ] a :: check: true\n- [ ] b :: check: true\n",
+      "session": "AGT-50",
+      "expect": [
+        {
+          "line": 1,
+          "title": "a"
+        },
+        {
+          "line": 2,
+          "title": "b"
+        }
+      ]
+    },
+    {
+      "name": "open lines without a check are targets too",
+      "queue": "- [ ] [AGT-5] title: what Linear AGT-5 asks is resolved on this branch\n- [ ] a\n",
+      "session": "AGT-5",
+      "expect": [
+        {
+          "line": 0,
+          "title": "title: what Linear AGT-5 asks is resolved on this branch"
+        },
+        {
+          "line": 1,
+          "title": "a"
+        }
+      ]
+    },
+    {
+      "name": "an issue named later in the text is not a leading tag",
+      "queue": "- [ ] port the fix from [AGT-7] :: check: true\n- [ ] a :: check: true\n",
+      "session": "AGT-5",
+      "expect": [
+        {
+          "line": 0,
+          "title": "port the fix from [AGT-7]"
+        },
+        {
+          "line": 1,
+          "title": "a"
+        }
+      ]
+    },
+    {
+      "name": "leading tags separated by spaces count as leading tags",
+      "queue": "- [ ] [AGT-5] [AGT-7] shared :: check: true\n- [ ] a :: check: true\n- [ ] b :: check: true\n",
+      "session": "AGT-5",
+      "expect": [
+        {
+          "line": 1,
+          "title": "a"
+        },
+        {
+          "line": 2,
+          "title": "b"
+        }
+      ]
+    },
+    {
+      "name": "the title is cut after the tags are removed",
+      "queue": "- [ ] [AGT-5] pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp :: check: true\n- [ ] second :: check: true\n",
+      "session": "AGT-5",
+      "expect": [
+        {
+          "line": 0,
+          "title": "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+        },
+        {
+          "line": 1,
+          "title": "second"
+        }
+      ]
+    },
+    {
+      "name": "titles are cut to 80 characters",
+      "queue": "- [ ] pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp :: check: true\n- [ ] qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq :: check: true\n",
+      "session": "AGT-5",
+      "expect": [
+        {
+          "line": 0,
+          "title": "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+        },
+        {
+          "line": 1,
+          "title": "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+        }
+      ]
+    }
+  ],
+  "tagLine": [
+    {
+      "name": "the session's tag is replaced by the sub-issue's",
+      "queue": "- [x] done thing :: check: true\n- [ ] [AGT-5] first step :: check: true\n- [ ] second step :: check: true\n- [ ] [AGT-7] someone else's issue :: check: true\n- [!] blocked step :: check: true\n",
+      "line": 1,
+      "id": "AGT-9",
+      "expect": "- [x] done thing :: check: true\n- [ ] [AGT-9] first step :: check: true\n- [ ] second step :: check: true\n- [ ] [AGT-7] someone else's issue :: check: true\n- [!] blocked step :: check: true\n"
+    },
+    {
+      "name": "an untagged line gets the sub-issue's tag",
+      "queue": "- [x] done thing :: check: true\n- [ ] [AGT-5] first step :: check: true\n- [ ] second step :: check: true\n- [ ] [AGT-7] someone else's issue :: check: true\n- [!] blocked step :: check: true\n",
+      "line": 2,
+      "id": "AGT-10",
+      "expect": "- [x] done thing :: check: true\n- [ ] [AGT-5] first step :: check: true\n- [ ] [AGT-10] second step :: check: true\n- [ ] [AGT-7] someone else's issue :: check: true\n- [!] blocked step :: check: true\n"
+    },
+    {
+      "name": "several leading tags become the one tag",
+      "queue": "- [ ] [AGT-5][AGT-7] step :: check: true\n",
+      "line": 0,
+      "id": "AGT-9",
+      "expect": "- [ ] [AGT-9] step :: check: true\n"
+    },
+    {
+      "name": "only the given line changes when an identical line comes first",
+      "queue": "- [ ] step :: check: true\n- [ ] step :: check: true\n",
+      "line": 1,
+      "id": "AGT-9",
+      "expect": "- [ ] step :: check: true\n- [ ] [AGT-9] step :: check: true\n"
+    },
+    {
+      "name": "leading tags separated by spaces are all replaced",
+      "queue": "- [ ] [AGT-5] [AGT-7] step :: check: true\n",
+      "line": 0,
+      "id": "AGT-9",
+      "expect": "- [ ] [AGT-9] step :: check: true\n"
+    },
+    {
+      "name": "CRLF line ends and trailing spaces on other lines are kept",
+      "queue": "note  \r\n- [ ] a :: check: true\r\n- [ ] b :: check: true \r\n",
+      "line": 1,
+      "id": "AGT-9",
+      "expect": "note  \r\n- [ ] [AGT-9] a :: check: true\r\n- [ ] b :: check: true \r\n"
+    },
+    {
+      "name": "leading tags separated by several spaces or a tab are all replaced",
+      "queue": "- [ ] [AGT-5]  [AGT-7]\t[AGT-8] step :: check: true\n",
+      "line": 0,
+      "id": "AGT-9",
+      "expect": "- [ ] [AGT-9] step :: check: true\n"
+    },
+    {
+      "name": "an issue named later in the text is kept",
+      "queue": "- [ ] port fix from [AGT-7] :: check: true\n",
+      "line": 0,
+      "id": "AGT-9",
+      "expect": "- [ ] [AGT-9] port fix from [AGT-7] :: check: true\n"
+    },
+    {
+      "name": "a tab-indented item keeps its tab",
+      "queue": "\t- [ ] step :: check: true\n",
+      "line": 0,
+      "id": "AGT-9",
+      "expect": "\t- [ ] [AGT-9] step :: check: true\n"
+    },
+    {
+      "name": "an indented star bullet keeps its own prefix",
+      "queue": "  * [ ] second step :: check: true\n",
+      "line": 0,
+      "id": "AGT-10",
+      "expect": "  * [ ] [AGT-10] second step :: check: true\n"
+    }
+  ]
+}

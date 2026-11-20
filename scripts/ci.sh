@@ -3,7 +3,8 @@
 # Purpose: The repository's CI, run the same way locally and in GitHub Actions:
 #   `claude plugin validate` for the marketplace and every mod, `claude plugin
 #   test` for every mod, tsc for each mod with a tsconfig.json, then
-#   `bun scripts/sync-shared.ts --check` for the copies generated from shared/.
+#   `bun scripts/sync-shared.ts --check` for the copies generated from shared/,
+#   and the linear-agent Worker's tests and type check when it exists.
 # Dependencies: claude (Claude Code CLI; no login needed), bun, perl
 # Test Status: run by .github/workflows/ci.yml and by the auto-claude milestone checks
 #
@@ -68,6 +69,23 @@ for mod in "${mods[@]}"; do
     failed+=("$mod tsc ($errs errors)")
   fi
 done
+
+# The Linear agent Worker (linear-agent/) is a bun package, not a mod: its tests
+# and type check run here once the directory exists.
+if [ -f linear-agent/package.json ]; then
+  echo "== linear-agent: test"
+  if ! out=$(cd linear-agent && bun install --frozen-lockfile 2>&1 && bun test 2>&1); then
+    printf '%s\n' "$out" | tail -30
+    failed+=("linear-agent test")
+  fi
+  echo "== linear-agent: tsc"
+  out=$(cd linear-agent && bun x --package typescript@5.6.3 tsc --noEmit -p . 2>&1)
+  errs=$(printf '%s\n' "$out" | grep -c 'error TS')
+  if [ "$errs" -ne 0 ]; then
+    printf '%s\n' "$out" | grep 'error TS' | head -20
+    failed+=("linear-agent tsc ($errs errors)")
+  fi
+fi
 
 echo "== shared: sync-shared --check"
 if ! out=$(bun scripts/sync-shared.ts --check 2>&1); then
