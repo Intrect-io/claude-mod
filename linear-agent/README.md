@@ -20,7 +20,8 @@ The webhook contract is pinned by `fixtures/linear-agent-v1` (`bun fixtures/line
 | `POST /v1/activity` | Bearer | `{sessionId, content, ephemeral?}` to `agentActivityCreate`. `content` is `{type: thought, elicitation, response or error, body}` or `{type: action, action, parameter, result?}`. A body or result may hold up to 250 000 characters. `ephemeral` is accepted on `thought` and `action` only. |
 | `POST /v1/plan` | Bearer | `{sessionId, plan}` to `agentSessionUpdate`. The plan holds 1 to 100 `{content, status}` entries and replaces the whole plan; `null` clears it. |
 | `POST /v1/external-url` | Bearer | `{sessionId, label, url}` (https only) to `agentSessionUpdate.addedExternalUrls`. |
-| `POST /v1/issue` | Bearer | `{team, title, description?, parentId?, projectId?, delegate?}` to `issueCreate`. The team key is resolved to its id, and the team's `auto-claude` label is added when it exists. The issue is delegated to the app user only when `delegate` is true. |
+| `POST /v1/issue` | Bearer | `{team, title, description?, parentId?, projectId?, delegate?, triage?}` to `issueCreate`. The team key is resolved to its id, and the team's `auto-claude` label is added when it exists. The issue is delegated to the app user only when `delegate` is true. `parentId` may be an identifier such as `AGT-12`. `triage: true` puts it in the team's triage state when the team has triage on, otherwise in the default state, and the answer's `triaged` says which. |
+| `GET /v1/fingerprints?project=` | Bearer | `{fingerprints}`: the sorted `auto-claude:fp=<kind>:<12 hex>` markers found in the descriptions of the project's issues that are open or were closed in the last 30 days (0.2.0). auto-claude uses them so that it never files the same Triage issue twice. |
 
 Write routes answer 409 before the app is installed and 502 when Linear refuses, with Linear's message. A token or secret is never logged or returned.
 

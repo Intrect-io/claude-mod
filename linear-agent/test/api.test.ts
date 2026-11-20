@@ -154,11 +154,63 @@ describe('session writes', () => {
     )
     restore = m.restore
     const plain = await (await call(env, 'POST', '/v1/issue', { team: 'AGT', title: 'Held: wire the cron', description: 'why' })).json()
-    expect(plain).toEqual({ ok: true, id: 'i-9', identifier: 'AGT-9', url: 'https://linear.app/x/issue/AGT-9' })
+    expect(plain).toEqual({ ok: true, id: 'i-9', identifier: 'AGT-9', url: 'https://linear.app/x/issue/AGT-9', triaged: false })
     await call(env, 'POST', '/v1/issue', { team: 'AGT', title: 'step', parentId: 'i-5', projectId: 'p1', delegate: true })
     const inputs = m.calls.filter(c => c.body.includes('issueCreate')).map(c => JSON.parse(c.body).variables.input)
     expect(inputs[0]).toEqual({ teamId: 'team-1', title: 'Held: wire the cron', description: 'why', labelIds: ['label-ac'] })
     expect(inputs[1]).toEqual({ teamId: 'team-1', title: 'step', parentId: 'i-5', projectId: 'p1', delegateId: 'app-user-1', labelIds: ['label-ac'] })
+  })
+
+  test('POST /v1/issue with triage puts the issue in the team\'s triage state when triage is on', async () => {
+    const { env, kv } = makeEnv()
+    kv.set(TOKEN_KEY, installedToken(NOW))
+    const m = mockFetch(
+      gqlReply('teams(filter', { teams: { nodes: [{ id: 'team-1', triageEnabled: true, triageIssueState: { id: 'state-triage' }, labels: { nodes: [] } }] } }),
+      gqlReply('issueCreate', { issueCreate: { success: true, issue: { id: 'i-10', identifier: 'AGT-10', url: 'https://linear.app/x/issue/AGT-10' } } }),
+    )
+    restore = m.restore
+    const res = await (await call(env, 'POST', '/v1/issue', { team: 'AGT', title: 'Held: x', description: 'why', triage: true })).json()
+    expect(res.triaged).toBe(true)
+    expect(JSON.parse(m.calls.find(c => c.body.includes('issueCreate'))!.body).variables.input).toEqual({ teamId: 'team-1', title: 'Held: x', description: 'why', stateId: 'state-triage' })
+  })
+
+  test('POST /v1/issue with triage on a team without triage uses the default state', async () => {
+    const { env, kv } = makeEnv()
+    kv.set(TOKEN_KEY, installedToken(NOW))
+    const m = mockFetch(
+      gqlReply('teams(filter', { teams: { nodes: [{ id: 'team-1', triageEnabled: false, triageIssueState: null, labels: { nodes: [] } }] } }),
+      gqlReply('issueCreate', { issueCreate: { success: true, issue: { id: 'i-11', identifier: 'AGT-11', url: 'u' } } }),
+    )
+    restore = m.restore
+    expect((await (await call(env, 'POST', '/v1/issue', { team: 'AGT', title: 't', triage: true })).json()).triaged).toBe(false)
+    expect(JSON.parse(m.calls.find(c => c.body.includes('issueCreate'))!.body).variables.input.stateId).toBeUndefined()
+  })
+
+  test('GET /v1/fingerprints returns the markers of the project\'s open and recently closed issues, across pages', async () => {
+    const { env, kv } = makeEnv()
+    kv.set(TOKEN_KEY, installedToken(NOW))
+    let page = 0
+    const m = mockFetch(call => {
+      if (!call.url.includes('graphql')) return undefined
+      page++
+      return page === 1
+        ? { json: { data: { issues: { nodes: [{ description: 'x\n\nauto-claude:fp=held:0b54ad7f0675' }, { description: null }], pageInfo: { hasNextPage: true, endCursor: 'c1' } } } } }
+        : { json: { data: { issues: { nodes: [{ description: 'auto-claude:fp=ci-red:fe8ee15bb86d and auto-claude:fp=held:0b54ad7f0675' }], pageInfo: { hasNextPage: false, endCursor: null } } } } }
+    })
+    restore = m.restore
+    const res = await (await call(env, 'GET', '/v1/fingerprints?project=p1')).json()
+    expect(res).toEqual({ fingerprints: ['auto-claude:fp=ci-red:fe8ee15bb86d', 'auto-claude:fp=held:0b54ad7f0675'] })
+    const vars = JSON.parse(m.calls[0]!.body).variables
+    expect(vars.project).toBe('p1')
+    expect(vars.since).toBe(new Date(NOW - 30 * 24 * 3_600_000).toISOString())
+    expect(JSON.parse(m.calls[1]!.body).variables.after).toBe('c1')
+  })
+
+  test('GET /v1/fingerprints needs a project and the install', async () => {
+    const { env } = makeEnv()
+    expect((await call(env, 'GET', '/v1/fingerprints')).status).toBe(400)
+    expect((await call(env, 'GET', '/v1/fingerprints?project=p1')).status).toBe(409)
+    expect((await call(env, 'GET', '/v1/fingerprints?project=p1', undefined, {})).status).toBe(401)
   })
 
   test('a Linear error comes back as 502 with its message and no token', async () => {

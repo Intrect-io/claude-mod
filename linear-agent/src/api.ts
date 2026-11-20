@@ -1,7 +1,7 @@
 // The session API auto-claude's driver calls: Authorization: Bearer SESSION_TOKEN.
 
 import { type Env, errorText, json } from './env'
-import { type ActivityContent, addExternalUrl, createActivity, createIssue, issueProject, type PlanEntry, teamByKey, updatePlan } from './linear'
+import { type ActivityContent, addExternalUrl, createActivity, createIssue, issueProject, type PlanEntry, projectFingerprints, teamByKey, updatePlan } from './linear'
 import { readToken, type StoredToken } from './oauth'
 import { eventsSince, giveUpUnresolved, HOLD_BACK_MS, LOOKUP_BATCH, NO_PROJECT, setProjectById, unresolvedSince } from './store'
 import { constantTimeEqual } from './webhook'
@@ -126,8 +126,22 @@ const issue: Handler = async (_env, token, input) => {
     ...(text(input.projectId, 200) ? { projectId: input.projectId } : {}),
     ...(input.delegate === true ? { delegateId: token.appUserId } : {}),
     ...(team.labelId !== undefined ? { labelIds: [team.labelId] } : {}),
+    // Triage when asked and the team has triage on; otherwise the team's default state.
+    ...(input.triage === true && team.triageStateId !== undefined ? { stateId: team.triageStateId } : {}),
   })
-  return json({ ok: true, ...created })
+  return json({ ok: true, ...created, triaged: input.triage === true && team.triageStateId !== undefined })
+}
+
+async function fingerprints(env: Env, url: URL, now: number): Promise<Response> {
+  const project = url.searchParams.get('project')
+  if (project === null || project === '') return json({ error: 'project is required' }, 400)
+  const token = await readToken(env.TOKENS)
+  if (token === undefined) return json({ error: 'the app is not installed yet: open /oauth/start' }, 409)
+  try {
+    return json({ fingerprints: await projectFingerprints(token.accessToken, project, now) })
+  } catch (error) {
+    return json({ error: errorText(error) }, 502)
+  }
 }
 
 const POSTS: Record<string, Handler> = { '/v1/activity': activity, '/v1/plan': plan, '/v1/external-url': externalUrl, '/v1/issue': issue }
@@ -135,6 +149,7 @@ const POSTS: Record<string, Handler> = { '/v1/activity': activity, '/v1/plan': p
 export async function handleApi(req: Request, env: Env, url: URL, now: number): Promise<Response> {
   if (!authorized(req, env)) return json({ error: 'unauthorized' }, 401)
   if (req.method === 'GET' && url.pathname === '/v1/events') return events(env, url, now)
+  if (req.method === 'GET' && url.pathname === '/v1/fingerprints') return fingerprints(env, url, now)
   const handler = req.method === 'POST' ? POSTS[url.pathname] : undefined
   if (handler === undefined) return json({ error: 'not found' }, 404)
   const input = await body(req)
