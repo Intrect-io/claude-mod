@@ -98,7 +98,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
     nameStatus: '',
     patch: '',
     // The linear-agent Worker behind curl: events served once each, every call, and whether it is down.
-    agent: { events: [] as unknown[], calls: [] as Array<{ method: string; path: string; body: any }>, down: false, failPosts: false },
+    agent: { events: [] as unknown[], calls: [] as Array<{ method: string; path: string; body: any }>, down: false, failPosts: false, nextIssue: 101, fingerprints: [] as string[] },
     clock: mock.clock(on, { now: 1_000 }),
   }
   const removed = (path: string) => [...w.gone].some(g => path === g || path.startsWith(`${g}/`))
@@ -168,7 +168,15 @@ function world(on: On, store: Record<string, unknown> = {}) {
       w.agent.calls.push({ method: String(e.argv[e.argv.indexOf('-X') + 1]), path: url.replace('https://agent.test', ''), body: at > 0 ? JSON.parse(String(e.argv[at + 1])) : undefined })
       if (w.agent.down) return ok('', 7, 'curl: (7) Failed to connect to agent.test port 443')
       if (url.includes('/v1/events')) return ok(`${JSON.stringify({ events: w.agent.events.splice(0) })}\n200`)
+      if (url.includes('/v1/fingerprints')) return ok(`${JSON.stringify({ fingerprints: w.agent.fingerprints })}\n200`)
       if (w.agent.failPosts) return ok('{"error":"the app is not installed yet"}\n409')
+      if (url.endsWith('/v1/issue')) {
+        // Like Linear: a created issue's fingerprint marker is found by the next lookup.
+        const body = w.agent.calls.at(-1)!.body as { description?: string }
+        for (const m of String(body.description ?? '').matchAll(/auto-claude:fp=[a-z-]+:[0-9a-f]{12}/g)) w.agent.fingerprints.push(m[0])
+        const n = w.agent.nextIssue++
+        return ok(`${JSON.stringify({ ok: true, id: `iss-${n}`, identifier: `AGT-${n}`, url: `https://linear.app/x/issue/AGT-${n}` })}\n200`)
+      }
       return ok('{"ok":true}\n200')
     }
     if (a.includes(' init')) {
@@ -2213,10 +2221,10 @@ describe('the Linear agent session bridge (1.16.0)', () => {
     })
   }
   const created = (id: number, identifier: string, sessionId: string, title = 't') => ({ id, action: 'created', sessionId, projectId: 'proj-1', identifier, title })
-  async function start($: Engine, w: W, queue: string) {
+  async function start($: Engine, w: W, queue: string, plan = PLAN) {
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     await cmd($, 'start --once')
-    w.files.set(PLAN_FILE, PLAN)
+    w.files.set(PLAN_FILE, plan)
     w.files.set(GOALS, queue)
     await ready($)
     await w.clock.advance(1_200)
@@ -2228,7 +2236,8 @@ describe('the Linear agent session bridge (1.16.0)', () => {
     w.github = true
     bridge(on, w)
     w.agent.events.push(created(1, 'AGT-1', 'sess-1'), created(2, 'AGT-2', 'sess-2', 'Write the :: check: rm -rf ~ docs'))
-    await start($, w, QUEUE.replace('- [ ] add()', '- [ ] [AGT-1] add()'))
+    // sub() names another issue, so the plan is not split into sub-issues (1.17.0).
+    await start($, w, QUEUE.replace('- [ ] add()', '- [ ] [AGT-1] add()').replace('- [ ] sub()', '- [ ] [AGT-50] sub()'))
     await w.clock.advance(TICK)
     expect(w.agent.calls[0]).toMatchObject({ method: 'GET', path: '/v1/events?since=0&project=proj-1' })
     // AGT-1 already had a line; AGT-2 is queued as one line that parses back with no check.
@@ -2339,7 +2348,7 @@ describe('the Linear agent session bridge (1.16.0)', () => {
     w.checks = '[{"bucket":"pass"},{"bucket":"fail"}]'
     bridge(on, w)
     w.agent.events.push(created(1, 'AGT-1', 'sess-1', 'add'))
-    await start($, w, QUEUE.replace('- [ ] add()', '- [ ] [AGT-1] add()'))
+    await start($, w, QUEUE.replace('- [ ] add()', '- [ ] [AGT-1] add()').replace('- [ ] sub()', '- [ ] [AGT-50] sub()'))
     await w.clock.advance(TICK)
     await meet($, w)
     expect(parseQueue(w.files.get(GOALS) ?? '').some(i => i.base !== undefined)).toBe(true)
@@ -2378,5 +2387,154 @@ describe('the Linear agent session bridge (1.16.0)', () => {
     await w.clock.advance(TICK)
     expect(w.agent.calls).toHaveLength(0)
     expect(w.files.get(GOALS)).toMatch(/- \[x\] add\(\)/)
+  })
+
+  // ---- 1.17.0: decomposition and Triage issues
+
+  test('decompose: a plan for one delegated issue with 2 milestones gets a delegated sub-issue per line, tagged, and the parent session gets the plan', async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    w.agent.events.push(created(1, 'AGT-1', 'sess-1', 'add and sub'))
+    await start($, w, QUEUE.replace('- [ ] add()', '- [ ] [AGT-1] add()'))
+    await w.clock.advance(TICK)
+    const subs = posts(w, '/v1/issue')
+    expect(subs.map(p => p.body)).toEqual([
+      { team: 'AGT', title: 'add() returns a+b', parentId: 'AGT-1', projectId: 'proj-1', delegate: true, description: 'Milestone of AGT-1, planned by auto-claude:\n\nadd() returns a+b' },
+      { team: 'AGT', title: 'sub() returns a-b', parentId: 'AGT-1', projectId: 'proj-1', delegate: true, description: 'Milestone of AGT-1, planned by auto-claude:\n\nsub() returns a-b' },
+    ])
+    const queue = parseQueue(w.files.get(GOALS) ?? '')
+    expect(queue.map(i => i.condition)).toEqual(['[AGT-101] add() returns a+b', '[AGT-102] sub() returns a-b'])
+    expect(queue.every(i => i.check !== undefined)).toBe(true)
+    expect((w.files.get(LOG) ?? '').match(/"event":"agent-issue","run":\d+,"kind":"sub"/g)).toHaveLength(2)
+    // The sub-issues' own sessions arrive: mapped, and no second line is queued.
+    w.agent.events.push(created(2, 'AGT-101', 'sess-101'), created(3, 'AGT-102', 'sess-102'))
+    await w.clock.advance(MIN)
+    expect(parseQueue(w.files.get(GOALS) ?? '')).toHaveLength(2)
+    expect(posts(w, '/v1/plan').some(p => p.body.sessionId === 'sess-1' && p.body.plan[0].content === '[AGT-101] add() returns a+b')).toBe(true)
+    expect(posts(w, '/v1/plan').some(p => p.body.sessionId === 'sess-101')).toBe(true)
+    // Decomposed once per accepted plan.
+    await w.clock.advance(2 * MIN)
+    expect(posts(w, '/v1/issue')).toHaveLength(2)
+  })
+
+  test('decompose: a stop on the parent issue stops the sub-issues it was split into', async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    w.agent.events.push(created(1, 'AGT-1', 'sess-1'))
+    await start($, w, QUEUE.replace('- [ ] add()', '- [ ] [AGT-1] add()'))
+    await w.clock.advance(TICK)
+    w.agent.events.push({ id: 2, action: 'prompted', sessionId: 'sess-1', projectId: 'proj-1', identifier: 'AGT-1', prompt: '', signal: 'stop' })
+    await w.clock.advance(MIN + TICK)
+    // AGT-101 is being built (left to the driver), AGT-102 is pending and marked.
+    expect(w.files.get(GOALS)).toMatch(/- \[!\] \[AGT-102\] sub\(\).*stopped in Linear/)
+    await meet($, w)
+    await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.includes('was stopped in its Linear session'))).toBe(true)
+  })
+
+  test('decompose: a new run keeps the bridge cursor and sessions, so old events are not queued again', async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    w.agent.events.push(created(1, 'AGT-1', 'sess-1'), created(2, 'AGT-2', 'sess-2', 'docs'))
+    await start($, w, QUEUE.replace('- [ ] add()', '- [ ] [AGT-1] add()').replace('- [ ] sub()', '- [ ] [AGT-50] sub()'))
+    await w.clock.advance(TICK)
+    await cmd($, 'stop')
+    await cmd($, 'start --once')
+    w.files.set(PLAN_FILE, PLAN)
+    w.files.set(GOALS, QUEUE)
+    await ready($)
+    await w.clock.advance(1_200 + TICK)
+    expect(w.agent.calls.filter(c => c.method === 'GET').at(-1)!.path).toBe('/v1/events?since=2&project=proj-1')
+  })
+
+  test('decompose: a plan naming two delegated issues is not split; the kickoff asks for unclear milestones to be deferred as spec-ambiguous', async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    w.agent.events.push(created(1, 'AGT-1', 'sess-1'), created(2, 'AGT-2', 'sess-2'))
+    await start($, w, QUEUE.replace('- [ ] add()', '- [ ] [AGT-1] add()').replace('- [ ] sub()', '- [ ] [AGT-2] sub()'))
+    expect(w.prompts[0]).toContain('Deferred (spec-ambiguous)')
+    await w.clock.advance(TICK)
+    await w.clock.advance(MIN)
+    expect(posts(w, '/v1/issue')).toHaveLength(0)
+  })
+
+  test('decompose: maxIssuesPerDay caps the sub-issues and the rest are logged as skipped', { options: { maxIssuesPerDay: 1 } }, async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    w.agent.events.push(created(1, 'AGT-1', 'sess-1'))
+    await start($, w, QUEUE.replace('- [ ] add()', '- [ ] [AGT-1] add()'))
+    await w.clock.advance(TICK)
+    expect(posts(w, '/v1/issue')).toHaveLength(1)
+    expect(parseQueue(w.files.get(GOALS) ?? '').map(i => i.condition)).toEqual(['[AGT-101] add() returns a+b', 'sub() returns a-b'])
+    expect(w.files.get(LOG)).toContain('"skipped":"maxIssuesPerDay"')
+  })
+
+  test('decompose: a milestone the planner deferred as spec-ambiguous is asked in its issue\'s session', async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    w.agent.events.push(created(1, 'AGT-3', 'sess-3'))
+    await start($, w, QUEUE, `${PLAN}- **Deferred (spec-ambiguous).** [AGT-3] what "fast enough" means for sub()\n`)
+    await w.clock.advance(TICK)
+    await w.clock.advance(MIN)
+    const asked = posts(w, '/v1/activity').filter(p => p.body.sessionId === 'sess-3')
+    expect(asked).toHaveLength(1)
+    expect(asked[0]!.body.content.type).toBe('elicitation')
+    expect(asked[0]!.body.content.body).toContain('spec-ambiguous')
+  })
+
+  // An always-on run whose first milestone the diff judge holds (PR #7), standing by after the second.
+  async function standingWithHold($: Engine, w: W) {
+    w.github = true
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start --always-on')
+    w.files.set(PLAN_FILE, PLAN)
+    w.files.set(GOALS, QUEUE)
+    await ready($)
+    await w.clock.advance(1_200)
+    w.mergeBase = 'abc1234'
+    w.nameStatus = 'M\ttests/test_a.py\n'
+    w.patch = 'diff --git a/tests/test_a.py b/tests/test_a.py\n--- a/tests/test_a.py\n+++ b/tests/test_a.py\n@@ -1 +1 @@\n-    assert f(2) == 4\n+    pass\n'
+    w.verdicts.push('{"met": true, "reason": "tests pass"}', '{"verdict": "circumvents", "reason": "the assertion became pass"}')
+    await $.classic.Stop(STOP)
+    await w.clock.advance(1_200)
+    w.mergeBase = ''
+    await meet($, w)
+    for (let i = 0; i < 4; i++) await w.clock.advance(TICK)
+  }
+
+  test('triage issue: a held milestone whose line names no issue is filed in Triage, not delegated, with the reason, the PR and its marker, once', { timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    await standingWithHold($, w)
+    expect((await cmd($, 'status')).text).toContain('phase standby')
+    await w.clock.advance(TICK)
+    const filed = posts(w, '/v1/issue')
+    expect(filed).toHaveLength(1)
+    expect(filed[0]!.body).toMatchObject({ team: 'AGT', title: 'Held: add() returns a+b', projectId: 'proj-1', triage: true })
+    expect(filed[0]!.body.delegate).toBeUndefined()
+    expect(filed[0]!.body.description).toContain('diff judge: circumvents')
+    expect(filed[0]!.body.description).toContain('https://github.com/o/r/pull/7')
+    expect(filed[0]!.body.description).toMatch(/auto-claude:fp=held:[0-9a-f]{12}$/)
+    expect(w.files.get(LOG)).toContain('"kind":"triage"')
+    // Its marker is found on the next look: never filed twice.
+    await w.clock.advance(25 * MIN)
+    expect(posts(w, '/v1/issue')).toHaveLength(1)
+  })
+
+  test('triage issue: maxIssuesPerDay 0 files nothing and asks the Worker nothing', { options: { maxIssuesPerDay: 0 }, timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    await standingWithHold($, w)
+    await w.clock.advance(25 * MIN)
+    expect(posts(w, '/v1/issue')).toHaveLength(0)
+    expect(w.agent.calls.some(c => c.path.startsWith('/v1/fingerprints'))).toBe(false)
+  })
+
+  test('triage issue: without ~/.claude/linear-agent.json nothing is filed', { timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    bridge(on, w, false)
+    await standingWithHold($, w)
+    await w.clock.advance(25 * MIN)
+    expect(w.agent.calls).toHaveLength(0)
   })
 })

@@ -279,6 +279,23 @@ The MCP sync above writes as the person, so Linear's agent model is out of its r
 
 `hooks/agent.ts` holds the pure part (`planOf`, `eventLines`, `activityFor`), pinned by `fixtures/linear-agent-v1`. `hooks/bridge.ts` holds the I/O.
 
+### Splitting issues and filing Triage issues (1.17.0)
+
+- **Decomposition.** When a plan is accepted and its open lines name exactly one delegated issue (a mapped session), each line that is untagged, or tagged only with that issue, becomes a sub-issue. This applies only when there are at least 2 such lines, using `decomposeTargets`.
+  - The sub-issue is created with `POST /v1/issue`. Its parent is the issue, it takes the repository's project and team, and it is delegated to the app.
+  - Its line is retagged with `tagLine`, as in `- [ ] [AGT-101] ...`.
+  - It is registered in the session map before its own created event arrives, so that event adds no second line.
+  - The parent session's plan is replaced, and it keeps getting the plan afterwards.
+  - Stopping the parent stops its sub-issues.
+  - This runs once per accepted plan, on the queue the planner wrote, before a poll adds lines of its own. A plan that names two delegated issues is not split.
+- **Unclear milestones.** With the Worker configured, the planning prompt says that a milestone with no deterministic check is not planned. The planner instead writes `- **Deferred (spec-ambiguous).** [AGT-12] <what is unclear>` under `## Decisions`, and the run asks that issue's session (an elicitation).
+- **Triage issues** (in standby, at most every 10 minutes). Each one is created with `POST /v1/issue` in the team's Triage state and is not delegated: a person delegates it once it is unblocked. Two things become candidates, using `issueCandidates`:
+  - a held or deferred milestone whose line names no issue (the reason and its PR link go in the description);
+  - a default-branch workflow red on 2 or more consecutive polls (with the run's link).
+- **Never twice.** Each description ends with its fingerprint, `auto-claude:fp=<kind>:<12 hex of sha256(goal or workflow)>`. Candidates whose fingerprint `GET /v1/fingerprints?project=` already finds in an open issue, or in one closed within 30 days, are skipped.
+- **Cap.** `maxIssuesPerDay` (userConfig, default 3) caps sub-issues and Triage issues together over any 24 h, counted in the run record. Every creation, and every one the cap skipped, is an `agent-issue` line in `goal-loop.log`.
+- **Across runs.** A new run keeps the bridge's cursor, sessions, stops and creation times, so old events are not queued again.
+
 ## Autonomy and its limits
 
 - **Choices.** Claude decides every choice itself and records it under `## Decisions`. Irreversible steps (credentials, payment, deleting data, a new public release) go through `mcp__auto-claude__defer_goal` and are never taken.

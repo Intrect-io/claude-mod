@@ -7,7 +7,7 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { AgentBridge, AutoRecord, ShipItem } from '../types'
-import { activityFor, agentLine, type AgentEvent, cleanTitle, eventLines, issuesOf, type Moment, planOf, untagged } from './agent'
+import { activityFor, agentLine, type AgentEvent, type Candidate, cleanTitle, decomposeTargets, eventLines, type HeldInput, issueCandidates, issuesOf, type Moment, planOf, type RedInput, tagLine, untagged } from './agent'
 import { FILES, readText, run, tell } from './io'
 import { appendLog, readLoop } from './loop'
 import { markItem, parseQueue, type QueueItem } from './queue'
@@ -157,16 +157,19 @@ async function applyPrompt($: EngineInterface, r: AutoRecord, queue: QueueItem[]
 async function applyStop($: EngineInterface, r: AutoRecord, cfg: AgentConfig, s: { identifier: string; sessionId: string }): Promise<AutoRecord> {
   let queue = (await readText($, FILES(r.root).queue)) ?? ''
   const current = (await readLoop($, r.root).catch(() => undefined))?.current?.condition
-  // The issue's own lines, and the fix goals repairing one of its PRs (their tag sits inside the text).
-  const heads = new Set(r.ships.filter(it => issuesOf(it.goal).includes(s.identifier)).map(it => it.headRef))
-  const lines = parseQueue(queue).filter(i => i.mark === ' ' && (issuesOf(i.condition).includes(s.identifier) || heads.has(r.fixes[i.condition] ?? '')))
+  // The issue and the sub-issues it was split into.
+  const ids = new Set([s.identifier, ...Object.entries(r.agent?.subOf ?? {}).filter(([, p]) => p === s.identifier).map(([sub]) => sub)])
+  const ofIssue = (goal: string) => issuesOf(goal).some(id => ids.has(id))
+  // Their own lines, and the fix goals repairing one of their PRs (the tag sits inside the text).
+  const heads = new Set(r.ships.filter(it => ofIssue(it.goal)).map(it => it.headRef))
+  const lines = parseQueue(queue).filter(i => i.mark === ' ' && (ofIssue(i.condition) || heads.has(r.fixes[i.condition] ?? '')))
   for (const i of lines) if (i.condition !== current) queue = markItem(queue, i.condition, '!', 'stopped in Linear')
   if (lines.length > 0) await $.fs.write(FILES(r.root).queue, queue)
-  const ships = r.ships.map((it): ShipItem => (issuesOf(it.goal).includes(s.identifier) && it.state !== 'merged' && it.state !== 'held' ? { ...it, state: 'held', note: 'stopped in Linear' } : it))
-  const goal = lines[0]?.condition ?? r.ships.find(it => issuesOf(it.goal).includes(s.identifier))?.goal ?? s.identifier
+  const ships = r.ships.map((it): ShipItem => (ofIssue(it.goal) && it.state !== 'merged' && it.state !== 'held' ? { ...it, state: 'held', note: 'stopped in Linear' } : it))
+  const goal = lines[0]?.condition ?? r.ships.find(it => ofIssue(it.goal))?.goal ?? s.identifier
   await appendLog($, r.root, { event: 'agent-stop', run: r.startedAt, issue: s.identifier, goal })
   await tell($, r, `Linear ${s.identifier}: stopped in its agent session; not built or shipped further`)
-  const stopped = [...new Set([...(r.agent?.stopped ?? []), s.identifier])]
+  const stopped = [...new Set([...(r.agent?.stopped ?? []), ...ids])]
   r = { ...r, ships, agent: { ...(r.agent ?? { cursor: 0, sessions: {} }), stopped } }
   return (await post($, r, cfg, '/v1/activity', { sessionId: s.sessionId, content: activityFor({ kind: 'stopped', goal }) })).r
 }
@@ -201,7 +204,7 @@ async function syncPlans($: EngineInterface, r: AutoRecord, cfg: AgentConfig, qu
   const current = (await readLoop($, r.root).catch(() => undefined))?.current?.condition
   const plan = planOf(queueText, current)
   const sig = JSON.stringify(plan)
-  const named = new Set(parseQueue(queueText).flatMap(i => issuesOf(i.condition)))
+  const named = new Set([...parseQueue(queueText).flatMap(i => issuesOf(i.condition)), ...(r.agent?.parents ?? [])])
   const sigs: Record<string, string> = { ...r.agent?.planSigs }
   for (const [id, sessionId] of Object.entries(r.agent?.sessions ?? {})) {
     if (sessionId === '' || !named.has(id) || sigs[sessionId] === sig) continue
@@ -229,12 +232,14 @@ export async function agentSync($: EngineInterface, r: AutoRecord, now: number):
   r = await liftStops($, r, list, project)
   const got = eventLines(list, project, state.sessions, state.cursor)
   r = { ...r, agent: { ...(r.agent ?? state), cursor: got.cursor, sessions: got.sessions } }
+  // On the queue the planner wrote, before this poll adds lines of its own.
+  r = await decompose($, r, cfg)
 
   let queue = parseQueue((await readText($, FILES(r.root).queue)) ?? '')
   for (const line of got.lines) {
     const id = issuesOf(parseQueue(line)[0]?.condition ?? '')[0]
-    // The MCP sync may have queued the issue already.
-    if (id !== undefined && queue.some(i => issuesOf(i.condition).includes(id))) continue
+    // The MCP sync may have queued the issue already, or the run split it into sub-issues.
+    if (id !== undefined && (queue.some(i => issuesOf(i.condition).includes(id)) || (r.agent?.parents ?? []).includes(id))) continue
     await appendQueueLine($, r.root, line)
     await appendLog($, r.root, { event: 'agent-session', run: r.startedAt, issue: id, queued: true })
   }
@@ -250,4 +255,170 @@ export async function agentSync($: EngineInterface, r: AutoRecord, now: number):
   r = await syncPlans($, r, cfg, (await readText($, FILES(r.root).queue)) ?? '')
   // A poll with no failure clears the error, so the next failure is told again.
   return (r.agent?.failedAt ?? 0) >= now || r.agent?.error === undefined ? r : { ...r, agent: { ...r.agent, error: undefined } }
+}
+
+// ---------------------------------------------------------------- autonomy (1.17.0)
+
+let maxIssuesPerDay = 3
+export function setMaxIssuesPerDay(n: number): void {
+  maxIssuesPerDay = Number.isFinite(n) && n >= 0 ? Math.floor(n) : 3
+}
+
+const DAY_MS = 24 * 3_600_000
+export const TRIAGE_EVERY_MS = 10 * 60_000
+
+// The repository's Linear mapping the bridge files issues under.
+async function mappingOf($: EngineInterface, root: string): Promise<{ projectId: string; team: string } | undefined> {
+  const home = (await $.env.get('HOME').catch(() => undefined))?.replace(/\/$/, '')
+  if (home === undefined) return undefined
+  try {
+    const entry = (JSON.parse(await $.fs.read(`${home}/.claude/linear.json`)) as { repo_mapping?: Record<string, { projectId?: unknown; team?: unknown }> }).repo_mapping?.[root.split('/').pop() ?? '']
+    return typeof entry?.projectId === 'string' && typeof entry.team === 'string' ? { projectId: entry.projectId, team: entry.team } : undefined
+  } catch {
+    return undefined
+  }
+}
+
+const recent = (times: readonly number[] | undefined, now: number) => (times ?? []).filter(t => now - t < DAY_MS)
+
+type Created = { id: string; identifier: string; url?: string }
+
+async function createIssue($: EngineInterface, r: AutoRecord, cfg: AgentConfig, body: Record<string, unknown>): Promise<{ r: AutoRecord; created?: Created }> {
+  const reply = await agentCall($, cfg, r.root, { method: 'POST', path: '/v1/issue', body })
+  if (!reply.ok) return { r: await noteFailure($, r, reply.error) }
+  const c = reply.json as { id?: unknown; identifier?: unknown; url?: unknown }
+  if (typeof c.identifier !== 'string' || typeof c.id !== 'string') return { r: await noteFailure($, r, 'the Worker created an issue but sent no identifier') }
+  const now = await $.clock.now()
+  r = { ...r, agent: { ...(r.agent ?? { cursor: 0, sessions: {} }), issueTimes: [...recent(r.agent?.issueTimes, now), now] } }
+  return { r, created: { id: c.id, identifier: c.identifier, ...(typeof c.url === 'string' ? { url: c.url } : {}) } }
+}
+
+// The one delegated issue an accepted plan belongs to: the only mapped session issue its open lines name.
+function sessionIssueOf(r: AutoRecord, queueText: string): string | undefined {
+  const sessions = r.agent?.sessions ?? {}
+  const named = new Set(parseQueue(queueText).filter(i => i.mark === ' ').flatMap(i => issuesOf(i.condition)).filter(id => (sessions[id] ?? '') !== ''))
+  return named.size === 1 ? [...named][0] : undefined
+}
+
+// `- **Deferred (spec-ambiguous).** [AGT-12] <what is unclear>` lines the planner wrote under ## Decisions.
+export function specAmbiguous(plan: string): Array<{ identifier: string; text: string }> {
+  return [...plan.matchAll(/^\s*-\s*\*\*Deferred \(spec-ambiguous\)\.\*\*\s*\[([A-Z][A-Z0-9]{0,9}-[0-9]+)\]\s*(.*)$/gm)].map(m => ({ identifier: m[1]!, text: m[2]!.trim() }))
+}
+
+// What a new run keeps of the last run's bridge: the cursor, the sessions and what was decided about
+// them; not the per-run timers and errors.
+export function carryAgent(a: AgentBridge | undefined): { agent?: AgentBridge } {
+  if (a === undefined) return {}
+  const { polledAt: _p, error: _e, failedAt: _f, decomposedFor: _d, triageAt: _t, ...kept } = a
+  return { agent: kept }
+}
+
+export const SPEC_AMBIGUOUS_HINT =
+  'Issues delegated to auto-claude in Linear come with an agent session. A milestone you cannot give a deterministic check (the spec leaves the end state open, or contradicts itself) is not planned: write it under ## Decisions as `- **Deferred (spec-ambiguous).** [AGT-12] <what is unclear>`, and auto-claude asks the person in that issue\'s session (category spec-ambiguous) instead of guessing.'
+
+// Once a plan is accepted: a delegated issue with 2 or more milestones is split into sub-issues,
+// one per line (delegated to the app, registered before their own sessions arrive), and the
+// planner's spec-ambiguous deferrals are asked in their sessions.
+async function decompose($: EngineInterface, r: AutoRecord, cfg: AgentConfig): Promise<AutoRecord> {
+  const key = `${r.startedAt}:${r.round}`
+  if (r.phase !== 'run' || r.agent?.decomposedFor === key) return r
+  r = { ...r, agent: { ...(r.agent ?? { cursor: 0, sessions: {} }), decomposedFor: key } }
+  for (const d of specAmbiguous((await readText($, FILES(r.root).plan)) ?? '')) {
+    r = await agentMoment($, r, { kind: 'deferred', goal: `[${d.identifier}] ${d.text}`, reason: 'spec-ambiguous: the spec gives no deterministic end state, so this was not planned. Please say what done means.' })
+  }
+  let queue = (await readText($, FILES(r.root).queue)) ?? ''
+  const parent = sessionIssueOf(r, queue)
+  if (parent === undefined) return r
+  const targets = decomposeTargets(queue, parent)
+  if (targets.length === 0) return r
+  const mapping = await mappingOf($, r.root)
+  if (mapping === undefined) return noteFailure($, r, 'decomposing needs repo_mapping.<folder>.projectId and team in ~/.claude/linear.json')
+  const now = await $.clock.now()
+  let room = maxIssuesPerDay - recent(r.agent?.issueTimes, now).length
+  let made = 0
+  for (const t of targets) {
+    if (room <= 0) {
+      await appendLog($, r.root, { event: 'agent-issue', run: r.startedAt, kind: 'sub', parent, skipped: 'maxIssuesPerDay', title: t.title })
+      continue
+    }
+    const got = await createIssue($, r, cfg, { team: mapping.team, title: t.title, parentId: parent, projectId: mapping.projectId, delegate: true, description: `Milestone of ${parent}, planned by auto-claude:\n\n${t.title}` })
+    r = got.r
+    if (got.created === undefined) break
+    room--
+    made++
+    // Registered before its own created event arrives, so that event adds no second line.
+    r = { ...r, agent: { ...r.agent!, sessions: { ...r.agent!.sessions, [got.created.identifier]: '' }, subOf: { ...r.agent!.subOf, [got.created.identifier]: parent } } }
+    queue = tagLine(queue, t.line, got.created.identifier)
+    await $.fs.write(FILES(r.root).queue, queue)
+    await appendLog($, r.root, { event: 'agent-issue', run: r.startedAt, kind: 'sub', parent, identifier: got.created.identifier, title: t.title })
+  }
+  if (made > 0) {
+    await tell($, r, `Linear ${parent}: split into ${made} sub-issue(s), one per milestone`)
+    // The parent session's plan is replaced on this poll.
+    r = { ...r, agent: { ...r.agent!, parents: [...new Set([...(r.agent?.parents ?? []), parent])] } }
+    const parentSession = r.agent?.sessions[parent]
+    if (parentSession !== undefined) {
+      const { [parentSession]: _old, ...sigs } = r.agent?.planSigs ?? {}
+      r = { ...r, agent: { ...r.agent!, planSigs: sigs } }
+    }
+  }
+  return r
+}
+
+// Standby GitHub poll: which default-branch workflows are red now, counted over consecutive polls.
+export function noteCiRed(r: AutoRecord, events: ReadonlyArray<{ id: string; stamp: string; workflow?: string; runId?: number }>, slug: string | undefined): AutoRecord {
+  const before = r.agent?.ciRed ?? {}
+  const next: Record<string, { polls: number; sha: string; link?: string }> = {}
+  for (const e of events) {
+    if (!e.id.startsWith('ci:') || e.workflow === undefined || next[e.workflow] !== undefined) continue
+    const link = slug !== undefined && e.runId !== undefined ? `https://github.com/${slug}/actions/runs/${e.runId}` : undefined
+    next[e.workflow] = { polls: (before[e.workflow]?.polls ?? 0) + 1, sha: e.stamp, ...(link !== undefined ? { link } : {}) }
+  }
+  return { ...r, agent: { ...(r.agent ?? { cursor: 0, sessions: {} }), ciRed: next } }
+}
+
+function triageBody(c: Candidate): string {
+  return [
+    c.kind === 'held' ? 'auto-claude held this milestone; it needs a person before it can go on.' : 'The default branch has been red on consecutive polls.',
+    '',
+    c.reason !== undefined ? `Reason: ${untagged(c.reason).slice(0, 2_000)}` : '',
+    c.link !== undefined ? `Link: ${c.link}` : '',
+    '',
+    'Delegate this issue to auto-claude once it is unblocked.',
+    '',
+    '---',
+    c.fingerprint,
+  ]
+    .filter((line, i, all) => line !== '' || (all[i - 1] ?? '') !== '')
+    .join('\n')
+}
+
+// In standby: Triage issues for held or deferred milestones whose line names no issue, and for
+// workflows red on 2 or more polls; never twice (fingerprints), within maxIssuesPerDay, not delegated.
+export async function fileTriage($: EngineInterface, r: AutoRecord, now: number, prLinkOf: (pr: number) => string | undefined): Promise<AutoRecord> {
+  if (r.buildOnly === true || r.linear === undefined) return r
+  if (r.agent?.triageAt !== undefined && now - r.agent.triageAt < TRIAGE_EVERY_MS) return r
+  const cfg = await readAgentConfig($)
+  const mapping = cfg === undefined ? undefined : await mappingOf($, r.root)
+  if (cfg === undefined || mapping === undefined) return r
+  r = { ...r, agent: { ...(r.agent ?? { cursor: 0, sessions: {} }), triageAt: now } }
+  const queue = parseQueue((await readText($, FILES(r.root).queue)) ?? '')
+  const held: HeldInput[] = [
+    ...queue.filter(i => i.mark === '!').map(i => ({ goal: i.condition, reason: i.note ?? 'held', issues: issuesOf(i.condition) })),
+    ...r.ships.filter(s => s.state === 'held').map(s => ({ goal: s.goal, reason: s.note ?? 'held', issues: issuesOf(s.goal), ...(s.pr !== undefined && prLinkOf(s.pr) !== undefined ? { link: prLinkOf(s.pr)! } : {}) })),
+  ]
+  const ciRed: RedInput[] = Object.entries(r.agent?.ciRed ?? {}).map(([workflow, v]) => ({ workflow, ...v }))
+  const createdToday = recent(r.agent?.issueTimes, now).length
+  if (createdToday >= maxIssuesPerDay || (held.every(h => h.issues.length > 0) && ciRed.every(c => c.polls < 2))) return r
+  const fp = await agentCall($, cfg, r.root, { method: 'GET', path: `/v1/fingerprints?project=${encodeURIComponent(mapping.projectId)}` })
+  if (!fp.ok) return noteFailure($, r, fp.error)
+  const existing = ((fp.json as { fingerprints?: unknown }).fingerprints ?? []) as string[]
+  for (const c of issueCandidates({ held, ciRed, existing: Array.isArray(existing) ? existing : [], createdToday, cap: maxIssuesPerDay })) {
+    const got = await createIssue($, r, cfg, { team: mapping.team, title: untagged(c.title), description: triageBody(c), projectId: mapping.projectId, triage: true })
+    r = got.r
+    if (got.created === undefined) break
+    await appendLog($, r.root, { event: 'agent-issue', run: r.startedAt, kind: 'triage', source: c.kind, identifier: got.created.identifier, fingerprint: c.fingerprint })
+    await tell($, r, `Linear: filed ${got.created.identifier} in Triage (${c.title.slice(0, 80)})`)
+  }
+  return r
 }

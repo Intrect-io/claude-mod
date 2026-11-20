@@ -65,6 +65,18 @@ export type AgentBridge = {
   // The Worker's last failure, told once when it starts failing; cleared by a poll with no failure.
   error?: string
   failedAt?: number
+  // Issues the run created (sub-issues and Triage issues) in the last 24 h, for maxIssuesPerDay.
+  issueTimes?: number[]
+  // The accepted plan already decomposed and its spec-ambiguous deferrals sent (`<startedAt>:<round>`).
+  decomposedFor?: string
+  // Default-branch workflows red on consecutive standby polls, by workflow name.
+  ciRed?: Record<string, { polls: number; sha: string; link?: string }>
+  // When the Triage candidates were last looked at.
+  triageAt?: number
+  // Delegated issues split into sub-issues: their sessions keep getting the plan though no line names them.
+  parents?: string[]
+  // Each sub-issue's parent, so a stop on the parent stops its sub-issues too.
+  subOf?: Record<string, string>
 }
 
 // standby: an always-on run between cycles; it is on, but owns nothing and runs no model turn.
