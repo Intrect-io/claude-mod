@@ -198,6 +198,8 @@ export type Goal = {
   recentReasons: string[]
   lastReason?: string
   deferPending?: string
+  // Its category (loop.ts DEFER_CATEGORIES), from 1.14.0.
+  deferCategory?: 'credentials' | 'payment' | 'human-decision' | 'access' | 'spec-ambiguous'
   // wait_until: applied at the next Stop, like deferPending.
   waitPending?: { after: string; alive?: string; within?: string; reason: string }
 }

@@ -33,7 +33,29 @@ export const LOOP_MAX_RETRIES = 2
 export const LOOP_RETRY_DELAY_MS = 120_000
 const KICKOFF_DELAY_MS = 1_000
 const CHECK_TIMEOUT_MS = 600_000
-export const MIN_CHECKS_TO_DEFER = 2
+// Failed checks a milestone needs before defer_goal is accepted: the
+// deferAfterChecks option, 0 from 1.14.0 (it was a fixed 2). ImpossibleBench
+// (arXiv 2510.20270) measured an always-available abort tool cutting GPT-5's
+// hacking of contradictory tasks from 54% to 9%; a gate that makes the model
+// fail twice first keeps it trying to make the check pass.
+let deferAfter = 0
+export function setDeferAfter(n: number): void {
+  deferAfter = Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0
+}
+export function deferAfterChecks(): number {
+  return deferAfter
+}
+
+// Why a milestone is deferred. spec-ambiguous: the spec and the check (or the
+// tests) contradict each other, so making the check pass would mean gaming it.
+export const DEFER_CATEGORIES = ['credentials', 'payment', 'human-decision', 'access', 'spec-ambiguous'] as const
+export type DeferCategory = (typeof DEFER_CATEGORIES)[number]
+
+// The wording every prompt uses for when to defer.
+export function deferRule(): string {
+  const when = deferAfter === 0 ? 'at any point' : `after at least ${deferAfter} failed check(s)`
+  return `For an external blocker (credentials, payment, a human decision, missing access) call ${DEFER_TOOL_ID} ${when}, with its category. When the spec and the check (or its tests) contradict each other, do not make the check pass: defer as spec-ambiguous and say what contradicts what.`
+}
 export const LOG_MAX_LINES = 2_000
 export const LOOP_EXCLUDES = ['worktrees/', '.claude/goals.md', '.claude/goal-loop.log', '.claude/goal-loop.deny', '.claude/auto-activity.log']
 
@@ -259,7 +281,8 @@ async function judge<R extends { block?: string }>($: EngineInterface, { rec, vi
     return below
   }
   if (goal.deferPending !== undefined) {
-    await finishGoal($, rec, { mark: '!', note: `deferred ${isoNow()}: ${goal.deferPending}`, event: 'deferred', reason: goal.deferPending })
+    const category = goal.deferCategory ?? 'human-decision'
+    await finishGoal($, rec, { mark: '!', note: `deferred ${isoNow()} (${category}): ${goal.deferPending}`, event: 'deferred', reason: goal.deferPending, extra: { category, checks: goal.checks } })
     return below
   }
   if (goal.waitPending !== undefined) {
@@ -339,13 +362,13 @@ export async function blockCurrent($: EngineInterface, root: string, why: string
 
 // Marks the queue line and logs; the driver reads the event and ships, holds
 // or starts the next goal. The worktree and branch stay.
-type Outcome = { mark: 'x' | '!'; note: string; event: LogEvent; reason: string }
+type Outcome = { mark: 'x' | '!'; note: string; event: LogEvent; reason: string; extra?: Record<string, unknown> }
 
-async function finishGoal($: EngineInterface, rec: LoopRecord, { mark, note, event, reason }: Outcome): Promise<void> {
+async function finishGoal($: EngineInterface, rec: LoopRecord, { mark, note, event, reason, extra }: Outcome): Promise<void> {
   const current = rec.current
   if (current === undefined) return
   await markQueue($, rec.repoRoot, current.condition, mark, note)
-  await appendLog($, rec.repoRoot, { event, goal: current.condition, reason: clip(reason, 300), branch: current.branch })
+  await appendLog($, rec.repoRoot, { event, goal: current.condition, reason: clip(reason, 300), branch: current.branch, ...(extra ?? {}) })
   $.ui.toast(`auto-claude: milestone ${mark === 'x' ? 'met' : event}: ${clip(current.condition, 80)}`)
   await update($, goalAtom, () => null)
   await update($, viewAtom, () => null)
@@ -401,15 +424,17 @@ export async function waitCall($: EngineInterface, input: Record<string, unknown
 
 // defer_goal: recorded only; the next Stop marks the goal and moves on, so a
 // new goal is never judged against this turn's transcript.
-export async function deferCall($: EngineInterface, reasonRaw: unknown): Promise<{ deny: string } | { result: string }> {
+export async function deferCall($: EngineInterface, reasonRaw: unknown, categoryRaw?: unknown): Promise<{ deny: string } | { result: string }> {
   const reason = typeof reasonRaw === 'string' ? reasonRaw.trim() : ''
   const goal = await read($, goalAtom)
   if (goal === null || (await read($, viewAtom)) === null) return { deny: `${DEFER_TOOL_ID} is only for milestones of a running auto-claude loop.` }
-  if (goal.checks < MIN_CHECKS_TO_DEFER) {
-    return { deny: `Too early to defer: only ${goal.checks} failed check(s). Keep working; defer only an external blocker after ${MIN_CHECKS_TO_DEFER} failed checks.` }
+  if (goal.checks < deferAfter) {
+    return { deny: `Too early to defer: only ${goal.checks} failed check(s). Keep working; defer only an external blocker after ${deferAfter} failed checks.` }
   }
   if (reason === '') return { deny: 'reason is required.' }
-  await update($, goalAtom, g => (g === null ? null : { ...g, deferPending: reason }))
+  if (!(DEFER_CATEGORIES as readonly unknown[]).includes(categoryRaw)) return { deny: `category is required: one of ${DEFER_CATEGORIES.join(', ')}.` }
+  const category = categoryRaw as DeferCategory
+  await update($, goalAtom, g => (g === null ? null : { ...g, deferPending: reason, deferCategory: category }))
   return { result: 'Deferral recorded. Stop now; the loop marks this milestone blocked and moves to the next one.' }
 }
 
@@ -456,10 +481,10 @@ export const AGENT_PARKS = `auto-claude run: a workflow agent does not wait or p
 // Ultracode runs workflows: their agents must keep to the milestone's worktree.
 export const WORKFLOW_RULE = "Workflows and subagents: give every agent the milestone's worktree path and have it work there, with no isolation: 'worktree' (an agent's edits or git writes elsewhere are refused). Agents neither commit nor wait: you commit their work, and a job still running comes back to you for the wait tool. Ending the turn while a workflow runs is fine: the milestone is judged at the Stop of the turn its result opens."
 
-export const LOOP_POLICY = `# auto-claude milestone — ACTIVE
+export const loopPolicy = (): string => `# auto-claude milestone — ACTIVE
 You are building one milestone of an unattended auto-claude run. Nobody is watching this session.
 - Do not ask questions (AskUserQuestion is refused) and do not enter plan mode. Decide with a stated assumption and record it in the commit message.
-- A "CONFIDENCE HALT" becomes a call to ${DEFER_TOOL_ID} with the reason, and only for external blockers (credentials, a human decision, missing access) after at least ${MIN_CHECKS_TO_DEFER} failed checks. Otherwise keep working.
+- A "CONFIDENCE HALT" becomes a call to ${DEFER_TOOL_ID} with the reason and its category. ${deferRule()} Otherwise keep working.
 - Waiting on compute (a training run, a cache build, a job you launched, a file another milestone lands) is not a blocker: commit, call ${WAIT_TOOL_ID} with a shell command that exits 0 once it is done (and an alive command that fails if the job died), then end the turn. Never defer for it.
 - Work only inside the milestone's worktree; commit after each meaningful step. Push only your goal/* branch, never main or with force. auto-claude pushes, merges and deploys for you.
 - Never wait inside a turn (no long sleep, CI watch, Monitor, cron or scheduled wake-up); ${WAIT_TOOL_ID} is how a milestone waits. While an earlier milestone's CI runs you are already building the next one; when this one is done, end the turn and the next prompt comes by itself.
@@ -474,7 +499,7 @@ export function kickoffText(current: LoopCurrent, seq: number): string {
     `Work ONLY in the git worktree ${current.worktree} (branch ${current.branch}); cd there first. Edits elsewhere in the repository are refused.`,
     'Commit after each meaningful step: the milestone is not accepted with uncommitted changes.',
     `You may push only this branch (git push -u origin ${current.branch}); never main/master, never with force. auto-claude opens the PR, merges and deploys once the milestone is met.`,
-    `Nobody is watching: do not ask questions. Decide with a stated assumption and record it in the commit message. For an external blocker (credentials, a human decision, missing access), call ${DEFER_TOOL_ID} after at least ${MIN_CHECKS_TO_DEFER} failed checks.`,
+    `Nobody is watching: do not ask questions. Decide with a stated assumption and record it in the commit message. ${deferRule()}`,
     `If it needs a job to finish first (training, a cache build), launch or check the job, commit, and call ${WAIT_TOOL_ID} with a shell command that exits 0 once it is done; auto-claude polls it and resumes this milestone.`,
     WORKFLOW_RULE.replace("the milestone's worktree path", `the worktree path ${current.worktree}`),
   ].join('\n')

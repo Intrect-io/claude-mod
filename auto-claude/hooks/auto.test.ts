@@ -1165,19 +1165,42 @@ describe('the loop', () => {
     expect(w.evaluations).toBe(0)
   })
 
-  test('defer_goal is refused early, then applied at the next stop, and the run goes on', async ($, on) => {
+  test('defer from the first check on: defer_goal is taken at once with its category, and the deferred event carries checks and category', async ($, on) => {
     const w = world(on)
     await planned($, w)
-    w.checkExit = 1
-    expect((await $.tool.call({ tool: 'mcp__auto-claude__defer_goal', reason: 'needs API key' } as never)).deny).toContain('Too early')
-    await $.classic.Stop(STOP)
-    await $.classic.Stop(STOP)
-    expect((await $.tool.call({ tool: 'mcp__auto-claude__defer_goal', reason: 'needs API key' } as never)).deny).toBeUndefined()
+    const defer = (input: Record<string, unknown>) => $.tool.call({ tool: 'mcp__auto-claude__defer_goal', ...input } as never)
+    expect((await defer({ reason: 'the spec says 2d is 2 days, the test expects 0' })).deny).toContain('category is required')
+    expect((await defer({ reason: 'x', category: 'bored' })).deny).toContain('category is required')
+    expect((await defer({ reason: 'the spec says 2d is 2 days, the test expects 0', category: 'spec-ambiguous' })).deny).toBeUndefined()
     expect((await $.classic.Stop(STOP)).block).toBeUndefined()
-    expect(w.files.get(GOALS)).toMatch(/- \[!\] add\(\) returns a\+b .*deferred.*needs API key/)
+    expect(w.files.get(GOALS)).toMatch(/- \[!\] add\(\) returns a\+b .*deferred .*\(spec-ambiguous\).*the test expects 0/)
+    const deferred = (w.files.get(LOG) ?? '').split('\n').find(l => l.includes('"event":"deferred"')) ?? ''
+    expect(JSON.parse(deferred)).toMatchObject({ category: 'spec-ambiguous', checks: 0 })
     await w.clock.advance(TICK)
     expect(w.notifies.some(n => n.includes('deferred: add() returns a+b'))).toBe(true)
     expect(w.adds.at(-1)).toContain(WT2)
+  })
+
+  test('defer gated by deferAfterChecks: refused before that many failed checks, then applied at the next stop', { options: { deferAfterChecks: 2 } }, async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    w.checkExit = 1
+    expect((await $.tool.call({ tool: 'mcp__auto-claude__defer_goal', reason: 'needs API key', category: 'credentials' } as never)).deny).toContain('Too early')
+    await $.classic.Stop(STOP)
+    await $.classic.Stop(STOP)
+    expect((await $.tool.call({ tool: 'mcp__auto-claude__defer_goal', reason: 'needs API key', category: 'credentials' } as never)).deny).toBeUndefined()
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
+    expect(w.files.get(GOALS)).toMatch(/- \[!\] add\(\) returns a\+b .*deferred.*needs API key/)
+    expect(w.files.get(LOG)).toContain('"category":"credentials","checks":2')
+  })
+
+  test('defer wording: the kickoff, the policy and the tool say when to defer and to defer a contradictory spec as spec-ambiguous', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    const kickoff = w.prompts.find(p => p.startsWith('[auto-claude loop] Milestone #1')) ?? ''
+    expect(kickoff).toContain('at any point')
+    expect(kickoff).toContain('spec-ambiguous')
+    expect(kickoff).not.toContain('after at least 2 failed checks')
   })
 
   test('guards apply while a milestone is built, and only in the session running it', async ($, on) => {
