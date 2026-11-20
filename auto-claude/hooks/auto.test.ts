@@ -294,6 +294,53 @@ describe('a run, local CI', () => {
     expect(w.files.get(LOG)).toContain('"event":"run-done"')
   })
 
+  test('a final check that fails while CI still runs on main spends no round: it runs again once CI is done', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    await meet($, w)
+    await w.clock.advance(TICK)
+    await meet($, w, () => {
+      w.checkExit = 1
+      w.freshExit = 0
+      w.tip = 'abc1234def'
+      w.runList = '2'
+    })
+    for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
+    const finals = () => w.runs.filter(r => r.includes('worktree add --detach /repo/worktrees/auto-final')).length
+    expect(finals()).toBe(1)
+    expect(w.notifies.some(n => n.includes('the final check failed while CI still runs on origin/main'))).toBe(true)
+    expect(w.prompts.at(-1)).not.toContain('the final check still fails')
+    expect((await cmd($, 'status')).text).toContain('auto-claude on')
+    // CI is asked about again only every 3 min, not on every tick.
+    for (let i = 0; i < 2; i++) await w.clock.advance(TICK)
+    expect(finals()).toBe(1)
+    // The watchdog does not call this idle, however long it lasts.
+    for (let i = 0; i < 30; i++) await w.clock.advance(MIN)
+    expect(w.notifies.some(n => n.includes('idle '))).toBe(false)
+    // CI finished green: the check runs again and the run is done after its first round.
+    w.runList = '0'
+    w.checkExit = 0
+    for (let i = 0; i < 12; i++) await w.clock.advance(TICK)
+    expect(w.notifies.at(-1)).toContain('finished: the final check passed after 1 round(s)')
+  })
+
+  test('CI that is still running after 2 h no longer holds the final check: the failure counts', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    await meet($, w)
+    await w.clock.advance(TICK)
+    await meet($, w, () => {
+      w.checkExit = 1
+      w.freshExit = 0
+      w.tip = 'abc1234def'
+      w.runList = '1'
+    })
+    for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
+    expect(w.notifies.some(n => n.includes('the final check failed while CI still runs'))).toBe(true)
+    for (let i = 0; i < 130; i++) await w.clock.advance(MIN)
+    expect(w.prompts.some(p => p.includes('the final check still fails'))).toBe(true)
+  })
+
   test('a loop log at its 2000-line cap still yields every new event', async ($, on) => {
     const w = world(on)
     w.files.set(LOG, `${Array.from({ length: 2000 }, (_, i) => JSON.stringify({ ts: `t${i}`, event: 'denied' })).join('\n')}\n`)
