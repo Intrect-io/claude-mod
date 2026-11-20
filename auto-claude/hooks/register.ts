@@ -87,6 +87,12 @@ const MAX_HOLD_STREAK = 2
 // it waits for died.
 const WAIT_POLL_MS = 3 * 60_000
 const WAIT_PROBE_MS = 30_000
+// A final check that failed while CI still ran on the merged head is not a
+// failed round: CI is asked again this often, for at most this long, and the
+// check runs again once it is done (the night of 2026-11-19: a run stopped
+// 17 s after its last merge, 19 min before that CI passed).
+const FINAL_CI_RECHECK_MS = 3 * 60_000
+const FINAL_CI_WAIT_MS = 2 * 3_600_000
 const ALIVE_FAILS = 2
 // A wait with no `within` of its own still goes to the model after this long,
 // so a job that died, or a condition that cannot pass, is not waited on in
@@ -652,6 +658,16 @@ async function deployFailed($: EngineInterface, r: AutoRecord, spec: DeploySpec,
   return { ...next, repair: parseQueue(line)[0]!.condition }
 }
 
+// Whether any CI run on the merged head of the default branch has not
+// finished. Unknown (no remote, no gh, no runs) counts as not pending.
+async function mergedCiPending($: EngineInterface, r: AutoRecord): Promise<boolean> {
+  if (r.remote === LOCAL) return false
+  const sha = (await run($, ['git', '-C', r.root, 'rev-parse', refOf(r)], r.root)).stdout.trim()
+  if (!/^[0-9a-f]{7,40}$/.test(sha)) return false
+  const ran = await run($, ['gh', 'run', 'list', '--commit', sha, '--limit', '20', '--json', 'status', '-q', '[.[]|select(.status!="completed")]|length'], r.root, 30_000)
+  return ran.exitCode === 0 && Number.parseInt(ran.stdout.trim(), 10) > 0
+}
+
 async function finalCheck($: EngineInterface, r: AutoRecord, caps: Caps): Promise<AutoRecord> {
   if (r.buildOnly === true) return stopRun($, r, `the queue is built (${r.finished} goal(s)); branches are left for review`, 'done')
   const plan = await readText($, FILES(r.root).plan)
@@ -665,6 +681,7 @@ async function finalCheck($: EngineInterface, r: AutoRecord, caps: Caps): Promis
   const ran = made.exitCode === 0 ? await run($, ['bash', '-lc', check], dir, 600_000) : made
   await run($, ['git', '-C', r.root, 'worktree', 'remove', '--force', dir], r.root)
   if (ran.exitCode === 0) {
+    r = { ...r, finalCiSince: undefined, finalCiAt: undefined }
     // Done means live: a merge whose deploy was skipped or failed deploys now.
     const spec = r.deploy
     if (spec !== undefined && r.deployDue === true) {
@@ -691,8 +708,18 @@ async function finalCheck($: EngineInterface, r: AutoRecord, caps: Caps): Promis
     const next = await continueRun($, r, why, result)
     return typeof next === 'string' ? stopRun($, r, `${why}; no next run: ${next}`, 'done') : next
   }
+  const nowMs = await $.clock.now()
+  if (await mergedCiPending($, r)) {
+    const since = r.finalCiSince ?? nowMs
+    if (nowMs - since < FINAL_CI_WAIT_MS) {
+      if (r.finalCiSince === undefined) await tell($, r, `the final check failed while CI still runs on ${refOf(r)}; it runs again when CI is done (up to ${FINAL_CI_WAIT_MS / 3_600_000} h) and no round is spent`)
+      const held: AutoRecord = { ...r, phase: 'run', finalCiSince: since, finalCiAt: nowMs }
+      await writeRecord($, held)
+      return held
+    }
+  }
   if (r.round >= caps.maxRounds) return stopRun($, r, `the final check still fails after ${r.round} round(s)`)
-  let next: AutoRecord = { ...r, phase: 'plan', round: r.round + 1, queueEmpty: false, phaseAt: await $.clock.now(), nudges: 0 }
+  let next: AutoRecord = { ...r, finalCiSince: undefined, finalCiAt: undefined, phase: 'plan', round: r.round + 1, queueEmpty: false, phaseAt: await $.clock.now(), nudges: 0 }
   const kick = r.linear === undefined ? {} : await linearKickoff($, r.root)
   // Changes a replan sees in the brief are covered by the lines it writes.
   if (kick.linear !== undefined && r.linear !== undefined) next = { ...next, linear: { ...kick.linear, followUps: r.linear.followUps } }
@@ -842,6 +869,8 @@ async function nextOrFinish($: EngineInterface, r: AutoRecord, caps: Caps): Prom
     const synced = await linearSync($, r, true)
     if (synced.r.linear !== r.linear) await writeRecord($, synced.r)
     if (synced.added > 0) return
+    // CI was running on the merged head when the check last failed: look again when it is time.
+    if (synced.r.finalCiAt !== undefined && (await $.clock.now()) - synced.r.finalCiAt < FINAL_CI_RECHECK_MS) return
     await finalCheck($, { ...synced.r, phase: 'final' }, caps)
   }
 }

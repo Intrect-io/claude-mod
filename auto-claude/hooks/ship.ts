@@ -135,8 +135,8 @@ export function capReached(r: { merges: number; startedAt: number; waitedMs?: nu
 
 // Only waits are left: nothing is being built or shipped, and at least one
 // pending line waits on its `:: after:`. The run is waiting, not idle.
-export function onlyWaiting(r: Pick<AutoRecord, 'started' | 'finished' | 'ships' | 'waitCount'>): boolean {
-  return (r.waitCount ?? 0) > 0 && r.started <= r.finished && unfinished(r.ships).length === 0
+export function onlyWaiting(r: Pick<AutoRecord, 'started' | 'finished' | 'ships' | 'waitCount' | 'finalCiSince'>): boolean {
+  return ((r.waitCount ?? 0) > 0 || r.finalCiSince !== undefined) && r.started <= r.finished && unfinished(r.ships).length === 0
 }
 
 // Why a run that is on is not moving, with its evidence; undefined when it
@@ -338,7 +338,7 @@ export function startBase(r: Pick<AutoRecord, 'ships' | 'repair'>, next: { base?
 // goal (while the session works on it), a PR's CI pending with nothing
 // wrong, for up to CI_STUCK_MS, or queue lines waiting on their `:: after:`
 // with nothing else to do (the driver polls them; see register.ts pollWaits).
-export function isWaiting(r: Pick<AutoRecord, 'started' | 'finished' | 'ships' | 'waitCount'>, now: number, quietMs?: number): boolean {
+export function isWaiting(r: Pick<AutoRecord, 'started' | 'finished' | 'ships' | 'waitCount' | 'finalCiSince'>, now: number, quietMs?: number): boolean {
   if (r.started > r.finished) return quietMs === undefined || quietMs < LOOP_QUIET_MS
   if (onlyWaiting(r)) return true
   const item = inFlight(r.ships)

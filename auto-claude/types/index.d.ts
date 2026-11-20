@@ -123,6 +123,9 @@ export type AutoRecord = {
   waits?: Record<string, WaitState>
   // How many pending lines wait, as of the last tick: while only waits are left the run is not idle.
   waitCount?: number
+  // The final check failed while CI still ran on the merged head: when that wait began, and when CI was last asked.
+  finalCiSince?: number
+  finalCiAt?: number
   // Time spent with nothing to do but wait, left out of the time cap; and the tick it was last counted at.
   waitedMs?: number
   waitTickAt?: number
