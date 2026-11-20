@@ -96,6 +96,12 @@ export async function teamByKey(token: string, key: string): Promise<Team | unde
 export const FINGERPRINT = /auto-claude:fp=[a-z-]+:[0-9a-f]{12}/g
 export const CLOSED_WINDOW_MS = 30 * 24 * 3_600_000
 
+// Only the description's last non-empty line carries the marker auto-claude wrote; one quoted
+// higher up (a CI log, a reason) must not suppress a later issue.
+export function markerLine(description: string): string {
+  return description.split('\n').map(l => l.trim()).filter(l => l !== '').at(-1) ?? ''
+}
+
 // The auto-claude fingerprint markers in a project's issues that are open or were closed in the
 // last 30 days (so an issue a person closed is not filed again the next day).
 export async function projectFingerprints(token: string, projectId: string, now: number): Promise<string[]> {
@@ -108,7 +114,7 @@ export async function projectFingerprints(token: string, projectId: string, now:
       'query ($project: ID!, $since: DateTimeOrDuration!, $after: String) { issues(first: 100, after: $after, filter: { project: { id: { eq: $project } }, description: { contains: "auto-claude:fp=" }, or: [{ state: { type: { nin: ["completed", "canceled"] } } }, { completedAt: { gte: $since } }, { canceledAt: { gte: $since } }] }) { nodes { description } pageInfo { hasNextPage endCursor } } }',
       { project: projectId, since, after },
     )
-    for (const n of data.issues.nodes) for (const m of (n.description ?? '').matchAll(FINGERPRINT)) found.add(m[0])
+    for (const n of data.issues.nodes) for (const m of markerLine(n.description ?? '').matchAll(FINGERPRINT)) found.add(m[0])
     if (!data.issues.pageInfo.hasNextPage) break
     after = data.issues.pageInfo.endCursor
   }

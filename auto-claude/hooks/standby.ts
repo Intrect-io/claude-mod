@@ -223,7 +223,7 @@ export async function repoArgs($: EngineInterface, r: Pick<AutoRecord, 'root' | 
 }
 
 // Failed runs on the default branch's tip and open issues with the label.
-export async function pollGithub($: EngineInterface, r: AutoRecord, label: string): Promise<{ events: StandbyEvent[]; error?: string }> {
+export async function pollGithub($: EngineInterface, r: AutoRecord, label: string): Promise<{ events: StandbyEvent[]; error?: string; runsOk?: boolean }> {
   await fetchRemote($, r, r.root)
   const repo = await repoArgs($, r)
   const sha = (await run($, ['git', '-C', r.root, 'rev-parse', refOf(r)], r.root, 15_000)).stdout.trim()
@@ -237,5 +237,5 @@ export async function pollGithub($: EngineInterface, r: AutoRecord, label: strin
     if (issues.exitCode === 0) for (const i of openIssues(issues.stdout)) events.push(issueEvent(i.number, i.title, i.updatedAt))
     else error ??= `gh issue list: ${out(issues)}`
   }
-  return { events, ...(error !== undefined ? { error: error.slice(0, 300) } : {}) }
+  return { events, runsOk: runs.exitCode === 0, ...(error !== undefined ? { error: error.slice(0, 300) } : {}) }
 }

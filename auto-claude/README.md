@@ -287,14 +287,19 @@ The MCP sync above writes as the person, so Linear's agent model is out of its r
   - It is registered in the session map before its own created event arrives, so that event adds no second line.
   - The parent session's plan is replaced, and it keeps getting the plan afterwards.
   - Stopping the parent stops its sub-issues.
-  - This runs once per accepted plan, on the queue the planner wrote, before a poll adds lines of its own. A plan that names two delegated issues is not split.
-- **Unclear milestones.** With the Worker configured, the planning prompt says that a milestone with no deterministic check is not planned. The planner instead writes `- **Deferred (spec-ambiguous).** [AGT-12] <what is unclear>` under `## Decisions`, and the run asks that issue's session (an elicitation).
+  - It runs only for a run's first accepted plan, and only on the lines that plan held when it was accepted. A replan, a standby wake (no plan is accepted then), a line already being built or shipped, a fix goal and a `[ci:…]`/`[gh#…]` line are never split. A plan that names two delegated issues is not split either.
+  - When a creation fails, the lines still untagged are split on the next poll. Each line is found again by its text before it is retagged, so a mark the loop made meanwhile stays.
+  - Sub-issues are covered for the run's own MCP sync, so it never queues them a second time.
+- **Unclear milestones.** With the Worker configured, the planning prompt says that a milestone with no deterministic check is not planned. The planner instead writes `- **Deferred (spec-ambiguous).** [AGT-12] <what is unclear>` under `## Decisions`, and the run asks that issue's session (an elicitation). Each deferral is asked once, even across rounds and runs.
 - **Triage issues** (in standby, at most every 10 minutes). Each one is created with `POST /v1/issue` in the team's Triage state and is not delegated: a person delegates it once it is unblocked. Two things become candidates, using `issueCandidates`:
   - a held or deferred milestone whose line names no issue (the reason and its PR link go in the description);
   - a default-branch workflow red on 2 or more consecutive polls (with the run's link).
-- **Never twice.** Each description ends with its fingerprint, `auto-claude:fp=<kind>:<12 hex of sha256(goal or workflow)>`. Candidates whose fingerprint `GET /v1/fingerprints?project=` already finds in an open issue, or in one closed within 30 days, are skipped.
+- **Not filed.** Fix goals count under their PR's milestone. Anything a person stopped in its session is never filed.
+- **Not built by the run.** A filed issue is covered for the run's own MCP sync, so the run never queues it. The answer from `POST /v1/issue` says whether Linear put it in Triage. For a team without triage, the run says that it went to the team's default state.
+- **Never twice.** Each description ends with its fingerprint, `auto-claude:fp=<kind>:<12 hex of sha256(goal or workflow)>`. The Worker reads only the last line, and a marker quoted in the reason is defused. Candidates whose fingerprint `GET /v1/fingerprints?project=` already finds in an open issue, or in one closed within 30 days, are skipped.
 - **Cap.** `maxIssuesPerDay` (userConfig, default 3) caps sub-issues and Triage issues together over any 24 h, counted in the run record. Every creation, and every one the cap skipped, is an `agent-issue` line in `goal-loop.log`.
-- **Across runs.** A new run keeps the bridge's cursor, sessions, stops and creation times, so old events are not queued again.
+- **Across runs.** A new run keeps the bridge's cursor, sessions, stops, creation times and asked deferrals, so old events are not queued again. Splits, parents and plans stay with the run that made them.
+- **Delegated again.** An issue delegated again with a new session is live again: its stop is lifted, and it gets a fresh line unless one is still open. A sub-issue's own first session only maps it.
 
 ## Autonomy and its limits
 

@@ -98,7 +98,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
     nameStatus: '',
     patch: '',
     // The linear-agent Worker behind curl: events served once each, every call, and whether it is down.
-    agent: { events: [] as unknown[], calls: [] as Array<{ method: string; path: string; body: any }>, down: false, failPosts: false, nextIssue: 101, fingerprints: [] as string[] },
+    agent: { events: [] as unknown[], calls: [] as Array<{ method: string; path: string; body: any }>, down: false, failPosts: false, nextIssue: 101, fingerprints: [] as string[], issueFails: 0, triaged: true },
     clock: mock.clock(on, { now: 1_000 }),
   }
   const removed = (path: string) => [...w.gone].some(g => path === g || path.startsWith(`${g}/`))
@@ -170,12 +170,16 @@ function world(on: On, store: Record<string, unknown> = {}) {
       if (url.includes('/v1/events')) return ok(`${JSON.stringify({ events: w.agent.events.splice(0) })}\n200`)
       if (url.includes('/v1/fingerprints')) return ok(`${JSON.stringify({ fingerprints: w.agent.fingerprints })}\n200`)
       if (w.agent.failPosts) return ok('{"error":"the app is not installed yet"}\n409')
+      if (url.endsWith('/v1/issue') && w.agent.issueFails > 0) {
+        w.agent.issueFails--
+        return ok('{"error":"Linear API 502"}\n502')
+      }
       if (url.endsWith('/v1/issue')) {
         // Like Linear: a created issue's fingerprint marker is found by the next lookup.
         const body = w.agent.calls.at(-1)!.body as { description?: string }
         for (const m of String(body.description ?? '').matchAll(/auto-claude:fp=[a-z-]+:[0-9a-f]{12}/g)) w.agent.fingerprints.push(m[0])
         const n = w.agent.nextIssue++
-        return ok(`${JSON.stringify({ ok: true, id: `iss-${n}`, identifier: `AGT-${n}`, url: `https://linear.app/x/issue/AGT-${n}` })}\n200`)
+        return ok(`${JSON.stringify({ ok: true, id: `iss-${n}`, identifier: `AGT-${n}`, url: `https://linear.app/x/issue/AGT-${n}`, triaged: w.agent.triaged })}\n200`)
       }
       return ok('{"ok":true}\n200')
     }
@@ -2210,12 +2214,12 @@ describe('the Linear agent session bridge (1.16.0)', () => {
   const PLAN_FILE = '/repo/.claude/auto-plan.md'
   // The repository mapped to a Linear project (MCP answers with no open issue) and, unless told
   // otherwise, the Worker configured.
-  function bridge(on: On, w: W, config = true) {
+  function bridge(on: On, w: W, config = true, openIssues: (state: string) => unknown[] = () => []) {
     w.files.set('/home/.claude/linear.json', JSON.stringify({ repo_mapping: { repo: { team: 'AGT', projectId: 'proj-1' } } }))
     if (config) w.files.set('/home/.claude/linear-agent.json', JSON.stringify({ url: 'https://agent.test', token: TOKEN }))
     const text = (v: unknown) => ({ value: { content: [{ type: 'text' as const, text: JSON.stringify(v) }], isError: false } })
     on('mcp.call', (_, e) => {
-      if (e.tool === 'list_issues') return text({ issues: [], hasNextPage: false })
+      if (e.tool === 'list_issues') return text({ issues: openIssues(String(e.args.state)), hasNextPage: false })
       if (e.tool === 'list_comments') return text({ comments: [] })
       return text({ id: String(e.args.id ?? 'x'), updatedAt: '2026-11-20T00:00:00Z' })
     })
@@ -2447,6 +2451,40 @@ describe('the Linear agent session bridge (1.16.0)', () => {
     expect(w.agent.calls.filter(c => c.method === 'GET').at(-1)!.path).toBe('/v1/events?since=2&project=proj-1')
   })
 
+  test('decompose: a sub-issue that fails to be created is retried on the next poll, for the lines still untagged', async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    w.agent.issueFails = 1
+    w.agent.events.push(created(1, 'AGT-1', 'sess-1'))
+    await start($, w, QUEUE.replace('- [ ] add()', '- [ ] [AGT-1] add()'))
+    await w.clock.advance(TICK)
+    expect(parseQueue(w.files.get(GOALS) ?? '').map(i => i.condition)).toEqual(['[AGT-1] add() returns a+b', 'sub() returns a-b'])
+    await w.clock.advance(MIN)
+    // add() is being built by now, so only sub() is split; it is not left half done.
+    const queue = parseQueue(w.files.get(GOALS) ?? '').map(i => i.condition)
+    expect(queue).toContain('[AGT-101] sub() returns a-b')
+    expect(queue).toContain('[AGT-1] add() returns a+b')
+  })
+
+  test('decompose: an issue delegated while standing by, with a reply, is not split: no plan was accepted', { timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start --always-on')
+    w.files.set(PLAN_FILE, PLAN)
+    w.files.set(GOALS, QUEUE)
+    await ready($)
+    await w.clock.advance(1_200)
+    await meet($, w)
+    await w.clock.advance(TICK)
+    await meet($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
+    expect((await cmd($, 'status')).text).toContain('phase standby')
+    w.agent.events.push(created(5, 'AGT-5', 'sess-5', 'docs'), { id: 6, action: 'prompted', sessionId: 'sess-5', projectId: 'proj-1', identifier: 'AGT-5', prompt: 'and examples' })
+    for (let i = 0; i < 6; i++) await w.clock.advance(TICK)
+    expect(posts(w, '/v1/issue')).toHaveLength(0)
+  })
+
   test('decompose: a plan naming two delegated issues is not split; the kickoff asks for unclear milestones to be deferred as spec-ambiguous', async ($, on) => {
     const w = world(on)
     bridge(on, w)
@@ -2519,6 +2557,19 @@ describe('the Linear agent session bridge (1.16.0)', () => {
     // Its marker is found on the next look: never filed twice.
     await w.clock.advance(25 * MIN)
     expect(posts(w, '/v1/issue')).toHaveLength(1)
+  })
+
+  test('triage issue: a filed issue is covered for the run\'s own MCP sync, and a team without triage is told so', { timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    // Linear lists the created issue as open in the project, as it would.
+    bridge(on, w, true, state => (state === 'triage' && w.agent.nextIssue > 101 ? [{ id: 'AGT-101', title: 'Held: add() returns a+b', updatedAt: '2026-11-21T00:00:00Z', statusType: 'triage', status: 'Triage' }] : []))
+    w.agent.triaged = false
+    await standingWithHold($, w)
+    await w.clock.advance(TICK)
+    expect(posts(w, '/v1/issue')).toHaveLength(1)
+    expect(w.notifies.some(n => n.includes("filed AGT-101 in the team's default state"))).toBe(true)
+    await w.clock.advance(25 * MIN)
+    expect(w.files.get(GOALS) ?? '').not.toContain('[AGT-101]')
   })
 
   test('triage issue: maxIssuesPerDay 0 files nothing and asks the Worker nothing', { options: { maxIssuesPerDay: 0 }, timeoutMs: 60_000 }, async ($, on) => {

@@ -8,7 +8,7 @@ import type { DeploySpec } from './deploy'
 import { deployMerged } from './deploy-run'
 import { bootstrapRepo } from './bootstrap'
 import { ensureLines, FILES, fetchRemote, LOCAL, out, readText, refOf, repoRoot, run, tell } from './io'
-import { agentMoment, agentSync, carryAgent, fileTriage, noteCiRed, readAgentConfig, setMaxIssuesPerDay, SPEC_AMBIGUOUS_HINT, stoppedGoal } from './bridge'
+import { agentMoment, agentSync, carryAgent, fileTriage, markPlanAccepted, noteCiRed, readAgentConfig, setMaxIssuesPerDay, SPEC_AMBIGUOUS_HINT, stoppedGoal } from './bridge'
 import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, WAIT_TOOL, WAIT_TOOL_ID, waitCall, guardRefusal, LOOP_EXCLUDES, loopPolicy, loopView, DEFER_CATEGORIES, deferRule, setDeferAfter, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop, AGENT_PARKS, backgroundBusy, noteBackground } from './loop'
 import { awaitingHuman, nextStacked, capReached, causeOf, ciAction, diagnose, httpsOf, idleDue, inFlight, isWaiting, onlyWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, summary, unfinished, wakeDue } from './ship'
 import { markItem, nextPending, waitingItems } from './queue'
@@ -1314,7 +1314,8 @@ async function standbyTick($: EngineInterface, r: AutoRecord): Promise<void> {
     // A failing poll is told once, when it starts failing.
     if (g.error !== undefined && r.githubError === undefined) await tell($, r, `GitHub poll failed: ${g.error}; retried every ${standbyCfg.githubMs / 60_000} min`)
     r = { ...r, seen: got.seen, followUps: got.followUps, githubError: g.error }
-    if (g.error === undefined) r = noteCiRed(r, g.events, await slugOf($, r))
+    // The run list alone decides what is red; a failing issue list does not stop the count.
+    if (g.runsOk === true) r = noteCiRed(r, g.events, await slugOf($, r))
   }
   const slug = r.agent !== undefined ? await slugOf($, r) : undefined
   r = await fileTriage($, r, now, pr => (slug === undefined ? undefined : `https://github.com/${slug}/pull/${pr}`))
@@ -2022,7 +2023,9 @@ export const register: Register = (on, options) => {
     const fixed = r.deploy?.source === 'file'
     const verdict = validatePlan(await readText($, f.plan), await readText($, f.queue), r.round === 1, fixed)
     if (!verdict.ok) return { result: `Not ready; fix and call ${READY_TOOL} again:\n- ${verdict.errors.join('\n- ')}` }
-    let next: AutoRecord = { ...r, phase: 'run', queueEmpty: false }
+    // With the Linear agent bridge configured, the accepted plan is marked for splitting into sub-issues.
+    const accepted: AutoRecord = { ...r, phase: 'run', queueEmpty: false }
+    let next: AutoRecord = (await readAgentConfig($)) !== undefined ? markPlanAccepted(accepted, verdict.pending.map(i => i.condition)) : accepted
     let deployNote = ''
     if (!fixed && verdict.deploy !== undefined) {
       if (verdict.deploy.kind === 'command') {

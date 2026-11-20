@@ -77,6 +77,11 @@ export type AgentBridge = {
   parents?: string[]
   // Each sub-issue's parent, so a stop on the parent stops its sub-issues too.
   subOf?: Record<string, string>
+  // Set when a run's first plan is accepted: the open lines it held, and the delegated issue being
+  // split once known; cleared when every line was split (a failure leaves it for the next poll).
+  decomposePending?: { key: string; lines: string[]; parent?: string }
+  // Spec-ambiguous deferrals already asked (sha of issue and text), so each is asked once.
+  asked?: string[]
 }
 
 // standby: an always-on run between cycles; it is on, but owns nothing and runs no model turn.
