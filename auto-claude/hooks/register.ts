@@ -8,6 +8,7 @@ import type { DeploySpec } from './deploy'
 import { deployMerged } from './deploy-run'
 import { bootstrapRepo } from './bootstrap'
 import { ensureLines, FILES, fetchRemote, LOCAL, out, readText, refOf, repoRoot, run, tell } from './io'
+import { agentMoment, agentSync, stoppedGoal } from './bridge'
 import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, WAIT_TOOL, WAIT_TOOL_ID, waitCall, guardRefusal, LOOP_EXCLUDES, loopPolicy, loopView, DEFER_CATEGORIES, deferRule, setDeferAfter, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop, AGENT_PARKS, backgroundBusy, noteBackground } from './loop'
 import { awaitingHuman, nextStacked, capReached, causeOf, ciAction, diagnose, httpsOf, idleDue, inFlight, isWaiting, onlyWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, summary, unfinished, wakeDue } from './ship'
 import { markItem, nextPending, waitingItems } from './queue'
@@ -479,6 +480,7 @@ async function awaitHuman($: EngineInterface, r: AutoRecord, item: ShipItem, hit
   await run($, ['gh', 'pr', 'comment', String(item.pr), ...repo, '--body', `[auto-claude] This PR changes protected files, so auto-claude does not merge it. A person reviews and merges it (auto-claude then deploys and goes on as after its own merge), or closes it (the milestone is held).\n\nProtected files changed:\n${hits.map(h => `- \`${h}\``).join('\n')}`], wt, 30_000)
   await appendLog($, r.root, { event: 'awaiting-human', run: r.startedAt, goal: item.goal, ...(item.pr !== undefined ? { pr: item.pr } : {}), files: hits })
   await tell($, r, `PR #${item.pr ?? '?'} changes protected files (${hits.slice(0, 5).join(', ')}${hits.length > 5 ? ', …' : ''}): it waits for a person to merge or close it; other milestones go on`)
+  r = await agentMoment($, r, { kind: 'awaiting-human', goal: item.goal, reason: `Protected files changed: ${hits.join(', ')}`, ...(await prLink($, r, item.pr)) })
 
   return { r, item: { ...item, state: 'awaiting-human', protectedFiles: hits, since: await $.clock.now(), note: undefined } }
 }
@@ -532,6 +534,13 @@ async function diffGate($: EngineInterface, r: AutoRecord, item: ShipItem, ref: 
   return { hold: why }
 }
 
+// The PR's web address for a Linear session ({} when there is no PR or no GitHub remote).
+async function prLink($: EngineInterface, r: AutoRecord, pr: number | undefined): Promise<{ pr?: string }> {
+  if (pr === undefined || r.remote === LOCAL || r.agent === undefined) return {}
+  const slug = repoSlug((await run($, ['git', '-C', r.root, 'remote', 'get-url', r.remote], r.root, 15_000)).stdout)
+  return slug === undefined ? {} : { pr: `https://github.com/${slug}/pull/${pr}` }
+}
+
 // A milestone given up on: held, told, and counted for the circuit breaker
 // (two in a row for one cause stop the run, in tick).
 async function hold($: EngineInterface, r: AutoRecord, item: ShipItem, note: string): Promise<{ r: AutoRecord; item: ShipItem }> {
@@ -541,6 +550,7 @@ async function hold($: EngineInterface, r: AutoRecord, item: ShipItem, note: str
   const ids = lineIssues(item.goal)
   if (r.linear !== undefined && ids.length > 0) r = { ...r, linear: await onHeld($, r.linear, ids, `${item.pr !== undefined ? `PR #${item.pr}: ` : ''}${note}`) }
   await appendActivity($, r.root, { event: 'held', run: r.startedAt, goal: item.goal, ...(item.pr !== undefined ? { pr: item.pr } : {}), cause })
+  r = await agentMoment($, r, { kind: note.startsWith('diff judge:') ? 'diff-judge-hold' : 'held', goal: item.goal, reason: note, ...(await prLink($, r, item.pr)) })
   // A held repair frees the stacked milestones; their deploys count toward the stop.
   return { r: { ...r, held: r.held + 1, holdCause: cause, holdStreak: streak, ...(item.repair === true ? { repair: undefined } : {}) }, item: { ...item, state: 'held', note } }
 }
@@ -708,6 +718,7 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
     }
     await tell($, next, `merged ${landed}: ${item.goal.slice(0, 80)}`)
     await appendActivity($, r.root, { event: 'merged', run: r.startedAt, goal: item.goal, ...(item.pr !== undefined ? { pr: item.pr } : {}) })
+    next = await agentMoment($, next, { kind: 'merged', goal: item.goal, ...(await prLink($, r, item.pr)) })
     // A labelled GitHub issue the milestone resolved is closed with the evidence.
     for (const n of lineGhIssues(item.goal)) {
       await run($, ['gh', 'issue', 'close', String(n), ...repo, '--comment', `[auto-claude] Resolved by ${landed}: ${item.goal.slice(0, 160)}`], r.root, 30_000)
@@ -1273,6 +1284,7 @@ async function askUltracode($: EngineInterface, r: AutoRecord, key: string): Pro
 async function standbyTick($: EngineInterface, r: AutoRecord): Promise<void> {
   const now = await $.clock.now()
   r = (await linearSync($, r)).r
+  r = await agentSync($, r, now)
   const due = dueSources(r, now)
   if (due.includes('health') && r.repair === undefined && r.deploy !== undefined) {
     const h = await pollHealth($, r)
@@ -1420,7 +1432,11 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
       return
     }
 
-    r = await shipSteps($, await readEvents($, r))
+    // The bridge first: a session mapped on this poll gets the moments read just below. Its cursor
+    // is written at once, so a later throw in this tick cannot replay the replies it applied.
+    const synced = await agentSync($, r, await $.clock.now())
+    if (synced.agent !== r.agent) await writeRecord($, synced)
+    r = await shipSteps($, await readEvents($, synced))
     if (!r.on) return
     if ((r.holdStreak ?? 0) >= MAX_HOLD_STREAK) {
       const last = [...r.ships].reverse().find(s => s.state === 'held')
@@ -1486,9 +1502,14 @@ async function readEvents($: EngineInterface, r: AutoRecord): Promise<AutoRecord
       }
       const ids = e.goal === undefined ? [] : lineIssues(e.goal)
       if (r.linear !== undefined && r.buildOnly !== true && ids.length > 0) r = { ...r, linear: await onStart($, r.linear, ids) }
+      if (e.goal !== undefined && r.buildOnly !== true) r = await agentMoment($, r, { kind: 'start', goal: e.goal })
     } else if (e.event === 'met' && e.goal !== undefined && e.branch !== undefined) {
       r = { ...r, finished: r.finished + 1 }
-      if (r.buildOnly !== true) r = await metToShip($, r, e.goal, e.branch)
+      // Stopped in its Linear session while it was built: not shipped.
+      if (r.buildOnly !== true && stoppedGoal(r, e.goal)) {
+        r = { ...r, held: r.held + 1 }
+        await tell($, r, `met but not shipped: ${e.goal.slice(0, 80)} was stopped in its Linear session`)
+      } else if (r.buildOnly !== true) r = await metToShip($, r, e.goal, e.branch)
     } else if (e.event === 'blocked' || e.event === 'deferred') {
       r = { ...r, held: r.held + 1, finished: r.finished + 1 }
       // A repair that could not be built: the stacked milestones go on, and their deploys count toward the stop.
@@ -1498,6 +1519,7 @@ async function readEvents($: EngineInterface, r: AutoRecord): Promise<AutoRecord
       await tell($, r, `${e.event}: ${(e.goal ?? '').slice(0, 80)}${e.reason !== undefined ? ` (${e.reason.slice(0, 100)})` : ''}; going on`)
       const ids = e.goal === undefined ? [] : lineIssues(e.goal)
       if (r.linear !== undefined && r.buildOnly !== true && ids.length > 0) r = { ...r, linear: await onHeld($, r.linear, ids, `${e.event}${e.reason !== undefined ? `: ${e.reason}` : ''}`) }
+      if (e.goal !== undefined && r.buildOnly !== true) r = await agentMoment($, r, { kind: e.event === 'deferred' ? 'deferred' : 'held', goal: e.goal, ...(e.reason !== undefined ? { reason: e.reason } : {}) })
     } else if (e.event === 'waiting') {
       // Back in the queue, waiting on its command: finished as a build, not held.
       r = { ...r, finished: r.finished + 1 }
@@ -1519,7 +1541,8 @@ async function metToShip($: EngineInterface, r: AutoRecord, goal: string, branch
   const parent: string | undefined = r.fixes[goal]
   const wt: string | undefined = r.worktrees[branch]
   // A fix landed: its branch carries the PR's commits plus the fix.
-  if (parent !== undefined) return { ...r, ships: r.ships.map((s): ShipItem => (s.headRef === parent ? { ...s, branch, worktree: wt, state: 'push', repeats: 0 } : s)) }
+  // A milestone held meanwhile (stopped in its Linear session) stays held.
+  if (parent !== undefined) return { ...r, ships: r.ships.map((s): ShipItem => (s.headRef === parent && s.state !== 'held' && !stoppedGoal(r, s.goal) ? { ...s, branch, worktree: wt, state: 'push', repeats: 0 } : s)) }
   const check: string | undefined = parseQueue((await readText($, FILES(r.root).queue)) ?? '').find(i => i.condition === goal)?.check
   // Built on a branch still shipping, or behind milestones still shipping: it
   // waits its turn, and is rebased onto the default branch before its push.
