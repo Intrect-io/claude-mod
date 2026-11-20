@@ -59,8 +59,13 @@ const BASH_WRITE = /(?:>>?\s*['"]?[^\s|&;]*(?:test|spec)|\btee\b|\bsed\s+-[a-zA-
 // A shell command that writes a test file (redirect, tee, sed -i, a script) must
 // not be a way around the Edit/Write check. The raw command is read, heredoc
 // bodies included, since the body is the file's text.
+// Whether a shell command writes a test file (redirect, tee, sed -i, a script).
+export function writesTestFile(command: string): boolean {
+  return BASH_TEST_PATH.test(command) && BASH_WRITE.test(command)
+}
+
 export function checkSwallowedBash(command: string): string | undefined {
-  if (!BASH_TEST_PATH.test(command) || !BASH_WRITE.test(command)) return undefined
+  if (!writesTestFile(command)) return undefined
   const hit = [...PYTHON, ...SCRIPT].find(entry => entry.pattern.test(command))
 
   return hit === undefined ? undefined : swallowRefusal('this command writes a test file that', hit.name)

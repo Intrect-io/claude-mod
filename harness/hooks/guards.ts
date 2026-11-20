@@ -3,6 +3,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { GuardEnv } from '../types'
 import { checkDocAppend, checkDocBudget, checkSwallowedBash, checkSwallowedTest, DEFAULT_DOC_BUDGETS, docKind, editDelta, lineCount, writtenTexts } from './doc-guards'
+import { checkTestTamper, checkTestTamperBash, replacedTexts } from './tamper'
 import type { DocBudgets } from './doc-guards'
 import { checkAgentWorktree, checkMemorySecret, checkSystemPython, checkTradingOrder, DEFAULT_ORDER_TOOLS, isVersionBump, versionBumpNote } from './extra-guards'
 import { cachedReport, checkWorktreeGrowth, devRepoRoot, isWorktreeAdd, largeStageRefusal, leftoverMerged, measureRepo, stagedTargets } from './repo-size'
@@ -230,8 +231,10 @@ export async function guardsToolCall(
         checkLlmPort(stripProse(command)) ??
         checkSystemPython(command) ??
         checkSwallowedBash(command) ??
+        checkTestTamperBash(command).deny ??
         checkDocAppend(stripProse(command))
       if (refusal !== undefined) return { deny: refusal }
+      const tamperNote = checkTestTamperBash(command).note
       if (toggles.repoSize) {
         const growth = await repoGrowthRefusal($, command, env.home)
         if (growth !== undefined) return { deny: growth }
@@ -251,6 +254,7 @@ export async function guardsToolCall(
         notes.push(`harness ran this inside the platform venv (${env.venv}); the result is from the venv, not the system Python.`)
       }
       if (ran.deny === undefined && isVersionBump(command) && !(await read($, shipAtom)).prListed) notes.push(versionBumpNote())
+      if (ran.deny === undefined && tamperNote !== undefined) notes.push(tamperNote)
 
       if (ran.deny !== undefined || notes.length === 0) return ran
 
@@ -275,12 +279,18 @@ export async function guardsToolCall(
         .filter((part): part is string => typeof part === 'string')
         .join('\n')
       const path = typeof input.file_path === 'string' ? input.file_path : ''
+      const tamper = checkTestTamper(path, writtenTexts(input), e.tool === 'Edit' ? replacedTexts(input) : undefined)
       const refusal =
         checkLlmPort(text) ??
         checkMemorySecret(path, text, env.home) ??
         checkSwallowedTest(path, writtenTexts(input)) ??
+        tamper.deny ??
         (await docBudgetRefusal($, e.tool, path, input))
       if (refusal !== undefined) return { deny: refusal }
+      if (tamper.note !== undefined) {
+        const ran = await next(e)
+        return ran.deny !== undefined ? ran : { ...ran, context: [...(ran.context ?? []), tamper.note] }
+      }
     }
 
     return next(e)

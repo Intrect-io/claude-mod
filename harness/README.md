@@ -29,6 +29,16 @@ Refuses or rewrites a single tool call.
 - The LM Studio port.
 - Secrets (keys, tokens, private keys, `password=`) written into `~/.claude/projects/*/memory/`.
 
+**Test tampering** (0.7.0, `hooks/tamper.ts`)
+- Judged on test files (the same paths as below) at Edit/Write, and on shell commands that write one. The patterns are published reward hacks by coding agents: METR, "Recent reward hacking" (2025-06); Anthropic, "Natural emergent misalignment from reward hacking"; ImpossibleBench (arXiv 2510.20270). A prompt asking the model not to cheat barely changed the rate in those studies, so the check is made at the tool call.
+- **Refused**, because each makes a failing test report success:
+  - a `pytest_runtest_makereport` hook that sets the report outcome;
+  - a patch of `TestReport.from_item_and_call`;
+  - an `__eq__` whose body is only `return True` (or `__ne__` with `return False`);
+  - `sys.exit(0)`, `os._exit(...)` or `process.exit(0)`.
+- **Noted** (context, nothing refused), because a legitimate change may do it: a skip or xfail marker, a `.skip` or `.only` test, `assert True` or `expect(true)`, and an Edit that leaves fewer assertions than the `old_string` it replaces.
+- `fixtures/tamper-v1` pins the expected verdicts (`bun fixtures/tamper-v1/run.ts --section harness`).
+
 **Tests that swallow exceptions** (rules/code-quality.md)
 - An Edit/Write of a test file (`test_*.py`, `*_test.py`, `conftest.py`, `*.test.ts`, `*.spec.*`, anything under `tests/` or `__tests__/`) is refused when the text it writes holds a swallowed exception: Python `except ...: pass` (or `...`), a bare `except:`, `contextlib.suppress`; TS/JS an empty `catch` block (a comment inside counts as empty) or `.catch(() => {})` / `() => undefined|null`. A test that swallows an exception cannot fail.
 - A Bash command that writes a test file (redirect, `tee`, `sed -i`, a script) with such text is refused too, so the shell is not a way around it.
