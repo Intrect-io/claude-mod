@@ -8,6 +8,8 @@ import { guardRefusal, maxBranchSeq } from './loop'
 import type { ShipState } from '../types'
 import { ciEvent, cycleLine, DAY_MS, dayCapHit, dueSources, eventLines, failedRuns, issueEvent, lineGhIssues, MAX_EVENT_LINES, nextRunBlock, nextTimers, openIssues, recentMerges, sourcesOf, withCycle } from './standby'
 import { hostLoadWait } from './plan'
+import { diffAction, judgeDiffText, parseNameStatus, restorePlan } from './verify'
+import { diffJudgePrompt, parseDiffVerdict } from './evaluator'
 import { activityDue, activityOf, HEARTBEAT_MS, idleShare, MAX_GAP_MS, statsDays, statsText, summarizeStats } from './stats'
 import { deployFixLine, deployOf, finalCheckOf, fixLine, kickoffText, POLICY, validatePlan, worktreeRefs } from './plan'
 import { markItem, nextPending, parseDuration, parseQueue, requeueItem, slugify, summarize, waitingItems } from './queue'
@@ -688,6 +690,7 @@ describe('stats', () => {
     const [r] = summarizeStats(log, T0 + 90 * MIN)
     expect(r.ms).toEqual({ building: 40 * MIN, 'waiting-ci': 10 * MIN, 'waiting-after': 10 * MIN, standby: 0, 'idle-quiet': 10 * MIN })
     expect([r.merges, r.holds, r.deferrals, r.open]).toEqual([1, 2, 1, false])
+    expect([r.judged, r.judgeHolds]).toEqual([0, 0])
     expect(Math.abs(idleShare(r) - 10 / 70) < 1e-9).toBe(true)
     expect(statsText([r], 7)).toContain('idle-quiet 14.3%; 1 merged, 2 held, 1 deferred')
   })
@@ -707,6 +710,7 @@ describe('stats', () => {
     const [first, second] = runs
     expect(first.ms['idle-quiet']).toBe(MAX_GAP_MS)
     // idle-quiet 0-200 (140 min unobserved), standby 410-500 until the next run (30 min unobserved).
+    expect(summarizeStats([act(0, 'building'), line(1, { event: 'diff-judge', run: T0, verdict: 'circumvents', action: 'hold' }), line(2, { event: 'diff-judge', run: T0, verdict: 'skipped' })], T0 + 5 * MIN)[0]).toMatchObject({ judged: 1, judgeHolds: 1 })
     expect(first.unobservedMs).toBe(200 * MIN - MAX_GAP_MS + (90 * MIN - MAX_GAP_MS))
     expect(first.ms.standby).toBe(MAX_GAP_MS)
     expect(first.open).toBe(false)
@@ -721,5 +725,35 @@ describe('stats', () => {
     expect(summarizeStats(log, T0 + 8 * 86_400_000, 9)).toHaveLength(1)
     expect([statsDays([]), statsDays(['3']), statsDays(['-1']), statsDays(['x'])]).toEqual([7, 3, 7, 7])
     expect(statsText([], 7)).toContain('No auto-claude run')
+  })
+})
+
+describe('diff judge (pure)', () => {
+  const none = { testInfra: [], testsModified: [], testsAdded: [], assertsRemoved: 0 }
+  test('diff judge: what each verdict does', () => {
+    expect(diffAction({ verdict: 'circumvents', reason: '' }, none)).toBe('hold')
+    expect(diffAction({ verdict: 'unsure', reason: '' }, none)).toBe('note')
+    expect(diffAction({ verdict: 'unsure', reason: '' }, { ...none, testsModified: ['tests/test_a.py'] })).toBe('hold')
+    expect(diffAction({ verdict: 'unsure', reason: '' }, { ...none, testInfra: ['conftest.py'] })).toBe('hold')
+    expect(diffAction({ verdict: 'ok', reason: '' }, { ...none, testInfra: ['conftest.py'] })).toBe('go')
+  })
+  test('diff judge: the base re-run restores modified, deleted and renamed tests and infra, and removes added infra', () => {
+    const ns = 'M\ttests/test_a.py\nD\ttests/test_b.py\nR90\ttests/test_c.py\ttests/test_d.py\nA\ttests/conftest.py\nA\ttests/test_new.py\nM\tscripts/ci.sh\nM\tsrc/x.py\n'
+    expect(parseNameStatus(ns)[2]).toEqual({ status: 'R90', path: 'tests/test_d.py', from: 'tests/test_c.py' })
+    const plan = restorePlan(ns, 'bash scripts/ci.sh')
+    expect(plan.restore.sort()).toEqual(['scripts/ci.sh', 'tests/test_a.py', 'tests/test_b.py', 'tests/test_c.py'])
+    expect(plan.remove.sort()).toEqual(['tests/conftest.py', 'tests/test_d.py'])
+  })
+  test('diff judge: the judge reads test files first, cut to length, and its reply is parsed strictly', () => {
+    const patch = 'diff --git a/src/a.py b/src/a.py\n+x\ndiff --git a/tests/test_a.py b/tests/test_a.py\n-    assert x\n'
+    const text = judgeDiffText(patch, { ...none, testsModified: ['tests/test_a.py'] })
+    expect(text.indexOf('tests/test_a.py')).toBeLessThan(text.indexOf('src/a.py'))
+    const long = `diff --git a/src/big.py b/src/big.py\n${'+y\n'.repeat(40_000)}diff --git a/src/z.py b/src/z.py\n+z\n`
+    const cut = judgeDiffText(long, none, 10_000)
+    expect(cut.length).toBeLessThan(11_000)
+    expect(cut).toContain('left out for length: src/z.py')
+    expect(parseDiffVerdict('{"verdict": "circumvents", "reason": "r"}')).toEqual({ verdict: 'circumvents', reason: 'r' })
+    expect(parseDiffVerdict('{"verdict": "maybe"}')).toBeUndefined()
+    expect(diffJudgePrompt({ goal: 'g', check: 'c', classified: { ...none, testInfra: ['conftest.py'] }, diff: 'D' })).toContain('test infrastructure changed: conftest.py')
   })
 })

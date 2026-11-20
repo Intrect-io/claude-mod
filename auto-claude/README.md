@@ -95,6 +95,29 @@ For each run it also prints its merges, holds and deferrals, and the idle-quiet 
 - Merges and holds are logged by the driver (`merged`, `held`) in the same file from 1.11.0. It is a file of its own because the loop's Stop hook rewrites `goal-loop.log` whole, and a tick writing that log at the same moment lost the hook's `met` line (seen in the tests). Blocked lines and deferrals come from the loop's `blocked` and `deferred` events. Runs before 1.11.0 have no activity events, so they are not shown.
 - The log keeps its last 2000 lines, so stats covers about as far back as those reach.
 
+## The diff judge
+
+A check that passes proves little when the same branch changed the tests, or whatever runs them. Coding agents have been measured doing exactly that: ImpossibleBench (arXiv 2510.20270) and METR's "Recent reward hacking" (2025-06). A prompt telling them not to barely changes the rate. So from 1.12.0, a milestone faces one more gate after `verifyFresh` and before it lands, in both CI modes.
+
+1. **Classify** (`hooks/verify.ts` `classifyDiff`). The driver reads the branch's diff against its merge base with the default branch and sorts what it touched:
+   - testInfra: `conftest.py`, pytest/tox/setup.cfg/jest/vitest/bun/mocha configs, `.github/workflows/**`, and any file the check command names, such as `scripts/ci.sh` in `bash scripts/ci.sh`;
+   - existing test files modified, deleted or renamed;
+   - test files added;
+   - assertions removed, net, in test files.
+2. **Re-run on the base tests.** In `worktrees/auto-verify`, every modified or deleted existing test file and every testInfra file is put back as the base had it. TestInfra the branch added is removed. Added tests stay, because they are new evidence. The check then runs again. A failure here does not decide anything by itself, because a goal can legitimately change behaviour. It becomes evidence for the judge.
+3. **Judge** (`evaluator.ts` `judgeDiff`, `claude-sonnet-5-5`). The judge reads the goal, the check, the classification, the re-run result and the diff, test files first, cut near 60k characters. It answers `ok`, `circumvents` or `unsure`. A judge that does not answer or does not parse counts as `unsure`.
+4. **Act.**
+   - `circumvents`, or `unsure` on a diff that touched testInfra or existing tests: the milestone is **held**.
+     - The PR stays open, labelled `auto-claude:needs-human`, with a comment naming the files and the re-run result.
+     - A Linear issue the line names gets a comment.
+     - Two holds in a row for the same cause stop the run, as for any hold.
+   - Any other `unsure` goes on, with a note to the person.
+   - `ok` goes on.
+
+Each verdict is a `diff-judge` event in `.claude/auto-activity.log`. `/auto-claude stats` counts the judged and held ones per run. The milestone condition asked for `.claude/goal-loop.log`, but a tick writing that log can lose the loop's lines (see "Where the time goes"), so the event goes to the driver's own file. A missing merge base skips the gate, with a `skipped` event. `diffJudge: false` turns the gate off.
+
+`fixtures/tamper-v1` pins `classifyDiff`'s results (`bun fixtures/tamper-v1/run.ts --section classify`). `/auto-claude judge-eval` (1.13.0) measures the judge on its diffs.
+
 ## Ultracode
 
 A run works in ultracode: standing dynamic-workflow orchestration, where the model writes and runs a workflow of subagents for each substantive task.

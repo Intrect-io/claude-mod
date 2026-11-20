@@ -59,10 +59,13 @@ export type RunStats = {
   merges: number
   holds: number
   deferrals: number
+  // Diff-judge verdicts given (1.12.0), and the milestones they held.
+  judged: number
+  judgeHolds: number
   open: boolean
 }
 
-type Entry = { ts: number; event: string; state?: string; run?: number }
+type Entry = { ts: number; event: string; state?: string; run?: number; action?: string; verdict?: string }
 
 function parse(lines: readonly string[]): Entry[] {
   const out: Entry[] = []
@@ -78,7 +81,7 @@ function parse(lines: readonly string[]): Entry[] {
     const o = raw as Record<string, unknown>
     const ts = typeof o.ts === 'string' ? Date.parse(o.ts) : NaN
     if (!Number.isFinite(ts) || typeof o.event !== 'string') continue
-    out.push({ ts, event: o.event, state: typeof o.state === 'string' ? o.state : undefined, run: typeof o.run === 'number' ? o.run : undefined })
+    out.push({ ts, event: o.event, state: typeof o.state === 'string' ? o.state : undefined, run: typeof o.run === 'number' ? o.run : undefined, action: typeof o.action === 'string' ? o.action : undefined, verdict: typeof o.verdict === 'string' ? o.verdict : undefined })
   }
 
   return out.sort((a, b) => a.ts - b.ts)
@@ -120,7 +123,7 @@ export function summarizeStats(lines: readonly string[], now: number, days = 7):
     }
     const inRun = (e: Entry) => e.ts >= from && e.ts <= to && (e.run === undefined || e.run === run)
     const count = (names: readonly string[]) => entries.filter(e => names.includes(e.event) && inRun(e)).length
-    out.push({ run, from, to, ms, unobservedMs, merges: count(['merged']), holds: count(['blocked', 'held']), deferrals: count(['deferred']), open })
+    out.push({ run, from, to, ms, unobservedMs, merges: count(['merged']), holds: count(['blocked', 'held']), deferrals: count(['deferred']), judged: entries.filter(e => e.event === 'diff-judge' && e.verdict !== 'skipped' && inRun(e)).length, judgeHolds: entries.filter(e => e.event === 'diff-judge' && e.action === 'hold' && inRun(e)).length, open })
   }
 
   return out.filter(r => r.to >= now - days * 86_400_000).sort((a, b) => a.from - b.from)
@@ -146,7 +149,7 @@ export function statsText(runs: readonly RunStats[], days: number): string {
     const when = `${new Date(r.from).toISOString().slice(0, 16).replace('T', ' ')} → ${r.open ? 'now' : new Date(r.to).toISOString().slice(11, 16)}`
     const parts = STATES.map(s => `${s} ${hm(r.ms[s])}`).join(', ')
     const unobserved = r.unobservedMs > 0 ? `, unobserved ${hm(r.unobservedMs)}` : ''
-    lines.push(`- run ${when}: ${parts}${unobserved}; idle-quiet ${(idleShare(r) * 100).toFixed(1)}%; ${r.merges} merged, ${r.holds} held, ${r.deferrals} deferred`)
+    lines.push(`- run ${when}: ${parts}${unobserved}; idle-quiet ${(idleShare(r) * 100).toFixed(1)}%; ${r.merges} merged, ${r.holds} held, ${r.deferrals} deferred${r.judged > 0 ? `; diff judge ${r.judged} judged, ${r.judgeHolds} held` : ''}`)
   }
 
   return lines.join('\n')

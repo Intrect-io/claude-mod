@@ -91,6 +91,10 @@ function world(on: On, store: Record<string, unknown> = {}) {
     tip: 'tip',
     contextPercent: 50,
     compacts: 0,
+    // The diff gate: `git merge-base` (empty: none, so the gate is skipped), `git diff --name-status` and the patch.
+    mergeBase: '',
+    nameStatus: '',
+    patch: '',
     clock: mock.clock(on, { now: 1_000 }),
   }
   const removed = (path: string) => [...w.gone].some(g => path === g || path.startsWith(`${g}/`))
@@ -159,6 +163,9 @@ function world(on: On, store: Record<string, unknown> = {}) {
       return ok()
     }
     if (a.includes('for-each-ref')) return ok(w.branches)
+    if (a.includes(' merge-base ')) return ok(w.mergeBase ? `${w.mergeBase}\n` : '', w.mergeBase ? 0 : 1)
+    if (a.includes(' diff --name-status ')) return ok(w.nameStatus)
+    if (a.includes(' diff -M ')) return ok(w.patch)
     if (a.includes('symbolic-ref --short HEAD')) return ok('main\n')
     if (e.argv[0] === 'mv') {
       const [from, to] = e.argv.slice(-2) as [string, string]
@@ -903,6 +910,66 @@ describe('a run, github CI', () => {
     await meet($, w)
     await w.clock.advance(TICK)
     expect(w.merged).toHaveLength(1)
+  })
+})
+
+describe('the diff judge (1.12.0)', () => {
+  const PATCH = 'diff --git a/tests/test_a.py b/tests/test_a.py\n--- a/tests/test_a.py\n+++ b/tests/test_a.py\n@@ -1,3 +1,2 @@\n def test_a():\n-    assert f(2) == 4\n+    pass\n'
+  const gate = (w: W, verdict: string) => {
+    w.mergeBase = 'abc1234'
+    w.nameStatus = 'M\ttests/test_a.py\nM\tsrc/a.py\n'
+    w.patch = PATCH
+    w.verdicts.push('{"met": true, "reason": "tests pass"}', verdict)
+  }
+  const activity = (w: W) => w.files.get('/repo/.claude/auto-activity.log') ?? ''
+
+  test('diff judge: a circumventing diff is held for a person with the PR left open and labelled, after the check re-ran on the base tests', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    await planned($, w)
+    gate(w, '{"verdict": "circumvents", "reason": "tests/test_a.py replaces its assertion with pass"}')
+    const stop = await $.classic.Stop(STOP)
+    expect(stop).toBeDefined()
+    await w.clock.advance(1_200)
+    expect(w.runs).toContain('git -C /repo/worktrees/auto-verify checkout abc1234 -- tests/test_a.py')
+    expect(w.merged).toHaveLength(0)
+    expect(w.runs.some(r => r.startsWith('gh pr edit 7') && r.includes('--add-label auto-claude:needs-human'))).toBe(true)
+    expect(w.runs.some(r => r.startsWith('gh pr comment 7') && r.includes('Held for a person'))).toBe(true)
+    expect(w.runs.some(r => r.startsWith('gh pr close'))).toBe(false)
+    expect(w.notifies.some(n => n.includes('held') && n.includes('diff judge: circumvents'))).toBe(true)
+    expect(activity(w)).toContain('"event":"diff-judge"')
+    expect(activity(w)).toContain('"action":"hold"')
+  })
+
+  test('diff judge: ok lets it land; unsure on a diff that only adds code goes on with a note', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    await planned($, w)
+    gate(w, '{"verdict": "ok", "reason": "implements f"}')
+    await meet($, w)
+    expect(w.merged).toHaveLength(1)
+    expect(activity(w)).toContain('"verdict":"ok"')
+  })
+
+  test('diff judge: unsure holds a diff that touched existing tests; a judge that fails to answer counts as unsure', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    await planned($, w)
+    gate(w, 'not json at all')
+    await $.classic.Stop(STOP)
+    await w.clock.advance(1_200)
+    expect(w.merged).toHaveLength(0)
+    expect(activity(w)).toContain('"verdict":"unsure"')
+    expect(activity(w)).toContain("did not parse")
+  })
+
+  test('diff judge: with no merge base the gate is skipped and logged, and the milestone lands', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    await planned($, w)
+    await meet($, w)
+    expect(w.merged).toHaveLength(1)
+    expect(activity(w)).toContain('"verdict":"skipped"')
   })
 })
 
