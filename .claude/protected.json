@@ -1,7 +1,14 @@
 {
   "paths": [
-    "harness/hooks/{guards,doc-guards,tamper,extra-guards,linear-guard}.ts",
-    "auto-claude/hooks/{guard,loop,evaluator,verify}.ts",
+    "harness/hooks/guards.ts",
+    "harness/hooks/doc-guards.ts",
+    "harness/hooks/tamper.ts",
+    "harness/hooks/extra-guards.ts",
+    "harness/hooks/linear-guard.ts",
+    "auto-claude/hooks/guard.ts",
+    "auto-claude/hooks/loop.ts",
+    "auto-claude/hooks/evaluator.ts",
+    "auto-claude/hooks/verify.ts",
     "scripts/ci.sh",
     "fixtures/**",
     ".github/workflows/**"
