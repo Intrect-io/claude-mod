@@ -8,7 +8,7 @@ import type { DeploySpec } from './deploy'
 import { deployMerged } from './deploy-run'
 import { bootstrapRepo } from './bootstrap'
 import { ensureLines, FILES, fetchRemote, LOCAL, out, readText, refOf, repoRoot, run, tell } from './io'
-import { agentMoment, agentSync, stoppedGoal } from './bridge'
+import { agentMoment, agentSync, carryAgent, fileTriage, markPlanAccepted, noteCiRed, readAgentConfig, setMaxIssuesPerDay, SPEC_AMBIGUOUS_HINT, stoppedGoal } from './bridge'
 import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, WAIT_TOOL, WAIT_TOOL_ID, waitCall, guardRefusal, LOOP_EXCLUDES, loopPolicy, loopView, DEFER_CATEGORIES, deferRule, setDeferAfter, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop, AGENT_PARKS, backgroundBusy, noteBackground } from './loop'
 import { awaitingHuman, nextStacked, capReached, causeOf, ciAction, diagnose, httpsOf, idleDue, inFlight, isWaiting, onlyWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, summary, unfinished, wakeDue } from './ship'
 import { markItem, nextPending, waitingItems } from './queue'
@@ -218,7 +218,9 @@ async function linearKickoff($: EngineInterface, root: string): Promise<{ linear
   const project = await projectOf($, root)
   if (project === undefined) return {}
   const got = await baseline($, project, await $.clock.now())
-  return { linear: got.sync, brief: got.brief }
+  // With the Linear agent app configured, a delegated issue's unclear milestone is asked, not guessed.
+  const hint = (await readAgentConfig($)) !== undefined ? `\n${SPEC_AMBIGUOUS_HINT}` : ''
+  return { linear: got.sync, brief: `${got.brief}${hint}` }
 }
 
 async function show($: EngineInterface, r: AutoRecord | undefined) {
@@ -532,6 +534,11 @@ async function diffGate($: EngineInterface, r: AutoRecord, item: ShipItem, ref: 
   }
 
   return { hold: why }
+}
+
+async function slugOf($: EngineInterface, r: AutoRecord): Promise<string | undefined> {
+  if (r.remote === LOCAL) return undefined
+  return repoSlug((await run($, ['git', '-C', r.root, 'remote', 'get-url', r.remote], r.root, 15_000)).stdout)
 }
 
 // The PR's web address for a Linear session ({} when there is no PR or no GitHub remote).
@@ -1213,6 +1220,7 @@ async function continueRun($: EngineInterface, r: AutoRecord, why: string, resul
       baseSha: await headSha($, r),
       ...(r.mergeTimes !== undefined ? { mergeTimes: r.mergeTimes } : {}),
       ...(r.scanKnown !== undefined ? { scanKnown: r.scanKnown } : {}),
+      ...carryAgent(r.agent),
       ...(deploy === undefined ? {} : { deploy, deploys: 0 }),
     },
     now,
@@ -1306,7 +1314,11 @@ async function standbyTick($: EngineInterface, r: AutoRecord): Promise<void> {
     // A failing poll is told once, when it starts failing.
     if (g.error !== undefined && r.githubError === undefined) await tell($, r, `GitHub poll failed: ${g.error}; retried every ${standbyCfg.githubMs / 60_000} min`)
     r = { ...r, seen: got.seen, followUps: got.followUps, githubError: g.error }
+    // The run list alone decides what is red; a failing issue list does not stop the count.
+    if (g.runsOk === true) r = noteCiRed(r, g.events, await slugOf($, r))
   }
+  const slug = r.agent !== undefined ? await slugOf($, r) : undefined
+  r = await fileTriage($, r, now, pr => (slug === undefined ? undefined : `https://github.com/${slug}/pull/${pr}`))
   r = { ...r, timers: nextTimers(r, due, standbyCfg, now) }
 
   // A lean session for the next cycle: compacted once per standby, between turns.
@@ -1694,6 +1706,8 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string, bu
       ciMode: mode,
       phase: buildOnly ? 'run' : 'plan',
       baseSha: await headSha($, { root, remote, defaultBranch }),
+      // The bridge's cursor and sessions outlive a run, so old events are not queued again.
+      ...carryAgent(existing?.agent),
       ...(buildOnly ? { buildOnly: true } : {}),
       ...(alwaysOn && !buildOnly ? { alwaysOn: true, cycle: 0 } : {}),
       ...(buildOnly || alwaysOn ? {} : { continues: !once, runNo: 1, runTimes: [now] }),
@@ -1862,6 +1876,7 @@ export const register: Register = (on, options) => {
   ultracodeWanted = options.ultracode !== false
   diffJudgeOn = options.diffJudge !== false
   setDeferAfter(Number(options.deferAfterChecks ?? 0))
+  setMaxIssuesPerDay(Number(options.maxIssuesPerDay ?? 3))
   ultracodeKey = undefined
   ultracodePending = false
 
@@ -2008,7 +2023,9 @@ export const register: Register = (on, options) => {
     const fixed = r.deploy?.source === 'file'
     const verdict = validatePlan(await readText($, f.plan), await readText($, f.queue), r.round === 1, fixed)
     if (!verdict.ok) return { result: `Not ready; fix and call ${READY_TOOL} again:\n- ${verdict.errors.join('\n- ')}` }
-    let next: AutoRecord = { ...r, phase: 'run', queueEmpty: false }
+    // With the Linear agent bridge configured, the accepted plan is marked for splitting into sub-issues.
+    const accepted: AutoRecord = { ...r, phase: 'run', queueEmpty: false }
+    let next: AutoRecord = (await readAgentConfig($)) !== undefined ? markPlanAccepted(accepted, verdict.pending.map(i => i.condition)) : accepted
     let deployNote = ''
     if (!fixed && verdict.deploy !== undefined) {
       if (verdict.deploy.kind === 'command') {

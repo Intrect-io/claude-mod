@@ -73,17 +73,52 @@ export async function viewer(token: string): Promise<{ id: string; organizationI
   return { id: data.viewer.id, organizationId: data.viewer.organization.id }
 }
 
-// The team for a key such as AGT, with its auto-claude label when the team has one.
-export async function teamByKey(token: string, key: string): Promise<{ id: string; labelId?: string } | undefined> {
-  const data = await gql<{ teams: { nodes: Array<{ id: string; labels: { nodes: Array<{ id: string }> } }> } }>(
+export type Team = { id: string; labelId?: string; triageStateId?: string }
+
+// The team for a key such as AGT, with its auto-claude label and its triage state when it has them.
+export async function teamByKey(token: string, key: string): Promise<Team | undefined> {
+  const data = await gql<{
+    teams: { nodes: Array<{ id: string; triageEnabled: boolean; triageIssueState: { id: string } | null; labels: { nodes: Array<{ id: string }> } }> }
+  }>(
     token,
-    'query ($key: String!, $label: String!) { teams(filter: { key: { eq: $key } }) { nodes { id labels(filter: { name: { eq: $label } }) { nodes { id } } } } }',
+    'query ($key: String!, $label: String!) { teams(filter: { key: { eq: $key } }) { nodes { id triageEnabled triageIssueState { id } labels(filter: { name: { eq: $label } }) { nodes { id } } } } }',
     { key, label: AUTO_CLAUDE_LABEL },
   )
   const team = data.teams.nodes[0]
   if (team === undefined) return undefined
+  const out: Team = { id: team.id }
   const labelId = team.labels.nodes[0]?.id
-  return labelId === undefined ? { id: team.id } : { id: team.id, labelId }
+  if (labelId !== undefined) out.labelId = labelId
+  if (team.triageEnabled && team.triageIssueState !== null) out.triageStateId = team.triageIssueState.id
+  return out
+}
+
+export const FINGERPRINT = /auto-claude:fp=[a-z-]+:[0-9a-f]{12}/g
+export const CLOSED_WINDOW_MS = 30 * 24 * 3_600_000
+
+// Only the description's last non-empty line carries the marker auto-claude wrote; one quoted
+// higher up (a CI log, a reason) must not suppress a later issue.
+export function markerLine(description: string): string {
+  return description.split('\n').map(l => l.trim()).filter(l => l !== '').at(-1) ?? ''
+}
+
+// The auto-claude fingerprint markers in a project's issues that are open or were closed in the
+// last 30 days (so an issue a person closed is not filed again the next day).
+export async function projectFingerprints(token: string, projectId: string, now: number): Promise<string[]> {
+  const since = new Date(now - CLOSED_WINDOW_MS).toISOString()
+  const found = new Set<string>()
+  let after: string | null = null
+  for (let page = 0; page < 10; page++) {
+    const data: { issues: { nodes: Array<{ description: string | null }>; pageInfo: { hasNextPage: boolean; endCursor: string | null } } } = await gql(
+      token,
+      'query ($project: ID!, $since: DateTimeOrDuration!, $after: String) { issues(first: 100, after: $after, filter: { project: { id: { eq: $project } }, description: { contains: "auto-claude:fp=" }, or: [{ state: { type: { nin: ["completed", "canceled"] } } }, { completedAt: { gte: $since } }, { canceledAt: { gte: $since } }] }) { nodes { description } pageInfo { hasNextPage endCursor } } }',
+      { project: projectId, since, after },
+    )
+    for (const n of data.issues.nodes) for (const m of markerLine(n.description ?? '').matchAll(FINGERPRINT)) found.add(m[0])
+    if (!data.issues.pageInfo.hasNextPage) break
+    after = data.issues.pageInfo.endCursor
+  }
+  return [...found].sort()
 }
 
 export type IssueInput = {
@@ -94,6 +129,7 @@ export type IssueInput = {
   projectId?: string
   delegateId?: string
   labelIds?: string[]
+  stateId?: string
 }
 
 export async function createIssue(token: string, input: IssueInput): Promise<{ id: string; identifier: string; url: string }> {

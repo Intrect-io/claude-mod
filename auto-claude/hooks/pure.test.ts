@@ -13,6 +13,8 @@ import { diffJudgePrompt, parseDiffVerdict } from './evaluator'
 import { activityDue, activityOf, HEARTBEAT_MS, idleShare, MAX_GAP_MS, statsDays, statsText, summarizeStats } from './stats'
 import { deployFixLine, deployOf, finalCheckOf, fixLine, kickoffText, POLICY, validatePlan, worktreeRefs } from './plan'
 import { markItem, nextPending, parseDuration, parseQueue, requeueItem, slugify, summarize, waitingItems } from './queue'
+import { issueCandidates } from './agent'
+import { noteCiRed } from './bridge'
 import { awaitingHuman, nextStacked, capReached, onlyWaiting, causeOf, ciAction, httpsOf, idleDue, inFlight, isWaiting, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, unfinished, MAX_AHEAD, wakeDue } from './ship'
 
 const PLAN = '## Goal\nadd and sub work\n\nFinal check: `python3 -m unittest -q`\nDeploy: `bash scripts/deploy.sh`\nSmoke check: `curl -fsS http://localhost:8080/health`\nScan: bandit -q -r src\n\n## Milestones\n1. add\n2. sub\n\n## Decisions\n'
@@ -809,5 +811,18 @@ describe('protected paths (pure)', () => {
     expect(nextStacked([item('a', 'merged'), item('b', 'stacked', 'tip-a')])?.headRef).toBe('b')
     expect(awaitingHuman(ships).map(s => s.headRef)).toEqual(['a'])
     expect(onlyWaiting({ started: 1, finished: 1, ships: [item('a', 'awaiting-human')] })).toBe(true)
+  })
+})
+
+describe('Triage issue sources (1.17.0)', () => {
+  test('triage issue: a workflow is counted over consecutive red polls and forgotten once it goes green', () => {
+    const base = { agent: { cursor: 0, sessions: {} } } as unknown as Parameters<typeof noteCiRed>[0]
+    const red = [{ id: 'ci:11', stamp: 'abc', workflow: 'CI', runId: 11 }, { id: 'gh#3', stamp: 'x' }]
+    const once = noteCiRed(base, red, 'o/r')
+    expect(once.agent?.ciRed).toEqual({ CI: { polls: 1, sha: 'abc', link: 'https://github.com/o/r/actions/runs/11' } })
+    const twice = noteCiRed(once, [{ id: 'ci:12', stamp: 'abd', workflow: 'CI', runId: 12 }], 'o/r')
+    expect(twice.agent?.ciRed?.CI?.polls).toBe(2)
+    expect(issueCandidates({ held: [], ciRed: [{ workflow: 'CI', ...twice.agent!.ciRed!.CI! }], existing: [], createdToday: 0, cap: 3 }).map(c => c.title)).toEqual(['CI red on the default branch: CI'])
+    expect(noteCiRed(twice, [], 'o/r').agent?.ciRed).toEqual({})
   })
 })

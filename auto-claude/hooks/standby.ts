@@ -37,7 +37,7 @@ export type Source = 'health' | 'github'
 // One thing that happened outside the run, keyed for dedupe: `id` names it
 // (ci:<run id>, gh#<number>), `stamp` changes when it changes.
 // `followUp` undefined: a change to it is covered without a new line.
-export type StandbyEvent = { id: string; stamp: string; line: string; followUp?: string }
+export type StandbyEvent = { id: string; stamp: string; line: string; followUp?: string; workflow?: string; runId?: number }
 
 // The sources this run can poll at all.
 export function sourcesOf(r: Pick<AutoRecord, 'remote' | 'ciMode' | 'deploy'>): Source[] {
@@ -96,7 +96,7 @@ export function openIssues(json: string): Array<{ number: number; title: string;
 
 export function ciEvent(id: number, workflow: string, branch: string, sha: string): StandbyEvent {
   const what = `[ci:${id}] The "${clean(workflow, 60)}" workflow passes on ${branch} again: run ${id} failed at ${sha.slice(0, 7)}; the cause is found (\`gh run view ${id} --log-failed\`) and fixed on this branch`
-  return { id: `ci:${id}`, stamp: sha, line: `- [ ] ${what}`, followUp: `- [ ] ${what}` }
+  return { id: `ci:${id}`, stamp: sha, line: `- [ ] ${what}`, followUp: `- [ ] ${what}`, workflow, runId: id }
 }
 
 // Only the number and title go in the line: the body and comments are
@@ -223,7 +223,7 @@ export async function repoArgs($: EngineInterface, r: Pick<AutoRecord, 'root' | 
 }
 
 // Failed runs on the default branch's tip and open issues with the label.
-export async function pollGithub($: EngineInterface, r: AutoRecord, label: string): Promise<{ events: StandbyEvent[]; error?: string }> {
+export async function pollGithub($: EngineInterface, r: AutoRecord, label: string): Promise<{ events: StandbyEvent[]; error?: string; runsOk?: boolean }> {
   await fetchRemote($, r, r.root)
   const repo = await repoArgs($, r)
   const sha = (await run($, ['git', '-C', r.root, 'rev-parse', refOf(r)], r.root, 15_000)).stdout.trim()
@@ -237,5 +237,5 @@ export async function pollGithub($: EngineInterface, r: AutoRecord, label: strin
     if (issues.exitCode === 0) for (const i of openIssues(issues.stdout)) events.push(issueEvent(i.number, i.title, i.updatedAt))
     else error ??= `gh issue list: ${out(issues)}`
   }
-  return { events, ...(error !== undefined ? { error: error.slice(0, 300) } : {}) }
+  return { events, runsOk: runs.exitCode === 0, ...(error !== undefined ? { error: error.slice(0, 300) } : {}) }
 }
