@@ -1,0 +1,16 @@
+{
+  "name": "linear-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "auto-claude's Linear agent app: a Cloudflare Worker for webhooks, OAuth and the session API",
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "bunx --package typescript@5.6.3 tsc --noEmit -p .",
+    "db:migrate:remote": "wrangler d1 migrations apply linear-agent --remote",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261110.1"
+  }
+}

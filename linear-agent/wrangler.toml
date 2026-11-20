@@ -1,0 +1,27 @@
+# linear-agent: auto-claude's Linear agent app. Shipped by hand, never by an auto-claude run:
+#   wrangler d1 migrations apply linear-agent --remote && wrangler deploy
+# Secrets (wrangler secret put): LINEAR_CLIENT_ID, LINEAR_CLIENT_SECRET, LINEAR_WEBHOOK_SECRET, SESSION_TOKEN.
+name = "linear-agent"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+
+# OAuth token (one key holding the access/refresh pair) and single-use install states.
+[[kv_namespaces]]
+binding = "TOKENS"
+id = "0d7d2b95e9984dcaa5eea6de7d5b0f9f"
+
+# The webhook event queue (migrations/).
+[[d1_databases]]
+binding = "DB"
+database_name = "linear-agent"
+database_id = "7b61edcc-47ae-41d7-881e-d85a1d6931f0"
+migrations_dir = "migrations"
+
+# Custom domain: intrect.io is an active zone in this account, so CF provisions DNS and TLS.
+[[routes]]
+pattern = "linear-agent.intrect.io"
+custom_domain = true
+
+# The only token refresher: every 6 hours, refreshing when under 12 hours remain.
+[triggers]
+crons = ["0 */6 * * *"]

@@ -1,0 +1,15 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "linear-agent",
+      "devDependencies": {
+        "@cloudflare/workers-types": "5.20261110.1",
+      },
+    },
+  },
+  "packages": {
+    "@cloudflare/workers-types": ["@cloudflare/workers-types@5.20261110.1", "", {}, "sha512-XOr3TDQ2sNDiP9zoZtdwYVhuLZ3aFY+G+G4iSeNO9p/HDSveZJpyCbUtmpEElaClLBe9hIzfN26qd0i/S7ksPg=="],
+  }
+}
