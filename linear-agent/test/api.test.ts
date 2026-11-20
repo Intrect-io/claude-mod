@@ -63,6 +63,29 @@ describe('GET /v1/events', () => {
     expect((await (await call(env, 'GET', '/v1/events?since=0&project=p1')).json()).events.map((e: { id: number }) => e.id)).toEqual([2])
   })
 
+  test('more unresolved rows than one lookup batch: the answer stops below the rest of the batch', async () => {
+    const { env, db, kv } = makeEnv()
+    kv.set(TOKEN_KEY, installedToken(NOW))
+    for (let i = 0; i < 21; i++) insert(db, `u${i}`, null)
+    insert(db, 'late', 'p1')
+    restore = mockFetch(gqlReply('issue(id: $id)', { issue: { project: { id: 'p-other' } } })).restore
+    expect((await (await call(env, 'GET', '/v1/events?since=0&project=p1')).json()).events).toEqual([])
+    expect((await (await call(env, 'GET', '/v1/events?since=0&project=p1')).json()).events.map((e: { id: number }) => e.id)).toEqual([22])
+  })
+
+  test('rows still unresolved after the hold-back window are given up and cost no lookup', async () => {
+    const { env, db, kv } = makeEnv()
+    kv.set(TOKEN_KEY, installedToken(NOW))
+    for (let i = 0; i < 25; i++) insert(db, `old${i}`, null, { created_at: NOW - HOLD_BACK_MS - 1 })
+    insert(db, 'young', null)
+    insert(db, 'mine', 'p1')
+    const m = mockFetch()
+    restore = m.restore
+    expect((await (await call(env, 'GET', '/v1/events?since=0&project=p1')).json()).events).toEqual([])
+    expect(m.calls).toHaveLength(1)
+    expect(db.query("SELECT COUNT(*) AS n FROM events WHERE project_id = ''").get()).toEqual({ n: 25 })
+  })
+
   test('project and since are required', async () => {
     const { env } = makeEnv()
     expect((await call(env, 'GET', '/v1/events?since=0')).status).toBe(400)
@@ -84,6 +107,19 @@ describe('session writes', () => {
     expect((await call(env, 'POST', '/v1/activity', { sessionId: 's1', content: { type: 'prompt', body: 'x' } })).status).toBe(400)
     expect((await call(env, 'POST', '/v1/activity', { sessionId: 's1', content: { type: 'action', action: 'Building', parameter: 'AGT-1' } })).status).toBe(200)
     expect(JSON.parse(m.calls[0]!.body).variables.input).toEqual({ agentSessionId: 's1', content: { type: 'action', action: 'Building', parameter: 'AGT-1' } })
+  })
+
+  test('ephemeral is accepted only on thought and action; long bodies up to Linear\'s limit pass', async () => {
+    const { env, kv } = makeEnv()
+    kv.set(TOKEN_KEY, installedToken(NOW))
+    const m = mockFetch(gqlReply('agentActivityCreate', { agentActivityCreate: { success: true } }))
+    restore = m.restore
+    expect((await call(env, 'POST', '/v1/activity', { sessionId: 's1', content: { type: 'elicitation', body: 'x' }, ephemeral: true })).status).toBe(400)
+    expect((await call(env, 'POST', '/v1/activity', { sessionId: 's1', content: { type: 'thought', body: 'x' }, ephemeral: true })).status).toBe(200)
+    expect((await call(env, 'POST', '/v1/activity', { sessionId: 's1', content: { type: 'response', body: 'y'.repeat(12_000) } })).status).toBe(200)
+    expect((await call(env, 'POST', '/v1/activity', { sessionId: 's1', content: { type: 'response', body: 'y'.repeat(250_001) } })).status).toBe(400)
+    expect((await call(env, 'POST', '/v1/activity', { sessionId: 's1', content: { type: 'action', action: 'Run', parameter: 'p', result: 'z'.repeat(250_001) } })).status).toBe(400)
+    expect(JSON.parse(m.calls[0]!.body).variables.input.ephemeral).toBe(true)
   })
 
   test('POST /v1/plan replaces the plan whole, accepts null, and refuses more than 100 entries', async () => {

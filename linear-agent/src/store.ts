@@ -52,7 +52,9 @@ const toRow = (r: DbRow): EventRow => ({
   createdAt: r.created_at,
 })
 
-// True when the row is new, false when its key was already queued.
+// True when this delivery should be answered as new: the row is new, or an earlier delivery's
+// write committed only after that delivery was answered 503 (never confirmed). False when a
+// delivery of this event was already answered 200.
 export async function insertEvent(db: D1Database, e: QueuedEvent, now: number): Promise<boolean> {
   const result = await db
     .prepare(
@@ -60,7 +62,14 @@ export async function insertEvent(db: D1Database, e: QueuedEvent, now: number): 
     )
     .bind(e.key, e.deliveryId ?? null, e.action, e.sessionId, e.issueId, e.identifier ?? null, e.title ?? null, e.url ?? null, e.prompt ?? null, e.signal ?? null, now)
     .run()
-  return (result.meta.changes ?? 0) > 0
+  if ((result.meta.changes ?? 0) > 0) return true
+  const row = await db.prepare('SELECT confirmed FROM events WHERE key = ?').bind(e.key).first<{ confirmed: number }>()
+  return row !== null && row.confirmed === 0
+}
+
+// Marks the event answered 200, so later deliveries of it are duplicates.
+export async function confirmEvent(db: D1Database, key: string): Promise<void> {
+  await db.prepare('UPDATE events SET confirmed = 1 WHERE key = ?').bind(key).run()
 }
 
 export async function setProject(db: D1Database, key: string, projectId: string): Promise<void> {
@@ -71,13 +80,22 @@ export async function setProjectById(db: D1Database, id: number, projectId: stri
   await db.prepare('UPDATE events SET project_id = ? WHERE id = ?').bind(projectId, id).run()
 }
 
-// Rows after the cursor whose project is not known yet, oldest first.
-export async function unresolvedSince(db: D1Database, since: number, limit = 20): Promise<Array<{ id: number; issueId: string; createdAt: number }>> {
+export const LOOKUP_BATCH = 20
+
+// Rows after the cursor whose project is not known yet and that are young enough to hold the
+// rest back, oldest first.
+export async function unresolvedSince(db: D1Database, since: number, youngerThan: number, limit = LOOKUP_BATCH): Promise<Array<{ id: number; issueId: string }>> {
   const { results } = await db
-    .prepare('SELECT id, issue_id, created_at FROM events WHERE id > ? AND project_id IS NULL ORDER BY id LIMIT ?')
-    .bind(since, limit)
-    .all<{ id: number; issue_id: string; created_at: number }>()
-  return results.map(r => ({ id: r.id, issueId: r.issue_id, createdAt: r.created_at }))
+    .prepare('SELECT id, issue_id FROM events WHERE id > ? AND project_id IS NULL AND created_at > ? ORDER BY id LIMIT ?')
+    .bind(since, youngerThan, limit)
+    .all<{ id: number; issue_id: string }>()
+  return results.map(r => ({ id: r.id, issueId: r.issue_id }))
+}
+
+// Rows whose lookup kept failing past the hold-back window are given up (no project), so they
+// neither hold anything back nor cost a Linear call on every read.
+export async function giveUpUnresolved(db: D1Database, olderThan: number): Promise<void> {
+  await db.prepare('UPDATE events SET project_id = ? WHERE project_id IS NULL AND created_at <= ?').bind(NO_PROJECT, olderThan).run()
 }
 
 // The project's rows after the cursor, below `before` when an unresolved row holds the rest back.

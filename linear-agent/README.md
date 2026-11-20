@@ -12,29 +12,33 @@ The webhook contract is pinned by `fixtures/linear-agent-v1` (`bun fixtures/line
 
 | Route | Auth | What it does |
 |---|---|---|
-| `POST /webhook` | `Linear-Signature` (HMAC-SHA256 of the raw body) and `webhookTimestamp` within 60 s | Agent session events (`created` or `prompted`) are written to D1, unique on their key: `created:<session>`, `prompted:<activity>`, else `delivery:<Linear-Delivery>`. The write is awaited for up to 3 s, and a failure answers 503 so Linear retries. A new `created` event gets the first `thought` activity through `ctx.waitUntil`, and the issue's project is looked up after the write. Other events answer 200 and are ignored. |
+| `POST /webhook` | `Linear-Signature` (HMAC-SHA256 of the raw body) and `webhookTimestamp` within 60 s | Agent session events (`created` or `prompted`) are written to D1, unique on their key: `created:<session>`, `prompted:<activity>`, else `delivery:<Linear-Delivery>`. The write is awaited for up to 3 s, and a failure answers 503 so Linear retries. A row becomes `confirmed` only when its delivery is answered 200, so a write that commits after its delivery got 503 is taken over by the retry instead of counting as a duplicate. A new `created` event gets the first `thought` activity through `ctx.waitUntil`, and the issue's project is looked up after the write. An app revoke (`OAuthApp` `revoked` for this client and the installed workspace) drops the token. Other events answer 200 and are ignored. |
 | `GET /oauth/start` | none | Redirects to `https://linear.app/oauth/authorize` with `actor=app`, `scope=read,write,app:assignable,app:mentionable` and a single-use state kept 10 minutes in KV. |
 | `GET /oauth/callback` | state | Exchanges the code at `https://api.linear.app/oauth/token`. It stores the access token, refresh token, expiry, app user (`viewer { id }`) and organization together under the KV key `oauth:token`. An install from a different workspace than the installed one is refused (409). |
 | `GET /health` | none | `{ok: true, installed}`. |
-| `GET /v1/events?since=&project=` | Bearer `SESSION_TOKEN` | The project's rows after the cursor, oldest first, at most 100, with `cursor`. A row whose project is still unknown is looked up again. While its lookup keeps failing it holds back the rows after it, so the driver's cursor does not pass it, until it is 30 minutes old. |
-| `POST /v1/activity` | Bearer | `{sessionId, content, ephemeral?}` to `agentActivityCreate`. `content` is `{type: thought, elicitation, response or error, body}` or `{type: action, action, parameter, result?}`. |
+| `GET /v1/events?since=&project=` | Bearer `SESSION_TOKEN` | The project's rows after the cursor, oldest first, at most 100, with `cursor`. A row whose project is still unknown is looked up again, 20 per read. The answer stops below the first row still unknown, and below the rest of a full batch, so the driver's cursor never passes an unchecked row. A row still unknown after 30 minutes is given up and gets no project. |
+| `POST /v1/activity` | Bearer | `{sessionId, content, ephemeral?}` to `agentActivityCreate`. `content` is `{type: thought, elicitation, response or error, body}` or `{type: action, action, parameter, result?}`. A body or result may hold up to 250 000 characters. `ephemeral` is accepted on `thought` and `action` only. |
 | `POST /v1/plan` | Bearer | `{sessionId, plan}` to `agentSessionUpdate`. The plan holds 1 to 100 `{content, status}` entries and replaces the whole plan; `null` clears it. |
 | `POST /v1/external-url` | Bearer | `{sessionId, label, url}` (https only) to `agentSessionUpdate.addedExternalUrls`. |
 | `POST /v1/issue` | Bearer | `{team, title, description?, parentId?, projectId?, delegate?}` to `issueCreate`. The team key is resolved to its id, and the team's `auto-claude` label is added when it exists. The issue is delegated to the app user only when `delegate` is true. |
 
 Write routes answer 409 before the app is installed and 502 when Linear refuses, with Linear's message. A token or secret is never logged or returned.
 
-The scheduled handler (cron `0 */6 * * *`) is the only code that refreshes the token. It refreshes when under 12 hours remain, retries once, and writes the rotated pair in one KV put. Linear rotates the refresh token on every refresh and KV is eventually consistent, so a second refresher could lose the pair.
+The scheduled handler (cron `0 */6 * * *`) is the only code that refreshes the token. It refreshes when under 12 hours remain, and writes the rotated pair in one KV put.
+
+- A failed refresh is retried after 30 s, 2 min and 5 min, inside Linear's 30-minute window for reusing a refresh token. This recovers a lost reply.
+- Once Linear has answered, only the KV write is retried. Refreshing again would rotate past the pair just issued. Linear rotates the refresh token on every refresh and KV is eventually consistent, so a second refresher could lose the pair.
 
 ## D1 schema
 
-`migrations/0001_init.sql` creates one table, `events`, with these columns:
+`migrations/` creates one table, `events`, with these columns:
 
 - `id` (autoincrement cursor) and `key` (unique);
 - `delivery_id`, `action`, `session_id`, `issue_id`;
 - `identifier`, `title`, `url`, `prompt`, `signal`;
 - `project_id`: `NULL` until it is looked up, `''` when the issue has no project;
-- `created_at`.
+- `created_at`;
+- `confirmed` (0002): 1 once a delivery was answered 200.
 
 ## Bindings and secrets
 

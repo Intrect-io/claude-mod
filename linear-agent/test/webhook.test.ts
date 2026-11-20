@@ -58,6 +58,34 @@ describe('POST /webhook', () => {
     expect(res.status).toBe(503)
   })
 
+  test('a write that commits only after its delivery got 503 is taken over by the retry, which sends the first thought', async () => {
+    let delay = 3_200
+    const { env, db, kv } = makeEnv({ writeDelayMs: () => delay })
+    kv.set(TOKEN_KEY, installedToken(NOW))
+    const m = mockFetch(gqlReply('agentActivityCreate', { agentActivityCreate: { success: true } }), gqlReply('issue(id: $id)', { issue: { project: { id: 'proj-1' } } }))
+    restore = m.restore
+    expect((await post(env, created(), fakeCtx(), 'd-1')).status).toBe(503)
+    await new Promise(r => setTimeout(r, 400))
+    expect(db.query('SELECT key, confirmed FROM events').all()).toEqual([{ key: 'created:sess-1', confirmed: 0 }])
+    delay = 0
+    const retry = await post(env, created(), fakeCtx(), 'd-1')
+    expect(await retry.text()).toBe('queued')
+    expect(db.query('SELECT confirmed FROM events').all()).toEqual([{ confirmed: 1 }])
+    expect(m.calls.filter(c => c.body.includes('agentActivityCreate'))).toHaveLength(1)
+    expect((await (await post(env, created(), fakeCtx(), 'd-1')).text())).toBe('duplicate')
+  }, 10_000)
+
+  test('an app revoke for this client and workspace drops the installed token', async () => {
+    const { env, kv } = makeEnv()
+    kv.set(TOKEN_KEY, installedToken(NOW))
+    restore = mockFetch().restore
+    const other = { type: 'OAuthApp', action: 'revoked', webhookTimestamp: NOW - 500, organizationId: 'org-other', oauthClientId: 'client-id-fixture' }
+    expect((await post(env, other)).status).toBe(200)
+    expect(kv.has(TOKEN_KEY)).toBe(true)
+    expect((await post(env, { ...other, organizationId: 'org-1' })).status).toBe(200)
+    expect(kv.has(TOKEN_KEY)).toBe(false)
+  })
+
   test('a bad signature is refused before anything is written', async () => {
     const { env, db } = makeEnv()
     const raw = JSON.stringify(created())

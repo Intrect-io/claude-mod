@@ -3,14 +3,18 @@
 import { type Env, errorText, json } from './env'
 import { type ActivityContent, addExternalUrl, createActivity, createIssue, issueProject, type PlanEntry, teamByKey, updatePlan } from './linear'
 import { readToken, type StoredToken } from './oauth'
-import { eventsSince, HOLD_BACK_MS, NO_PROJECT, setProjectById, unresolvedSince } from './store'
+import { eventsSince, giveUpUnresolved, HOLD_BACK_MS, LOOKUP_BATCH, NO_PROJECT, setProjectById, unresolvedSince } from './store'
 import { constantTimeEqual } from './webhook'
 
 const encoder = new TextEncoder()
 const PLAN_STATUSES = new Set(['pending', 'inProgress', 'completed', 'canceled'])
 const BODY_TYPES = new Set(['thought', 'elicitation', 'response', 'error'])
 const MAX_PLAN = 100
+// Plan entry content (Linear: 1 to 10 000 characters).
 const MAX_TEXT = 10_000
+// Activity body and action result (Linear: up to 250 000 characters).
+const MAX_ACTIVITY_TEXT = 250_000
+const EPHEMERAL_TYPES = new Set(['thought', 'action'])
 
 export function authorized(req: Request, env: Env): boolean {
   const header = req.headers.get('authorization') ?? ''
@@ -24,11 +28,10 @@ const text = (v: unknown, max = MAX_TEXT): v is string => typeof v === 'string' 
 export function activityContent(v: unknown): ActivityContent | undefined {
   if (typeof v !== 'object' || v === null) return undefined
   const c = v as Record<string, unknown>
-  if (typeof c.type === 'string' && BODY_TYPES.has(c.type) && text(c.body)) return { type: c.type as 'thought', body: c.body }
-  if (c.type === 'action' && text(c.action, 200) && typeof c.parameter === 'string' && c.parameter.length <= MAX_TEXT) {
-    return { type: 'action', action: c.action, parameter: c.parameter, ...(typeof c.result === 'string' ? { result: c.result.slice(0, MAX_TEXT) } : {}) }
-  }
-  return undefined
+  if (typeof c.type === 'string' && BODY_TYPES.has(c.type) && text(c.body, MAX_ACTIVITY_TEXT)) return { type: c.type as 'thought', body: c.body }
+  if (c.type !== 'action' || !text(c.action, 200) || typeof c.parameter !== 'string' || c.parameter.length > MAX_TEXT) return undefined
+  if (c.result !== undefined && (typeof c.result !== 'string' || c.result.length > MAX_ACTIVITY_TEXT)) return undefined
+  return { type: 'action', action: c.action, parameter: c.parameter, ...(typeof c.result === 'string' ? { result: c.result } : {}) }
 }
 
 export function planEntries(v: unknown): PlanEntry[] | null | undefined {
@@ -53,22 +56,25 @@ async function body(req: Request): Promise<Record<string, unknown> | undefined> 
   }
 }
 
-// Rows whose project is unknown are looked up again before reading. One that still fails holds back
-// the rows after it (so the driver's cursor does not pass it) until it is HOLD_BACK_MS old.
-async function resolvePending(env: Env, token: StoredToken | undefined, since: number, now: number): Promise<number | undefined> {
-  const pending = await unresolvedSince(env.DB, since)
-  for (const row of pending) {
-    if (token !== undefined) {
-      try {
-        await setProjectById(env.DB, row.id, (await issueProject(token.accessToken, row.issueId)) ?? NO_PROJECT)
-        continue
-      } catch (error) {
-        console.warn(`project lookup for event ${row.id} failed: ${errorText(error)}`)
-      }
-    }
-    if (now - row.createdAt < HOLD_BACK_MS) return row.id
+async function lookUp(env: Env, token: StoredToken | undefined, row: { id: number; issueId: string }): Promise<boolean> {
+  if (token === undefined) return false
+  try {
+    await setProjectById(env.DB, row.id, (await issueProject(token.accessToken, row.issueId)) ?? NO_PROJECT)
+    return true
+  } catch (error) {
+    console.warn(`project lookup for event ${row.id} failed: ${errorText(error)}`)
+    return false
   }
-  return undefined
+}
+
+// Rows whose project is unknown are looked up again before reading. The answer stops below the
+// first one still unknown (so the driver's cursor does not pass it), and below the rest of a full
+// batch, which the next read looks at. Rows unknown for longer than HOLD_BACK_MS are given up.
+async function resolvePending(env: Env, token: StoredToken | undefined, since: number, now: number): Promise<number | undefined> {
+  await giveUpUnresolved(env.DB, now - HOLD_BACK_MS)
+  const pending = await unresolvedSince(env.DB, since, now - HOLD_BACK_MS)
+  for (const row of pending) if (!(await lookUp(env, token, row))) return row.id
+  return pending.length === LOOKUP_BATCH ? pending[pending.length - 1]!.id + 1 : undefined
 }
 
 async function events(env: Env, url: URL, now: number): Promise<Response> {
@@ -88,6 +94,7 @@ const activity: Handler = async (_env, token, input) => {
   const id = sessionId(input)
   const content = activityContent(input.content)
   if (id === undefined || content === undefined) return json({ error: 'sessionId and a valid content are required' }, 400)
+  if (input.ephemeral === true && !EPHEMERAL_TYPES.has(content.type)) return json({ error: 'only thought and action activities can be ephemeral' }, 400)
   await createActivity(token.accessToken, id, content, input.ephemeral === true)
   return json({ ok: true })
 }

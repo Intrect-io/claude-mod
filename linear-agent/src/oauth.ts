@@ -13,6 +13,11 @@ export const TOKEN_KEY = 'oauth:token'
 export const STATE_PREFIX = 'oauth-state:'
 export const STATE_TTL_SECONDS = 600
 export const REFRESH_WITHIN_MS = 12 * 3_600_000
+// Linear accepts the same refresh token again for 30 minutes after a rotation, so a lost reply is
+// recovered by retrying inside that window, within one scheduled run (wall limit 15 minutes).
+export const REFRESH_BACKOFF_MS = [0, 30_000, 120_000, 300_000]
+export const WRITE_BACKOFF_MS = [0, 5_000, 30_000]
+const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
 export type StoredToken = {
   accessToken: string
@@ -124,31 +129,39 @@ export async function finishInstall(env: Env, url: URL, now: number): Promise<Re
 
 export type RefreshResult = 'not-installed' | 'fresh' | 'refreshed' | 'failed'
 
-// Called only from the scheduled handler.
-export async function refreshIfDue(env: Env, now: number): Promise<RefreshResult> {
+async function attempts<T>(delays: readonly number[], sleep: (ms: number) => Promise<void>, what: string, run: () => Promise<T>): Promise<T | undefined> {
+  for (const [i, delay] of delays.entries()) {
+    if (delay > 0) await sleep(delay)
+    try {
+      return await run()
+    } catch (error) {
+      console.warn(`${what} attempt ${i + 1} failed: ${errorText(error)}`)
+    }
+  }
+  return undefined
+}
+
+// Called only from the scheduled handler. The refresh is retried within Linear's 30-minute reuse
+// window, and once Linear has answered, only the KV write is retried: refreshing again would
+// rotate past the pair just issued.
+export async function refreshIfDue(env: Env, now: number, sleep: (ms: number) => Promise<void> = wait): Promise<RefreshResult> {
   const token = await readToken(env.TOKENS)
   if (token === undefined) return 'not-installed'
   if (token.expiresAt - now > REFRESH_WITHIN_MS) return 'fresh'
   const form = { grant_type: 'refresh_token', refresh_token: token.refreshToken, client_id: env.LINEAR_CLIENT_ID, client_secret: env.LINEAR_CLIENT_SECRET }
-  // Linear accepts the same refresh token again for 30 minutes, so one immediate retry recovers a lost reply.
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const reply = await tokenRequest(form)
-      const scope = scopeText(reply.scope) ?? token.scope
-      await writeToken(env.TOKENS, {
-        ...token,
-        accessToken: reply.access_token as string,
-        refreshToken: reply.refresh_token as string,
-        expiresAt: now + (reply.expires_in as number) * 1000,
-        ...(scope !== undefined ? { scope } : {}),
-        savedAt: now,
-      })
-      return 'refreshed'
-    } catch (error) {
-      console.warn(`token refresh attempt ${attempt} failed: ${errorText(error)}`)
-    }
+  const reply = await attempts(REFRESH_BACKOFF_MS, sleep, 'token refresh', () => tokenRequest(form))
+  if (reply === undefined) return 'failed'
+  const scope = scopeText(reply.scope) ?? token.scope
+  const next: StoredToken = {
+    ...token,
+    accessToken: reply.access_token as string,
+    refreshToken: reply.refresh_token as string,
+    expiresAt: now + (reply.expires_in as number) * 1000,
+    ...(scope !== undefined ? { scope } : {}),
+    savedAt: now,
   }
-  return 'failed'
+  const saved = await attempts(WRITE_BACKOFF_MS, sleep, 'token write', () => writeToken(env.TOKENS, next).then(() => true))
+  return saved === true ? 'refreshed' : 'failed'
 }
 
 export async function health(env: Env): Promise<Response> {

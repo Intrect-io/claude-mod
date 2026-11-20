@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { route } from '../src/index'
-import { REFRESH_WITHIN_MS, refreshIfDue, STATE_PREFIX, TOKEN_KEY } from '../src/oauth'
+import { REFRESH_BACKOFF_MS, REFRESH_WITHIN_MS, refreshIfDue, STATE_PREFIX, TOKEN_KEY } from '../src/oauth'
 import { fakeCtx, gqlReply, installedToken, makeEnv, mockFetch, SECRETS } from './fakes'
 
 const NOW = 1_795_000_000_000
+const noSleep = async () => {}
 let restore = () => {}
 afterEach(() => restore())
 
@@ -76,7 +77,7 @@ describe('scheduled token refresh', () => {
     kv.set(TOKEN_KEY, installedToken(NOW, { expiresAt: NOW + REFRESH_WITHIN_MS + 60_000 }))
     const m = mockFetch(tokenReply())
     restore = m.restore
-    expect(await refreshIfDue(env, NOW)).toBe('fresh')
+    expect(await refreshIfDue(env, NOW, noSleep)).toBe('fresh')
     expect(m.calls).toHaveLength(0)
   })
 
@@ -85,23 +86,52 @@ describe('scheduled token refresh', () => {
     kv.set(TOKEN_KEY, installedToken(NOW, { expiresAt: NOW + 3_600_000 }))
     const m = mockFetch(tokenReply('access-2', 'refresh-2'))
     restore = m.restore
-    expect(await refreshIfDue(env, NOW)).toBe('refreshed')
+    expect(await refreshIfDue(env, NOW, noSleep)).toBe('refreshed')
     expect(Object.fromEntries(new URLSearchParams(m.calls[0]!.body))).toMatchObject({ grant_type: 'refresh_token', refresh_token: 'refresh-fixture' })
     expect(JSON.parse(kv.get(TOKEN_KEY)!)).toMatchObject({ accessToken: 'access-2', refreshToken: 'refresh-2', appUserId: 'app-user-1', expiresAt: NOW + 86_399_000 })
   })
 
-  test('a failed refresh is retried once and keeps the old pair', async () => {
+  test('a failing refresh is retried with backoff inside the 30-minute reuse window and keeps the old pair', async () => {
     const { env, kv } = makeEnv()
     kv.set(TOKEN_KEY, installedToken(NOW, { expiresAt: NOW + 3_600_000 }))
     const m = mockFetch(call => (call.url.includes('/oauth/token') ? { status: 500, json: { error: 'boom' } } : undefined))
     restore = m.restore
-    expect(await refreshIfDue(env, NOW)).toBe('failed')
-    expect(m.calls).toHaveLength(2)
+    const slept: number[] = []
+    expect(await refreshIfDue(env, NOW, async ms => void slept.push(ms))).toBe('failed')
+    expect(m.calls).toHaveLength(REFRESH_BACKOFF_MS.length)
+    expect(slept.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(30 * 60_000)
     expect(JSON.parse(kv.get(TOKEN_KEY)!).refreshToken).toBe('refresh-fixture')
+  })
+
+  test('a lost refresh reply is recovered by the next attempt with the same refresh token', async () => {
+    const { env, kv } = makeEnv()
+    kv.set(TOKEN_KEY, installedToken(NOW, { expiresAt: NOW + 3_600_000 }))
+    let n = 0
+    const m = mockFetch(call => (call.url.includes('/oauth/token') ? (++n === 1 ? { status: 502, json: {} } : { json: { access_token: 'a3', refresh_token: 'r3', expires_in: 86_399 } }) : undefined))
+    restore = m.restore
+    expect(await refreshIfDue(env, NOW, noSleep)).toBe('refreshed')
+    expect(m.calls.map(c => new URLSearchParams(c.body).get('refresh_token'))).toEqual(['refresh-fixture', 'refresh-fixture'])
+    expect(JSON.parse(kv.get(TOKEN_KEY)!).refreshToken).toBe('r3')
+  })
+
+  test('when the KV write fails after Linear rotated, only the write is retried, not the refresh', async () => {
+    const { env, kv, kvApi } = makeEnv()
+    kv.set(TOKEN_KEY, installedToken(NOW, { expiresAt: NOW + 3_600_000 }))
+    const put = kvApi.put
+    let puts = 0
+    kvApi.put = async (k: string, v: string) => {
+      if (++puts === 1) throw new Error('KV unavailable')
+      return put(k, v)
+    }
+    const m = mockFetch(tokenReply('access-4', 'refresh-4'))
+    restore = m.restore
+    expect(await refreshIfDue(env, NOW, noSleep)).toBe('refreshed')
+    expect(m.calls).toHaveLength(1)
+    expect(JSON.parse(kv.get(TOKEN_KEY)!).refreshToken).toBe('refresh-4')
   })
 
   test('nothing to refresh before the install', async () => {
     const { env } = makeEnv()
-    expect(await refreshIfDue(env, NOW)).toBe('not-installed')
+    expect(await refreshIfDue(env, NOW, noSleep)).toBe('not-installed')
   })
 })

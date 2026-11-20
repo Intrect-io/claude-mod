@@ -17,11 +17,13 @@ export const SECRETS = {
 type Bound = { run(): Promise<{ meta: { changes: number } }>; all<T>(): Promise<{ results: T[] }>; first<T>(): Promise<T | null> }
 
 // One prepared statement with its bound arguments, answered by bun:sqlite.
-function bound(db: Database, sql: string, args: unknown[], failWrites: boolean): Bound {
+function bound(db: Database, sql: string, args: unknown[], failWrites: boolean, writeDelayMs: () => number): Bound {
   const params = args as never[]
   return {
     async run() {
       if (failWrites) throw new Error('D1 is unavailable')
+      const delay = writeDelayMs()
+      if (delay > 0) await new Promise(r => setTimeout(r, delay))
       return { meta: { changes: db.query(sql).run(...params).changes } }
     },
     async all<T>() {
@@ -33,13 +35,14 @@ function bound(db: Database, sql: string, args: unknown[], failWrites: boolean):
   }
 }
 
-export function fakeD1(options: { failWrites?: boolean } = {}) {
+export function fakeD1(options: { failWrites?: boolean; writeDelayMs?: () => number } = {}) {
   const db = new Database(':memory:')
   const dir = join(import.meta.dir, '..', 'migrations')
   for (const f of readdirSync(dir).filter(f => f.endsWith('.sql')).sort()) db.exec(readFileSync(join(dir, f), 'utf8'))
   const fail = options.failWrites === true
+  const delay = options.writeDelayMs ?? (() => 0)
   const d1 = {
-    prepare: (sql: string) => ({ ...bound(db, sql, [], fail), bind: (...args: unknown[]) => bound(db, sql, args, fail) }),
+    prepare: (sql: string) => ({ ...bound(db, sql, [], fail, delay), bind: (...args: unknown[]) => bound(db, sql, args, fail, delay) }),
   }
   return { d1, db }
 }
@@ -69,11 +72,11 @@ export function fakeCtx() {
   }
 }
 
-export function makeEnv(options: { failWrites?: boolean } = {}) {
+export function makeEnv(options: { failWrites?: boolean; writeDelayMs?: () => number } = {}) {
   const d1 = fakeD1(options)
   const kv = fakeKV()
   const env = { DB: d1.d1, TOKENS: kv.kv, ...SECRETS } as unknown as Env
-  return { env, db: d1.db, kv: kv.map }
+  return { env, db: d1.db, kv: kv.map, kvApi: kv.kv }
 }
 
 export type Call = { url: string; body: string; headers: Record<string, string> }

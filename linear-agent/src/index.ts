@@ -4,8 +4,8 @@
 import { handleApi } from './api'
 import { type Env, errorText, json } from './env'
 import { createActivity, issueProject } from './linear'
-import { finishInstall, health, readToken, refreshIfDue, startInstall } from './oauth'
-import { insertEvent, NO_PROJECT, setProject } from './store'
+import { finishInstall, health, readToken, refreshIfDue, startInstall, TOKEN_KEY } from './oauth'
+import { confirmEvent, insertEvent, NO_PROJECT, setProject } from './store'
 import { handleWebhook, type QueuedEvent } from './webhook'
 
 // After the row is written: its project, looked up with the app token. A failure leaves it null,
@@ -20,16 +20,31 @@ async function resolveProject(env: Env, e: QueuedEvent): Promise<void> {
   }
 }
 
+// An app revoke for this client and the installed workspace drops the token, so health and the
+// API say "not installed" instead of failing every call with a dead token.
+async function onIgnored(env: Env, body: unknown): Promise<void> {
+  if (typeof body !== 'object' || body === null) return
+  const b = body as Record<string, unknown>
+  if (b.type !== 'OAuthApp' || b.action !== 'revoked' || b.oauthClientId !== env.LINEAR_CLIENT_ID) return
+  const token = await readToken(env.TOKENS)
+  if (token !== undefined && token.organizationId === b.organizationId) await env.TOKENS.delete(TOKEN_KEY)
+}
+
 export async function webhook(req: Request, env: Env, ctx: ExecutionContext, now: number): Promise<Response> {
   const raw = await req.text()
-  return handleWebhook(raw, req.headers, {
+  let written: string | undefined
+  const res = await handleWebhook(raw, req.headers, {
     secret: env.LINEAR_WEBHOOK_SECRET,
     now,
     enqueue: async e => {
       const fresh = await insertEvent(env.DB, e, now)
-      if (fresh) ctx.waitUntil(resolveProject(env, e))
+      if (fresh) {
+        written = e.key
+        ctx.waitUntil(resolveProject(env, e))
+      }
       return fresh
     },
+    ignored: body => onIgnored(env, body),
     thought: async (sessionId, body) => {
       const token = await readToken(env.TOKENS)
       if (token === undefined) throw new Error('the app is not installed')
@@ -37,6 +52,16 @@ export async function webhook(req: Request, env: Env, ctx: ExecutionContext, now
     },
     after: p => ctx.waitUntil(p),
   })
+  // Only a delivery answered 200 makes later deliveries duplicates; after a 503 the retry takes over.
+  if (res.status === 200 && written !== undefined) {
+    try {
+      await confirmEvent(env.DB, written)
+    } catch (error) {
+      // Left unconfirmed, a redelivery is taken as new: at worst a second first-thought.
+      console.warn(`confirming ${written} failed: ${errorText(error)}`)
+    }
+  }
+  return res
 }
 
 export async function route(req: Request, env: Env, ctx: ExecutionContext, now: number): Promise<Response> {

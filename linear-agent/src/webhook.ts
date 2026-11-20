@@ -38,6 +38,8 @@ export type WebhookDeps = {
   thought(sessionId: string, body: string): Promise<void>
   // ctx.waitUntil: work that must finish after the answer is sent.
   after(promise: Promise<unknown>): void
+  // A verified event that is not an agent session event (an app revoke, a notification).
+  ignored?(body: unknown): Promise<void>
 }
 
 export const FIRST_THOUGHT = 'auto-claude picked this up. It will plan the issue as milestones and report progress in this session.'
@@ -144,7 +146,13 @@ export async function handleWebhook(raw: string, headers: Headers, deps: Webhook
   const verified = await verifyWebhook(raw, headers.get('Linear-Signature'), deps.secret, deps.now)
   if (!verified.ok) return new Response(verified.reason, { status: verified.status })
   const classified = classifyEvent(verified.body)
-  if (classified.kind === 'ignore') return new Response('ignored', { status: 200 })
+  if (classified.kind === 'ignore') {
+    const seen = deps.ignored?.(verified.body).catch((error: unknown) => {
+      console.warn(`handling an ignored event failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
+    if (seen !== undefined) deps.after(seen)
+    return new Response('ignored', { status: 200 })
+  }
 
   const delivery = headers.get('Linear-Delivery')
   const timestamp = isRecord(verified.body) ? verified.body.webhookTimestamp : undefined
