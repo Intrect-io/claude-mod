@@ -98,7 +98,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
     nameStatus: '',
     patch: '',
     // The linear-agent Worker behind curl: events served once each, every call, and whether it is down.
-    agent: { events: [] as unknown[], calls: [] as Array<{ method: string; path: string; body: any }>, down: false },
+    agent: { events: [] as unknown[], calls: [] as Array<{ method: string; path: string; body: any }>, down: false, failPosts: false },
     clock: mock.clock(on, { now: 1_000 }),
   }
   const removed = (path: string) => [...w.gone].some(g => path === g || path.startsWith(`${g}/`))
@@ -168,6 +168,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
       w.agent.calls.push({ method: String(e.argv[e.argv.indexOf('-X') + 1]), path: url.replace('https://agent.test', ''), body: at > 0 ? JSON.parse(String(e.argv[at + 1])) : undefined })
       if (w.agent.down) return ok('', 7, 'curl: (7) Failed to connect to agent.test port 443')
       if (url.includes('/v1/events')) return ok(`${JSON.stringify({ events: w.agent.events.splice(0) })}\n200`)
+      if (w.agent.failPosts) return ok('{"error":"the app is not installed yet"}\n409')
       return ok('{"ok":true}\n200')
     }
     if (a.includes(' init')) {
@@ -2298,6 +2299,74 @@ describe('the Linear agent session bridge (1.16.0)', () => {
     await meet($, w)
     await w.clock.advance(TICK)
     expect(w.files.get(GOALS)).toMatch(/- \[x\] add\(\)/)
+  })
+
+  test('agent session: a title or reply carrying [OTHER-1] never adds another issue\'s tag', async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    w.agent.events.push(created(1, 'AGT-2', 'sess-2', '[ABC-9] evil'))
+    await start($, w, QUEUE)
+    await w.clock.advance(TICK)
+    const line = parseQueue(w.files.get(GOALS) ?? '').find(i => i.condition.startsWith('[AGT-2]'))!
+    expect(line.condition.startsWith('[AGT-2] (ABC-9) evil')).toBe(true)
+    w.agent.events.push({ id: 2, action: 'prompted', sessionId: 'sess-2', projectId: 'proj-1', identifier: 'AGT-2', prompt: '[ABC-9] do it' })
+    await w.clock.advance(MIN + TICK)
+    const followUp = parseQueue(w.files.get(GOALS) ?? '').filter(i => i.condition.startsWith('[AGT-2]')).at(-1)!
+    expect(followUp.condition).toContain('(ABC-9) do it')
+    expect(followUp.condition.startsWith('[AGT-2] what the person asked')).toBe(true)
+  })
+
+  test('agent session: a send that keeps failing between good polls is told once; a new session still gets the plan', async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    w.agent.failPosts = true
+    w.agent.events.push(created(1, 'AGT-1', 'sess-1'))
+    await start($, w, QUEUE.replace('- [ ] add()', '- [ ] [AGT-1] add()'))
+    for (let i = 0; i < 8; i++) await w.clock.advance(TICK)
+    expect(w.agent.calls.filter(c => c.method === 'GET').length).toBeGreaterThanOrEqual(3)
+    expect(w.notifies.filter(n => n.includes('Linear agent Worker unreachable or refusing'))).toHaveLength(1)
+    // The Worker recovers; a second session for an issue that already had a line gets the unchanged plan.
+    w.agent.failPosts = false
+    await w.clock.advance(MIN)
+    w.agent.events.push(created(2, 'AGT-1', 'sess-1b'))
+    await w.clock.advance(MIN)
+    expect(posts(w, '/v1/plan').some(p => p.body.sessionId === 'sess-1b')).toBe(true)
+  })
+
+  test('agent session: a stop while its PR is being fixed keeps the PR held when the fix lands; delegating again lifts the stop', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    w.checks = '[{"bucket":"pass"},{"bucket":"fail"}]'
+    bridge(on, w)
+    w.agent.events.push(created(1, 'AGT-1', 'sess-1', 'add'))
+    await start($, w, QUEUE.replace('- [ ] add()', '- [ ] [AGT-1] add()'))
+    await w.clock.advance(TICK)
+    await meet($, w)
+    expect(parseQueue(w.files.get(GOALS) ?? '').some(i => i.base !== undefined)).toBe(true)
+    w.agent.events.push({ id: 2, action: 'prompted', sessionId: 'sess-1', projectId: 'proj-1', identifier: 'AGT-1', prompt: '', signal: 'stop' })
+    await w.clock.advance(MIN + TICK)
+    w.checks = '[{"bucket":"pass"}]'
+    await meet($, w)
+    for (let i = 0; i < 4; i++) await w.clock.advance(TICK)
+    expect(w.merged).toHaveLength(0)
+    expect((await cmd($, 'status')).text).toContain('stopped in Linear')
+    // A reply after the stop is a Decisions line, not a build; a new delegation queues a fresh line.
+    w.agent.events.push({ id: 3, action: 'prompted', sessionId: 'sess-1', projectId: 'proj-1', identifier: 'AGT-1', prompt: 'go ahead after all' })
+    await w.clock.advance(MIN + TICK)
+    expect(w.files.get(PLAN_FILE)).toContain('The person wrote: go ahead after all')
+    w.agent.events.push(created(4, 'AGT-1', 'sess-1c', 'add'))
+    await w.clock.advance(MIN + TICK)
+    expect(w.files.get(GOALS)).toContain('(delegated to auto-claude again)')
+  })
+
+  test('agent session: a repository mapped by project name only polls nothing and says why once', async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    w.files.set('/home/.claude/linear.json', JSON.stringify({ repo_mapping: { repo: { team: 'AGT', projectName: 'Repo' } } }))
+    await start($, w, QUEUE)
+    for (let i = 0; i < 6; i++) await w.clock.advance(TICK)
+    expect(w.agent.calls).toHaveLength(0)
+    expect(w.notifies.filter(n => n.includes('maps to a Linear project by name only'))).toHaveLength(1)
   })
 
   test('agent session: without ~/.claude/linear-agent.json nothing is called and nothing changes', async ($, on) => {

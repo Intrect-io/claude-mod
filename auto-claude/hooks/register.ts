@@ -1432,8 +1432,11 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
       return
     }
 
-    // The bridge first: a session mapped on this poll gets the moments read just below.
-    r = await shipSteps($, await readEvents($, await agentSync($, r, await $.clock.now())))
+    // The bridge first: a session mapped on this poll gets the moments read just below. Its cursor
+    // is written at once, so a later throw in this tick cannot replay the replies it applied.
+    const synced = await agentSync($, r, await $.clock.now())
+    if (synced.agent !== r.agent) await writeRecord($, synced)
+    r = await shipSteps($, await readEvents($, synced))
     if (!r.on) return
     if ((r.holdStreak ?? 0) >= MAX_HOLD_STREAK) {
       const last = [...r.ships].reverse().find(s => s.state === 'held')
@@ -1538,7 +1541,8 @@ async function metToShip($: EngineInterface, r: AutoRecord, goal: string, branch
   const parent: string | undefined = r.fixes[goal]
   const wt: string | undefined = r.worktrees[branch]
   // A fix landed: its branch carries the PR's commits plus the fix.
-  if (parent !== undefined) return { ...r, ships: r.ships.map((s): ShipItem => (s.headRef === parent ? { ...s, branch, worktree: wt, state: 'push', repeats: 0 } : s)) }
+  // A milestone held meanwhile (stopped in its Linear session) stays held.
+  if (parent !== undefined) return { ...r, ships: r.ships.map((s): ShipItem => (s.headRef === parent && s.state !== 'held' && !stoppedGoal(r, s.goal) ? { ...s, branch, worktree: wt, state: 'push', repeats: 0 } : s)) }
   const check: string | undefined = parseQueue((await readText($, FILES(r.root).queue)) ?? '').find(i => i.condition === goal)?.check
   // Built on a branch still shipping, or behind milestones still shipping: it
   // waits its turn, and is rebased onto the default branch before its push.

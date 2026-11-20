@@ -60,8 +60,14 @@ export function issuesOf(condition: string): string[] {
   return m === null ? [] : [...m[1]!.matchAll(/\[([^\]]+)\]/g)].map(x => x[1]!)
 }
 
-export function agentLine(identifier: string, title: string): string {
-  return `- [ ] [${identifier}] ${cleanTitle(title, 90)}: what Linear ${identifier} asks (delegated to auto-claude) is resolved on this branch`
+// Brackets in untrusted text become parentheses, so a title such as "[ABC-9] x" can never add
+// another issue's tag to the line (the run would then move and comment on that issue).
+export function untagged(text: string): string {
+  return text.replace(/\[/g, '(').replace(/\]/g, ')')
+}
+
+export function agentLine(identifier: string, title: string, again = false): string {
+  return `- [ ] [${identifier}] ${cleanTitle(untagged(title), 90)}: what Linear ${identifier} asks (delegated to auto-claude${again ? ' again' : ''}) is resolved on this branch`
 }
 
 export function eventLines(

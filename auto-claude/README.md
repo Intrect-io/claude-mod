@@ -251,10 +251,11 @@ The MCP sync above writes as the person, so Linear's agent model is out of its r
 
 - **Config.** `~/.claude/linear-agent.json` holds `{"url": "https://linear-agent.example", "token": "<SESSION_TOKEN>"}`.
   - The bridge runs only when this file exists and the repository maps to a project in `~/.claude/linear.json`. Without it nothing changes.
+  - The Worker stores project ids, so the mapping needs `projectId`. A mapping by `projectName` only is told once, and nothing is polled.
   - The token goes into curl's argv only, because `$` has no HTTP API. It never reaches `goal-loop.log`, a told message, `goals.md` or `auto-plan.md`, and any text the Worker sends back is scrubbed of it.
 - **Polling.** About once a minute, on the driver's tick and in standby, the driver reads `GET <url>/v1/events?since=<cursor>&project=<projectId>`. The cursor and each issue's session are kept in the run record (`agent`).
 - **A delegated issue** becomes a queue line, `- [ ] [AGT-12] <title>: what Linear AGT-12 asks (delegated to auto-claude) is resolved on this branch`, unless a line already names it.
-  - The line is built from the title alone, and the title is untrusted text. Comment markers and colons are removed until the line parses back with no check.
+  - The line is built from the title alone, and the title is untrusted text. Comment markers and colons are removed until the line parses back with no check. Brackets become parentheses, so a title such as `[ABC-9] x` cannot add another issue's tag.
 - **Activities.** Each moment of a milestone whose line names a mapped issue is sent to that issue's session:
   - a start is an `action`;
   - a hold, a deferral, a diff-judge hold or a PR waiting on a person for protected files is an `elicitation`, with the reason and the PR link. Linear marks such a session as awaiting input;
@@ -263,14 +264,18 @@ The MCP sync above writes as the person, so Linear's agent model is out of its r
   - `[x]` is completed, `[!]` is canceled, the milestone being built is in progress, and the rest are pending;
   - at most 100 entries; an empty queue sends `null`.
 - **The person's reply.**
-  - When the issue still has an open line, the reply becomes a follow-up line for that issue. It is built on the issue's branch while its milestone has one.
-  - Otherwise the reply becomes a line under `## Decisions` in `auto-plan.md`.
+  - When the issue still has a line to build, the reply becomes a follow-up line for that issue. It is built on the issue's branch while its milestone has one. Each issue gets at most 3 such lines.
+  - Otherwise the reply becomes a line under `## Decisions` in `auto-plan.md`. This covers a stopped issue, an issue with no line left, and replies past the cap.
   - Either way it is logged (`agent-prompt`).
-- **Stop.** A `stop` from the session marks the issue's pending line `[!]` (`stopped in Linear`).
-  - A milestone already shipping is held at the driver's next step.
-  - A milestone that is met while stopped is not shipped.
+- **Stop.** A `stop` from the session marks the issue's pending lines `[!]` (`stopped in Linear`), including the fix goals repairing its PR.
+  - A milestone already shipping is held at the driver's next step. A fix goal that lands afterwards does not revive it.
+  - A milestone that is met while stopped is not shipped. A line the MCP sync queues later for the issue is marked too.
+  - Delegating the issue again, in a new session, lifts the stop and queues a fresh line.
   - The session gets a final `response`, and the stop is logged (`agent-stop`).
 - **Failures.** An unreachable Worker or a non-2xx answer is told once, when it starts, and retried on the next poll. It never holds or stops the run.
+  - The failure clears only after a whole poll goes through without one, so a send that keeps failing between good polls is still told once.
+  - Each session's plan is re-sent until that session takes it.
+  - The cursor is written as soon as a poll's replies are applied, so a later failure in the same tick cannot apply them twice.
 
 `hooks/agent.ts` holds the pure part (`planOf`, `eventLines`, `activityFor`), pinned by `fixtures/linear-agent-v1`. `hooks/bridge.ts` holds the I/O.
 

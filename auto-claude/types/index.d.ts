@@ -57,10 +57,14 @@ export type AgentBridge = {
   cursor: number
   sessions: Record<string, string>
   stopped?: string[]
-  planSig?: string
+  // The last plan sent to each session (its JSON), so a session gets the plan when it is new or the plan changed.
+  planSigs?: Record<string, string>
+  // Follow-up lines queued from each issue's replies (capped; past the cap a reply goes under ## Decisions).
+  followUps?: Record<string, number>
   polledAt?: number
-  // The Worker's last failure, told once when it starts failing.
+  // The Worker's last failure, told once when it starts failing; cleared by a poll with no failure.
   error?: string
+  failedAt?: number
 }
 
 // standby: an always-on run between cycles; it is on, but owns nothing and runs no model turn.
