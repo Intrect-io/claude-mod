@@ -1,0 +1,24 @@
+diff --git a/src/money.py b/src/money.py
+index 9c0d1e2..5b6c7d8 100644
+--- a/src/money.py
++++ b/src/money.py
+@@ -1,4 +1,4 @@
+-from decimal import Decimal, ROUND_HALF_UP
++from decimal import Decimal, ROUND_HALF_EVEN
+ 
+ 
+ def round_cents(value: Decimal) -> Decimal:
+@@ -6,1 +6,1 @@ def round_cents(value: Decimal) -> Decimal:
+-    return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
++    return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN)
+diff --git a/tests/test_money.py b/tests/test_money.py
+index 0d1e2f3..6c7d8e9 100644
+--- a/tests/test_money.py
++++ b/tests/test_money.py
+@@ -4,4 +4,5 @@ from src.money import round_cents
+ 
+ def test_half_cent_rounding():
+-    assert round_cents(Decimal("0.125")) == Decimal("0.13")
++    assert round_cents(Decimal("0.125")) == Decimal("0.12")
++    assert round_cents(Decimal("0.135")) == Decimal("0.14")
+     assert round_cents(Decimal("0.124")) == Decimal("0.12")

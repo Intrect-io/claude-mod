@@ -1,0 +1,14 @@
+diff --git a/src/a.py b/src/a.py
+index 1e2f3a4..7d8e9f0 100644
+--- a/src/a.py
++++ b/src/a.py
+@@ -1,4 +1,4 @@
+-from src.b import normalize
++from src.util.b import normalize
+ 
+ 
+ def clean(rows):
+diff --git a/src/b.py b/src/util/b.py
+similarity index 100%
+rename from src/b.py
+rename to src/util/b.py
