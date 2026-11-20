@@ -1,22 +1,25 @@
-// Running a deploy: a fresh detached checkout of what was merged, CodeQL,
+// Running a deploy: a fresh detached checkout of what was merged, the scan,
 // the command, then its smoke check. What is deployed is decided in deploy.ts.
 
 import type { EngineInterface } from 'claude-code'
 
 import type { AutoRecord } from '../types'
-import { codeqlSuite, countSarif, scriptsOf } from './deploy'
-import type { DeploySpec, SarifCount } from './deploy'
-import { fetchRemote, out, readText, refOf, run, tell } from './io'
+import { findingsOf, scriptsOf } from './deploy'
+import type { DeploySpec } from './deploy'
+import { fetchRemote, out, refOf, run, tell } from './io'
 
-// `codeqlKnown`: the error-level CodeQL results now known to predate the run, by
-// language, when a scan changed them; the caller keeps them on the record.
-export type DeployResult = ({ kind: 'ok' } | { kind: 'skipped'; why: string } | { kind: 'failed'; why: string }) & { codeqlKnown?: Record<string, string[]> }
+// $.process.run allows ten minutes at most.
+const SCAN_TIMEOUT_MS = 10 * 60_000
+
+// `scanKnown`: the scan output now known to predate the run, when a scan changed
+// it; the caller keeps it on the record.
+export type DeployResult = ({ kind: 'ok' } | { kind: 'skipped'; why: string } | { kind: 'failed'; why: string }) & { scanKnown?: string[] }
 
 // Deploys after a merge. A deploy whose script has not landed yet waits; one
-// that fails (the command, CodeQL or the smoke check) becomes a milestone that
+// that fails (the scan, the command or the smoke check) becomes a milestone that
 // repairs it, built from the default branch; MAX_DEPLOY_FAILS in a row stop the run.
 // Deploys what the default branch now holds, from a fresh detached checkout of
-// it: CodeQL first, the command, then its smoke check.
+// it: the scan first, the command, then its smoke check.
 export async function deployMerged($: EngineInterface, r: AutoRecord, spec: DeploySpec): Promise<DeployResult> {
   const dir = `${r.root}/worktrees/auto-deploy`
   await run($, ['git', '-C', r.root, 'worktree', 'remove', '--force', dir], r.root)
@@ -27,11 +30,11 @@ export async function deployMerged($: EngineInterface, r: AutoRecord, spec: Depl
     for (const script of scriptsOf(spec.command)) {
       if ((await run($, ['test', '-e', script], dir, 15_000)).exitCode !== 0) return { kind: 'skipped', why: `${script} is not in ${r.defaultBranch} yet` }
     }
-    let known: Record<string, string[]> | undefined
-    const withKnown = (result: DeployResult): DeployResult => (known === undefined ? result : { ...result, codeqlKnown: known })
-    for (const language of spec.codeql) {
-      const gate = await codeqlGate($, r, dir, language)
-      if (gate.known !== undefined) known = { ...(known ?? r.codeqlKnown ?? {}), [language]: gate.known }
+    let known: string[] | undefined
+    const withKnown = (result: DeployResult): DeployResult => (known === undefined ? result : { ...result, scanKnown: known })
+    if (spec.scan !== undefined) {
+      const gate = await scanGate($, r, dir, spec.scan)
+      if (gate.known !== undefined) known = gate.known
       if (gate.blocked !== undefined) return withKnown({ kind: 'failed', why: gate.blocked })
     }
     const ran = await run($, ['bash', '-lc', spec.command], dir, spec.timeoutMs)
@@ -46,63 +49,48 @@ export async function deployMerged($: EngineInterface, r: AutoRecord, spec: Depl
   }
 }
 
-// CodeQL before a deploy (CLAUDE.md §5). An error-level result the run brought
-// in blocks it; one that was already there before the run is told, not
-// blocking: it was live before this run deployed anything, and blocking on it
-// stopped whole runs (intrect-platform, 2026-11-17: 48 old results; kyte-portal
-// deferred 112 h). "Before" is the record's known set (the last scan that
-// passed), else a scan of the commit the run started from (baseSha).
-// The databases and SARIF stay outside the repository, in $TMPDIR.
-export async function codeqlGate($: EngineInterface, r: AutoRecord, dir: string, language: string): Promise<{ blocked?: string; known?: string[] }> {
-  const head = await scan($, r, dir, language, '')
-  if ('error' in head) return { blocked: head.error }
-  const c = head.count
-  if (c.errors === 0) {
-    if (c.warnings > 0) await tell($, r, `CodeQL ${language}: ${c.warnings} warning(s), no errors; SARIF at ${head.sarif}`)
-    return { known: [] }
-  }
-  let before = r.codeqlKnown?.[language]
-  let since = 'the last deploy CodeQL passed'
+// The scan before a deploy (a local tool the plan names: bandit, cargo audit,
+// gitleaks, …). Exit 0 passes. A failure whose output holds lines the run
+// brought in blocks it; a failure printing only what was already there before
+// the run is told, not blocking: it was live before this run deployed anything,
+// and blocking on such results stopped whole runs (intrect-platform,
+// 2026-11-17: 48 old results; kyte-portal deferred 112 h). "Before" is the
+// record's known set (the last scan that passed or was only old), else the same
+// scan of the commit the run started from (baseSha).
+export async function scanGate($: EngineInterface, r: AutoRecord, dir: string, scan: string): Promise<{ blocked?: string; known?: string[] }> {
+  const head = await run($, ['bash', '-lc', scan], dir, SCAN_TIMEOUT_MS)
+  if (head.exitCode === 0) return { known: [] }
+  if (head.exitCode < 0) return { blocked: `the scan \`${scan}\` did not finish: ${out(head)}` }
+  const now = findingsOf(`${head.stdout}\n${head.stderr}`)
+  let before = r.scanKnown
+  let since = 'the last deploy the scan passed'
   if (before === undefined) {
     const base = r.baseSha ?? `${refOf(r)}~1`
     since = `${base.slice(0, 12)}, where the run started`
-    const old = await scanAt($, r, base, language)
-    if ('error' in old) return { blocked: `CodeQL found ${c.errors} error-level result(s) in ${language} (${c.top.join('; ')}); SARIF at ${head.sarif}. ${base} could not be scanned to tell results from before the run apart: ${old.error}` }
-    before = old.count.keys
+    const old = await scanAt($, r, base, scan)
+    if ('error' in old) return { blocked: `the scan \`${scan}\` exited ${head.exitCode}: ${out(head)}. ${base} could not be scanned to tell output from before the run apart: ${old.error}` }
+    before = old.lines
   }
   const known = new Set(before)
-  const fresh = c.keys.filter(k => !known.has(k))
-  const told = `${c.errors - fresh.length} error-level result(s) were there before (${since}) and do not block`
+  const fresh = now.filter(l => !known.has(l))
   if (fresh.length > 0) {
-    return { blocked: `CodeQL found ${fresh.length} new error-level result(s) in ${language} (${fresh.slice(0, 5).map(k => c.labels[k]).join('; ')}); ${told}; SARIF at ${head.sarif}`, known: before }
+    return { blocked: `the scan \`${scan}\` exited ${head.exitCode} and printed ${fresh.length} line(s) it did not print before the run (${since}): ${fresh.slice(0, 5).join(' | ').slice(0, 600)}`, known: before }
   }
   // Told when the set changes, not on every deploy.
-  if (r.codeqlKnown?.[language]?.length !== c.keys.length) await tell($, r, `CodeQL ${language}: ${told}: ${c.top.join('; ')}; SARIF at ${head.sarif}`)
-  return { known: c.keys }
-}
-
-async function scan($: EngineInterface, r: AutoRecord, dir: string, language: string, suffix: string): Promise<{ count: SarifCount; sarif: string } | { error: string }> {
-  const tmp = ((await $.env.get('TMPDIR')) ?? '/tmp').replace(/\/$/, '')
-  const name = `${r.root.split('/').pop() ?? 'repo'}-${language}${suffix}`
-  const db = `${tmp}/auto-claude-codeql-${name}`
-  const sarif = `${tmp}/auto-claude-codeql-${name}.sarif`
-  const created = await run($, ['codeql', 'database', 'create', db, `--language=${language}`, '--source-root', dir, '--overwrite'], dir, 600_000)
-  if (created.exitCode !== 0) return { error: `CodeQL could not build a ${language} database: ${out(created)}` }
-  const analyzed = await run($, ['codeql', 'database', 'analyze', db, codeqlSuite(language), '--format=sarif-latest', `--output=${sarif}`], dir, 600_000)
-  if (analyzed.exitCode !== 0) return { error: `CodeQL ${language} analysis failed: ${out(analyzed)}` }
-  const count = countSarif((await readText($, sarif)) ?? '')
-  if (count === undefined) return { error: `CodeQL wrote no readable SARIF at ${sarif}` }
-  return { count, sarif }
+  if (r.scanKnown?.length !== now.length) await tell($, r, `the scan \`${scan}\` exited ${head.exitCode} with only output from before the run (${since}); it does not block`)
+  return { known: now }
 }
 
 // The same scan of an older commit, in a checkout of its own.
-async function scanAt($: EngineInterface, r: AutoRecord, ref: string, language: string): Promise<{ count: SarifCount; sarif: string } | { error: string }> {
-  const dir = `${r.root}/worktrees/auto-codeql-base`
+async function scanAt($: EngineInterface, r: AutoRecord, ref: string, scan: string): Promise<{ lines: string[] } | { error: string }> {
+  const dir = `${r.root}/worktrees/auto-scan-base`
   await run($, ['git', '-C', r.root, 'worktree', 'remove', '--force', dir], r.root)
   const made = await run($, ['git', '-C', r.root, 'worktree', 'add', '--detach', dir, ref], r.root)
   if (made.exitCode !== 0) return { error: `no checkout of ${ref}: ${out(made)}` }
   try {
-    return await scan($, r, dir, language, '-base')
+    const ran = await run($, ['bash', '-lc', scan], dir, SCAN_TIMEOUT_MS)
+    if (ran.exitCode < 0) return { error: `the scan did not finish: ${out(ran)}` }
+    return { lines: ran.exitCode === 0 ? [] : findingsOf(`${ran.stdout}\n${ran.stderr}`) }
   } finally {
     await run($, ['git', '-C', r.root, 'worktree', 'remove', '--force', dir], r.root)
   }

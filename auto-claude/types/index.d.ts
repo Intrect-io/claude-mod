@@ -91,7 +91,7 @@ export type AutoRecord = {
   queueEmpty: boolean
   // What the run deploys, fixed when it started (.claude/auto-deploy.json) or
   // when auto_plan_ready accepted the plan's Deploy line; unset: no deploys.
-  deploy?: { command: string; codeql: string[]; timeoutMs: number; smoke?: string; source?: 'file' | 'plan' }
+  deploy?: { command: string; scan?: string; timeoutMs: number; smoke?: string; source?: 'file' | 'plan' }
   // Why the plan deploys nothing (`Deploy: none (<reason>)`).
   deployNone?: string
   deploys?: number
@@ -155,11 +155,11 @@ export type AutoRecord = {
   dayCapTold?: boolean
   // The standby whose entry already compacted the session (its standbyAt).
   compactedFor?: number
-  // The default branch's commit when the run started: CodeQL results already
-  // there do not block its deploys (deploy-run.ts codeqlGate).
+  // The default branch's commit when the run started: output a scan already
+  // printed there does not block its deploys (deploy-run.ts scanGate).
   baseSha?: string
-  // Error-level CodeQL results known to predate the run, by language (keys from deploy.ts countSarif).
-  codeqlKnown?: Record<string, string[]>
+  // Normalized lines of the scan's output known to predate the run (deploy.ts findingsOf).
+  scanKnown?: string[]
   // Once its final check passes, the run plans the next run toward the same aim
   // by itself (not with --once); the run's number in that chain, and when each
   // run of it started in the last 24 h, for the daily cap.

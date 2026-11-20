@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { baselineSeen, lineIssues, MAX_FOLLOW_UPS, planSync } from './linear'
 
-import { countSarif, parseDeploy, scriptsOf, specOfPlan } from './deploy'
+import { findingsOf, parseDeploy, scriptsOf, specOfPlan } from './deploy'
 import { parseVerdict, transcriptTail } from './evaluator'
 import { checkBash, checkPath, deploysSomething, uncommitted, waitsLong } from './guard'
 import { guardRefusal, maxBranchSeq } from './loop'
@@ -12,7 +12,7 @@ import { deployFixLine, deployOf, finalCheckOf, fixLine, kickoffText, POLICY, va
 import { markItem, nextPending, parseDuration, parseQueue, requeueItem, slugify, summarize, waitingItems } from './queue'
 import { capReached, onlyWaiting, causeOf, ciAction, httpsOf, idleDue, inFlight, isWaiting, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, unfinished, MAX_AHEAD, wakeDue } from './ship'
 
-const PLAN = '## Goal\nadd and sub work\n\nFinal check: `python3 -m unittest -q`\nDeploy: `bash scripts/deploy.sh`\nSmoke check: `curl -fsS http://localhost:8080/health`\nCodeQL: python\n\n## Milestones\n1. add\n2. sub\n\n## Decisions\n'
+const PLAN = '## Goal\nadd and sub work\n\nFinal check: `python3 -m unittest -q`\nDeploy: `bash scripts/deploy.sh`\nSmoke check: `curl -fsS http://localhost:8080/health`\nScan: bandit -q -r src\n\n## Milestones\n1. add\n2. sub\n\n## Decisions\n'
 const QUEUE = '- [ ] add() returns a+b :: check: python3 -m unittest -q test_add\n- [ ] sub() returns a-b :: check: python3 -m unittest -q test_sub\n'
 const MIN = 60_000
 
@@ -46,25 +46,26 @@ describe('plan', () => {
     expect(validatePlan(PLAN, '- [ ] scripts/deploy.sh deploys the API to fly :: check: x\n- [ ] b :: check: y\n', true).ok).toBe(true)
   })
 
-  test('a plan says how the run deploys (P6): command, smoke check and CodeQL, or none with a reason', () => {
-    expect(deployOf(PLAN)).toEqual({ deploy: { kind: 'command', command: 'bash scripts/deploy.sh', smoke: 'curl -fsS http://localhost:8080/health', codeql: ['python'] }, errors: [] })
+  test('a plan says how the run deploys (P6): command, smoke check and scan, or none with a reason', () => {
+    expect(deployOf(PLAN)).toEqual({ deploy: { kind: 'command', command: 'bash scripts/deploy.sh', smoke: 'curl -fsS http://localhost:8080/health', scan: 'bandit -q -r src' }, errors: [] })
     const noDeploy = PLAN.replace(/Deploy:.*\n/, '')
     expect(validatePlan(noDeploy, QUEUE, true)).toMatchObject({ ok: false })
     expect((validatePlan(noDeploy, QUEUE, true) as { errors: string[] }).errors.join(' ')).toContain('no "Deploy:')
     // .claude/auto-deploy.json decides instead: no Deploy line needed.
     expect(validatePlan(noDeploy, QUEUE, true, true).ok).toBe(true)
     // None needs its reason.
-    const none = (d: string) => PLAN.replace(/Deploy:.*\n/, `Deploy: ${d}\n`).replace(/Smoke check:.*\n/, '').replace(/CodeQL:.*\n/, '')
+    const none = (d: string) => PLAN.replace(/Deploy:.*\n/, `Deploy: ${d}\n`).replace(/Smoke check:.*\n/, '').replace(/Scan:.*\n/, '')
     expect(validatePlan(none('none'), QUEUE, true).ok).toBe(false)
     expect(validatePlan(none('none (a library; nothing runs anywhere)'), QUEUE, true)).toMatchObject({ ok: true, deploy: { kind: 'none', reason: 'a library; nothing runs anywhere' } })
-    // A command needs its smoke check and its CodeQL line.
+    // A command needs its smoke check and its Scan line.
     const noSmoke = deployOf(PLAN.replace(/Smoke check:.*\n/, ''))
     expect(noSmoke.errors.join(' ')).toContain('Smoke check')
-    const noCodeql = deployOf(PLAN.replace(/CodeQL:.*\n/, ''))
-    expect(noCodeql.errors.join(' ')).toContain('CodeQL')
-    expect(deployOf(PLAN.replace('CodeQL: python', 'CodeQL: none (no code)')).deploy).toMatchObject({ codeql: [] })
-    expect(deployOf(PLAN.replace('CodeQL: python', 'CodeQL: none')).errors.join(' ')).toContain('needs its reason')
-    expect(deployOf(PLAN.replace('CodeQL: python', 'CodeQL: python, javascript')).deploy).toMatchObject({ codeql: ['python', 'javascript'] })
+    expect(deployOf(PLAN.replace(/Scan:.*\n/, '')).errors.join(' ')).toContain('Scan:')
+    expect(deployOf(PLAN.replace('Scan: bandit -q -r src', 'Scan: none (no code)')).deploy).toEqual({ kind: 'command', command: 'bash scripts/deploy.sh', smoke: 'curl -fsS http://localhost:8080/health' })
+    expect(deployOf(PLAN.replace('Scan: bandit -q -r src', 'Scan: none')).errors.join(' ')).toContain('needs its reason')
+    expect(deployOf(PLAN.replace('Scan: bandit -q -r src', 'Scan: bandit -q -r src && gitleaks detect --no-git')).deploy).toMatchObject({ scan: 'bandit -q -r src && gitleaks detect --no-git' })
+    // A plan written before CodeQL was dropped still reads: its CodeQL line stands for no scan.
+    expect(deployOf(PLAN.replace('Scan: bandit -q -r src', 'CodeQL: python')).errors).toEqual([])
   })
 
   test('the kickoff aims at the end state, live, and asks nobody (P6)', () => {
@@ -253,15 +254,18 @@ describe('ship', () => {
 })
 
 describe('deploy', () => {
-  test('the deploy file names a command, optional CodeQL languages, a smoke check and a bounded timeout', () => {
-    expect(parseDeploy('{"command": "bash scripts/deploy.sh"}')).toEqual({ command: 'bash scripts/deploy.sh', codeql: [], timeoutMs: 600_000, source: 'file' })
-    expect(parseDeploy('{"command": "make ship", "codeql": "python", "timeoutSec": 60, "smoke": "curl -f x"}')).toEqual({ command: 'make ship', codeql: ['python'], timeoutMs: 60_000, smoke: 'curl -f x', source: 'file' })
-    expect(parseDeploy('{"command": "x", "codeql": ["python", "javascript"], "timeoutSec": 9999}')).toMatchObject({ codeql: ['python', 'javascript'], timeoutMs: 600_000 })
-    expect(parseDeploy('{"codeql": "python"}')).toHaveProperty('error')
-    expect(parseDeploy('{"command": "x", "codeql": "py thon"}')).toHaveProperty('error')
+  test('the deploy file names a command, an optional scan command, a smoke check and a bounded timeout', () => {
+    expect(parseDeploy('{"command": "bash scripts/deploy.sh"}')).toEqual({ command: 'bash scripts/deploy.sh', timeoutMs: 600_000, source: 'file' })
+    expect(parseDeploy('{"command": "make ship", "scan": "cargo audit", "timeoutSec": 60, "smoke": "curl -f x"}')).toEqual({ command: 'make ship', scan: 'cargo audit', timeoutMs: 60_000, smoke: 'curl -f x', source: 'file' })
+    expect(parseDeploy('{"command": "x", "timeoutSec": 9999}')).toMatchObject({ timeoutMs: 600_000 })
+    expect(parseDeploy('{"scan": "cargo audit"}')).toHaveProperty('error')
+    expect(parseDeploy('{"command": "x", "scan": 3}')).toHaveProperty('error')
+    // CodeQL is no longer run: a file still naming it is told so, not run without its scan.
+    expect(parseDeploy('{"command": "x", "codeql": "python"}')).toHaveProperty('error')
     expect(parseDeploy('{"command": "x", "smoke": 3}')).toHaveProperty('error')
     expect(parseDeploy('not json')).toHaveProperty('error')
-    expect(specOfPlan({ kind: 'command', command: 'bash d.sh', smoke: 's', codeql: [] })).toEqual({ command: 'bash d.sh', codeql: [], timeoutMs: 600_000, smoke: 's', source: 'plan' })
+    expect(specOfPlan({ kind: 'command', command: 'bash d.sh', smoke: 's', scan: 'gitleaks detect' })).toEqual({ command: 'bash d.sh', scan: 'gitleaks detect', timeoutMs: 600_000, smoke: 's', source: 'plan' })
+    expect(specOfPlan({ kind: 'command', command: 'bash d.sh', smoke: 's' })).toEqual({ command: 'bash d.sh', timeoutMs: 600_000, smoke: 's', source: 'plan' })
   })
 
   test('the files a deploy command names, which must be on the default branch before it runs', () => {
@@ -271,36 +275,12 @@ describe('deploy', () => {
     expect(scriptsOf('bash /opt/global.sh')).toEqual([])
   })
 
-  test('SARIF errors are counted by their own level, else their rule\'s default', () => {
-    const sarif = JSON.stringify({
-      runs: [
-        {
-          tool: { driver: { rules: [{ id: 'py/clear-text-logging-sensitive-data', defaultConfiguration: { level: 'error' } }, { id: 'py/log-injection' }] } },
-          results: [
-            { ruleId: 'py/clear-text-logging-sensitive-data', locations: [{ physicalLocation: { artifactLocation: { uri: 'broker.py' }, region: { startLine: 12 } } }] },
-            { ruleId: 'py/log-injection' },
-            { ruleId: 'py/log-injection', level: 'note' },
-          ],
-        },
-      ],
-    })
-    expect(countSarif(sarif)).toMatchObject({ errors: 1, warnings: 1, top: ['py/clear-text-logging-sensitive-data broker.py:12'] })
-    expect(countSarif('{')).toBeUndefined()
-  })
-
-  test('each error-level result gets a key that survives a line move; two alike stay two', () => {
-    const at = (line: number, hash = 'h1:1') => ({ ruleId: 'py/x', level: 'error', partialFingerprints: { primaryLocationLineHash: hash }, locations: [{ physicalLocation: { artifactLocation: { uri: 'a.py' }, region: { startLine: line } } }] })
-    const one = countSarif(JSON.stringify({ runs: [{ results: [at(10)] }] }))!
-    const moved = countSarif(JSON.stringify({ runs: [{ results: [at(40)] }] }))!
-    expect(moved.keys).toEqual(one.keys)
-    expect(moved.labels[moved.keys[0]!]).toBe('py/x a.py:40')
-    const twice = countSarif(JSON.stringify({ runs: [{ results: [at(10), at(10)] }] }))!
-    expect(new Set(twice.keys).size).toBe(2)
-    expect(countSarif(JSON.stringify({ runs: [{ results: [at(10, 'h2:1')] }] }))!.keys).not.toEqual(one.keys)
-    // No fingerprint: the message stands in for it.
-    const plain = (text: string) => countSarif(JSON.stringify({ runs: [{ results: [{ ruleId: 'py/x', level: 'error', message: { text } }] }] }))!.keys
-    expect(plain('a')).toEqual(plain('a'))
-    expect(plain('a')).not.toEqual(plain('b'))
+  test('scan output is compared by its lines: colours, digits and repeats do not make a line new', () => {
+    expect(findingsOf('\x1b[31mE501 a.py:12: x\x1b[0m\n\nE501 a.py:12: x\n')).toEqual(['E# a.py:#: x'])
+    expect(findingsOf('B602 a.py:12\nB602 a.py:40\n')).toEqual(['B# a.py:#'])
+    expect(findingsOf('B602 a.py:12\nB301 b.py:3\n')).toHaveLength(2)
+    expect(findingsOf('')).toEqual([])
+    expect(findingsOf(Array.from({ length: 5000 }, (_, i) => `line ${String.fromCharCode(97 + (i % 26))}${'x'.repeat(i % 7)}${String.fromCharCode(65 + Math.floor(i / 26) % 26)}${'y'.repeat(Math.floor(i / 182))}`).join('\n')).length).toBeLessThanOrEqual(2000)
   })
 })
 
@@ -556,7 +536,7 @@ describe('waits (:: after:)', () => {
 
 describe('standby (always on)', () => {
   test('sources: health needs a smoke check, github needs github CI; due by their timers', () => {
-    const base = { remote: 'origin', ciMode: 'github' as const, deploy: { command: 'd', codeql: [], timeoutMs: 1, smoke: 's' } }
+    const base = { remote: 'origin', ciMode: 'github' as const, deploy: { command: 'd', timeoutMs: 1, smoke: 's' } }
     expect(sourcesOf(base)).toEqual(['health', 'github'])
     expect(sourcesOf({ ...base, remote: '.', ciMode: 'local' })).toEqual(['health'])
     expect(sourcesOf({ ...base, deploy: undefined })).toEqual(['github'])

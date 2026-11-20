@@ -38,7 +38,7 @@ const READY_TOOL_ID = 'mcp__auto-claude__auto_plan_ready'
 const RUN_DONE_TOOL_ID = `mcp__auto-claude__${RUN_DONE_TOOL}`
 const STORE = (root: string) => `auto:${root}`
 // The owner's pulse, written on every timer fire even while a long tick (a
-// deploy, CodeQL) runs, apart from the record so it never overwrites it.
+// deploy, scan) runs, apart from the record so it never overwrites it.
 const BEAT = (root: string) => `beat:${root}`
 // When this session's background workflow was first seen running, kept across
 // a /reload-plugins (a deploy reloads sessions whose turn has ended, which a
@@ -636,7 +636,7 @@ async function appendQueue($: EngineInterface, root: string, line: string): Prom
 
 async function deployAfter($: EngineInterface, r: AutoRecord, spec: DeploySpec, landed: string): Promise<AutoRecord> {
   const result = await deployMerged($, r, spec)
-  if (result.codeqlKnown !== undefined) r = { ...r, codeqlKnown: result.codeqlKnown }
+  if (result.scanKnown !== undefined) r = { ...r, scanKnown: result.scanKnown }
   if (result.kind === 'ok') {
     await tell($, r, `deployed after ${landed}${spec.smoke !== undefined ? '; smoke check passed' : ''}`)
     return { ...r, deploys: (r.deploys ?? 0) + 1, deployFails: 0, deployDue: false }
@@ -686,7 +686,7 @@ async function finalCheck($: EngineInterface, r: AutoRecord, caps: Caps): Promis
     const spec = r.deploy
     if (spec !== undefined && r.deployDue === true) {
       const result = await deployMerged($, r, spec)
-      if (result.codeqlKnown !== undefined) r = { ...r, codeqlKnown: result.codeqlKnown }
+      if (result.scanKnown !== undefined) r = { ...r, scanKnown: result.scanKnown }
       if (result.kind === 'skipped') return stopRun($, r, `the final check passed, but the deploy never became runnable: ${result.why}`)
       if (result.kind === 'failed') {
         const next = await deployFailed($, { ...r, phase: 'run' }, spec, `the final deploy failed: ${result.why}`)
@@ -1088,7 +1088,7 @@ async function continueRun($: EngineInterface, r: AutoRecord, why: string, resul
       runTimes: [...runs, now],
       baseSha: await headSha($, r),
       ...(r.mergeTimes !== undefined ? { mergeTimes: r.mergeTimes } : {}),
-      ...(r.codeqlKnown !== undefined ? { codeqlKnown: r.codeqlKnown } : {}),
+      ...(r.scanKnown !== undefined ? { scanKnown: r.scanKnown } : {}),
       ...(deploy === undefined ? {} : { deploy, deploys: 0 }),
     },
     now,
@@ -1549,7 +1549,7 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string, bu
   })
 
   const moved = where.used === where.cwd ? '' : ` (the session's directory ${where.cwd} no longer exists; used ${where.used})`
-  const deploys = deploy === undefined ? ', deploys as the plan says' : `, deploys after each merge with \`${deploy.command}\`${deploy.codeql.length > 0 ? ` after a CodeQL scan (${deploy.codeql.join(', ')})` : ''}`
+  const deploys = deploy === undefined ? ', deploys as the plan says' : `, deploys after each merge with \`${deploy.command}\`${deploy.scan !== undefined ? ` after the scan \`${deploy.scan}\`` : ''}`
   const always = r.alwaysOn === true
     ? ' Always on: once the final check passes, it stands by and wakes for new work.'
     : continuesOf(r) ? ` Once its final check passes, the next run toward the same aim plans itself (at most ${runCfg.maxRunsPerDay} runs in 24 h; --once ends at the first).` : ''
@@ -1618,7 +1618,7 @@ async function statusText($: EngineInterface): Promise<string> {
   const current = (await readLoop($, r.root))?.current
   const deploys =
     r.deploy !== undefined
-      ? `deploys after each merge: \`${r.deploy.command}\`${r.deploy.codeql.length > 0 ? ` (CodeQL ${r.deploy.codeql.join(', ')} first)` : ''}${r.deploy.smoke !== undefined ? `, smoke \`${r.deploy.smoke}\`` : ''} · ${r.deploys ?? 0} so far${r.deployDue === true ? ' · a deploy is due' : ''}`
+      ? `deploys after each merge: \`${r.deploy.command}\`${r.deploy.scan !== undefined ? ` (scan \`${r.deploy.scan}\` first)` : ''}${r.deploy.smoke !== undefined ? `, smoke \`${r.deploy.smoke}\`` : ''} · ${r.deploys ?? 0} so far${r.deployDue === true ? ' · a deploy is due' : ''}`
       : r.deployNone !== undefined
         ? `deploys nothing: ${r.deployNone}`
         : undefined
@@ -1833,7 +1833,7 @@ export const register: Register = (on, options) => {
         const spec = specOfPlan(verdict.deploy)
         const changed = r.deploy !== undefined && (r.deploy.command !== spec.command || r.deploy.smoke !== spec.smoke)
         next = { ...next, deploy: spec, deployNone: undefined, deploys: r.deploys ?? 0 }
-        deployNote = `; ${changed ? 'deploy changed to' : 'deploys with'} \`${spec.command}\`, smoke \`${spec.smoke}\`${spec.codeql.length > 0 ? `, CodeQL ${spec.codeql.join(', ')}` : ''}`
+        deployNote = `; ${changed ? 'deploy changed to' : 'deploys with'} \`${spec.command}\`, smoke \`${spec.smoke}\`${spec.scan !== undefined ? `, scan \`${spec.scan}\`` : ''}`
       } else {
         next = { ...next, deploy: undefined, deployNone: verdict.deploy.reason }
         deployNote = `; deploys nothing (${verdict.deploy.reason})`
