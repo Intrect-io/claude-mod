@@ -8,7 +8,7 @@ type Engine = Parameters<TestBody>[0]
 
 // A plan that deploys nothing, for runs that are not about deploying.
 const PLAN = '## Goal\nadd and sub work\n\nFinal check: `python3 -m unittest -q`\nDeploy: none (a library; nothing runs anywhere)\n\n## Milestones\n1. add\n2. sub\n\n## Decisions\n'
-const PLAN_DEPLOY = PLAN.replace('Deploy: none (a library; nothing runs anywhere)', 'Deploy: `bash scripts/deploy.sh`\nSmoke check: `curl -fsS http://localhost:8080/health`\nCodeQL: none (a test fixture)')
+const PLAN_DEPLOY = PLAN.replace('Deploy: none (a library; nothing runs anywhere)', 'Deploy: `bash scripts/deploy.sh`\nSmoke check: `curl -fsS http://localhost:8080/health`\nScan: none (a test fixture)')
 const QUEUE = '- [ ] add() returns a+b :: check: python3 -m unittest -q test_add\n- [ ] sub() returns a-b :: check: python3 -m unittest -q test_sub\n'
 // The worktrees and branches the loop makes for QUEUE's lines.
 const WT1 = '/repo/worktrees/goal-01-add-returns-a-b'
@@ -83,6 +83,9 @@ function world(on: On, store: Record<string, unknown> = {}) {
     rebaseFails: false,
     // Exits of particular `bash -lc <command>` runs (a wait's after and alive), over checkExit.
     cmdExit: new Map<string, number>(),
+    // The deploy scan `scan-tool`: its exit and output on the merged head, and on the commit the run started from.
+    scanHead: { code: 0, out: '' },
+    scanBase: { code: 0, out: '' },
     // Standby: `gh issue list` for the label, the default branch tip, context fill and compactions.
     issueList: '[]',
     tip: 'tip',
@@ -204,6 +207,10 @@ function world(on: On, store: Record<string, unknown> = {}) {
     if (a.includes('worktree add') && !a.includes('--detach')) {
       w.adds.push(a)
       w.gone.delete(String(e.argv[5]))
+    }
+    if (e.argv[0] === 'bash' && String(e.argv[2]).startsWith('scan-tool')) {
+      const s = cwd.endsWith('/worktrees/auto-scan-base') ? w.scanBase : w.scanHead
+      return ok(s.out, s.code)
     }
     if (e.argv[0] === 'bash' && w.cmdExit.has(String(e.argv[2]))) return ok('', w.cmdExit.get(String(e.argv[2]))!)
     if (e.argv[0] === 'bash' && cwd.endsWith('/worktrees/auto-deploy')) return ok('', String(e.argv[2]).startsWith('curl') ? w.smokeExit : w.deployExit)
@@ -1250,49 +1257,57 @@ describe('a run that deploys (P6)', () => {
     expect(w.notifies.at(-1)).toContain('3 deploys failed in a row')
   })
 
-  test('with CodeQL asked for, an error-level result blocks the deploy and queues its repair; warnings are told and it deploys', async ($, on) => {
-    const SARIF = '/home/auto-claude-codeql-repo-python.sarif'
+  test('a scan that fails with output the run brought in blocks the deploy and queues its repair; once it passes the deploy runs', async ($, on) => {
     const w = world(on)
-    w.files.set(SARIF, JSON.stringify({ runs: [{ results: [{ ruleId: 'py/sql-injection', level: 'error' }] }] }))
-    // Where the run started, nothing was found: the result is the run's own.
-    w.files.set(SARIF.replace('.sarif', '-base.sarif'), JSON.stringify({ runs: [{ results: [] }] }))
-    await planned($, w, PLAN_DEPLOY.replace('CodeQL: none (a test fixture)', 'CodeQL: python'))
+    w.scanHead = { code: 1, out: '>> Issue: [B608] Possible SQL injection\n   Location: ./db.py:41:8\n' }
+    // Where the run started the scan passed: the output is the run's own.
+    w.scanBase = { code: 0, out: '' }
+    await planned($, w, PLAN_DEPLOY.replace('Scan: none (a test fixture)', 'Scan: scan-tool'))
     await meet($, w)
     await w.clock.advance(TICK)
-    expect(w.runs.some(r => r.startsWith('codeql database create /home/auto-claude-codeql-repo-python --language=python --source-root /repo/worktrees/auto-deploy'))).toBe(true)
-    expect(deployRuns(w)).toEqual([])
-    expect(w.files.get(GOALS) ?? '').toContain('CodeQL found 1 new error-level result(s) in python (py/sql-injection ?:?)')
-    w.files.set(SARIF, JSON.stringify({ runs: [{ results: [{ ruleId: 'py/log-injection', level: 'warning' }] }] }))
+    expect(w.runs.some(r => r === 'bash -lc scan-tool')).toBe(true)
+    expect(deployRuns(w).filter(r => r.includes('deploy.sh'))).toEqual([])
+    expect(w.files.get(GOALS) ?? '').toContain('the scan `scan-tool` exited 1 and printed 2 line(s) it did not print before the run')
+    expect(w.files.get(GOALS) ?? '').toContain('Possible SQL injection')
+    w.scanHead = { code: 0, out: '' }
     await w.clock.advance(TICK)
     await meet($, w)
     await w.clock.advance(TICK)
     expect(deployRuns(w)).toContain('bash -lc bash scripts/deploy.sh')
-    expect(w.notifies.some(n => n.includes('CodeQL python: 1 warning(s), no errors'))).toBe(true)
   })
 
-  test('CodeQL: results already there where the run started are told, not blocking; a result the run adds still blocks (intrect-platform 2026-11-17)', async ($, on) => {
-    const SARIF = '/home/auto-claude-codeql-repo-python.sarif'
-    const old = { ruleId: 'py/clear-text-logging-sensitive-data', level: 'error', partialFingerprints: { primaryLocationLineHash: 'aa:1' }, locations: [{ physicalLocation: { artifactLocation: { uri: 'mon.py' }, region: { startLine: 193 } } }] }
-    const added = { ruleId: 'py/command-line-injection', level: 'error', partialFingerprints: { primaryLocationLineHash: 'bb:1' }, locations: [{ physicalLocation: { artifactLocation: { uri: 'decode.py' }, region: { startLine: 323 } } }] }
+  test('a scan whose output was already there where the run started is told, not blocking; output the run adds still blocks (intrect-platform 2026-11-17)', async ($, on) => {
     const w = world(on)
-    w.files.set(SARIF, JSON.stringify({ runs: [{ results: [old] }] }))
-    w.files.set(SARIF.replace('.sarif', '-base.sarif'), JSON.stringify({ runs: [{ results: [{ ...old, locations: [{ physicalLocation: { artifactLocation: { uri: 'mon.py' }, region: { startLine: 180 } } }] }] }] }))
-    await planned($, w, PLAN_DEPLOY.replace('CodeQL: none (a test fixture)', 'CodeQL: python'))
+    w.scanHead = { code: 1, out: 'B105 mon.py:193 hardcoded password\n' }
+    // The old finding sat 13 lines higher: a moved line number is the same finding.
+    w.scanBase = { code: 1, out: 'B105 mon.py:180 hardcoded password\n' }
+    await planned($, w, PLAN_DEPLOY.replace('Scan: none (a test fixture)', 'Scan: scan-tool'))
     await meet($, w)
     await w.clock.advance(TICK)
-    // The commit the run started from is scanned once, and the old result (moved 13 lines) is not new.
-    const baseScans = () => w.runs.filter(r => r.includes('worktree add --detach /repo/worktrees/auto-codeql-base tip-of-origin/main')).length
+    // The commit the run started from is scanned once.
+    const baseScans = () => w.runs.filter(r => r.includes('worktree add --detach /repo/worktrees/auto-scan-base tip-of-origin/main')).length
     expect(baseScans()).toBe(1)
     expect(deployRuns(w)).toContain('bash -lc bash scripts/deploy.sh')
-    expect(w.notifies.some(n => n.includes('CodeQL python: 1 error-level result(s) were there before') && n.includes('py/clear-text-logging-sensitive-data mon.py:193'))).toBe(true)
-    // The next merge brings a result of its own: that one blocks; the old one is known without a new scan.
-    w.files.set(SARIF, JSON.stringify({ runs: [{ results: [old, added] }] }))
+    expect(w.notifies.some(n => n.includes('with only output from before the run') && n.includes('does not block'))).toBe(true)
+    // The next merge brings a finding of its own: that one blocks; the old one is known without a new scan.
+    w.scanHead = { code: 1, out: 'B105 mon.py:193 hardcoded password\nB602 decode.py:323 shell=True\n' }
     const deploys = deployRuns(w).length
     await meet($, w)
     await w.clock.advance(TICK)
     expect(deployRuns(w)).toHaveLength(deploys)
     expect(baseScans()).toBe(1)
-    expect(w.files.get(GOALS) ?? '').toContain('CodeQL found 1 new error-level result(s) in python (py/command-line-injection decode.py:323); 1 error-level result(s) were there before (the last deploy CodeQL pass')
+    expect(w.files.get(GOALS) ?? '').toContain('printed 1 line(s) it did not print before the run (the last deploy the scan passed): B# decode.py:#')
+  })
+
+  test('a scan that cannot be told from before the run (the start commit cannot be scanned) blocks', async ($, on) => {
+    const w = world(on)
+    w.scanHead = { code: 1, out: 'B602 a.py:1\n' }
+    w.scanBase = { code: -1, out: '' }
+    await planned($, w, PLAN_DEPLOY.replace('Scan: none (a test fixture)', 'Scan: scan-tool'))
+    await meet($, w)
+    await w.clock.advance(TICK)
+    expect(deployRuns(w).filter(r => r.includes('deploy.sh'))).toEqual([])
+    expect(w.files.get(GOALS) ?? '').toContain('could not be scanned to tell output from before the run apart')
   })
 
   test('a broken deploy file keeps the run from starting', async ($, on) => {

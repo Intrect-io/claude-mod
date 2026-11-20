@@ -22,8 +22,8 @@ function lineOf(plan: string, label: string): string | undefined {
 
 // What the run deploys, as the plan states it: a command the driver runs after
 // each merge, with the smoke check that proves the deploy is live and the
-// CodeQL languages scanned first; or none, with the reason.
-export type PlanDeploy = { kind: 'command'; command: string; smoke: string; codeql: string[] } | { kind: 'none'; reason: string }
+// local scan command run first (or none); or no deploy, with the reason.
+export type PlanDeploy = { kind: 'command'; command: string; smoke: string; scan?: string } | { kind: 'none'; reason: string }
 
 const NONE = /^none\s*(?:\((.*)\))?\s*$/i
 
@@ -39,20 +39,19 @@ export function deployOf(plan: string): { deploy?: PlanDeploy; errors: string[] 
   }
   const smoke = lineOf(plan, 'smoke check')
   if (smoke === undefined) errors.push('a Deploy command needs a "Smoke check: `<command>`" line that passes only when the deployed service works.')
-  const codeqlText = lineOf(plan, 'codeql')
-  let codeql: string[] = []
-  if (codeqlText === undefined) errors.push('a Deploy command needs a "CodeQL: <languages>" line (or "CodeQL: none (<reason>)"), scanned before each deploy.')
-  else {
-    const cnone = codeqlText.match(NONE)
-    if (cnone !== null) {
-      if ((cnone[1] ?? '').trim() === '') errors.push('"CodeQL: none" needs its reason: "CodeQL: none (<reason>)".')
-    } else {
-      codeql = codeqlText.split(/[\s,]+/).filter(l => l !== '')
-      if (!codeql.every(l => /^[a-z-]+$/.test(l))) errors.push(`"CodeQL:" lists language names (python, javascript, …): "${codeqlText.slice(0, 60)}"`)
-    }
+  const scanText = lineOf(plan, 'scan')
+  let scan: string | undefined
+  if (scanText === undefined) {
+    // A plan written before 1.10.0 names CodeQL languages; CodeQL is no longer run, so that line stands for no scan.
+    if (lineOf(plan, 'codeql') === undefined) errors.push('a Deploy command needs a "Scan: `<command>`" line (a local tool such as `bandit -q -r src`, `cargo audit`, `gitleaks detect`) or "Scan: none (<reason>)", run before each deploy.')
+  } else {
+    const snone = scanText.match(NONE)
+    if (snone !== null) {
+      if ((snone[1] ?? '').trim() === '') errors.push('"Scan: none" needs its reason: "Scan: none (<reason>)".')
+    } else scan = scanText
   }
   if (errors.length > 0 || smoke === undefined) return { errors }
-  return { deploy: { kind: 'command', command: deploy, smoke, codeql }, errors }
+  return { deploy: { kind: 'command', command: deploy, smoke, ...(scan !== undefined ? { scan } : {}) }, errors }
 }
 
 export type PlanVerdict = { ok: true; finalCheck: string; pending: QueueItem[]; deploy?: PlanDeploy } | { ok: false; errors: string[] }
@@ -150,7 +149,7 @@ function deployRules(fixed: string | undefined): string[] {
     'Find how this repository deploys (scripts/deploy*, Makefile targets, wrangler.toml, fly.toml, Dockerfile + k8s manifests, a CI deploy workflow, README) and add to auto-plan.md:',
     '- `Deploy: <one shell command>`: auto-claude runs it after each merge, from a fresh checkout of the default branch (you never deploy yourself; your deploy commands are refused).',
     '- `Smoke check: <one shell command>`: run right after each deploy; it passes only when the deployed service really works (a health endpoint, a version string).',
-    '- `CodeQL: <languages>` (python, javascript, …) scanned before each deploy, or `CodeQL: none (<reason>)`.',
+    '- `Scan: <one shell command>`: a local security tool run before each deploy from the same checkout (python: `bandit -q -r <src>`; rust: `cargo audit`; secrets: `gitleaks detect --no-git`; chain them with &&), or `Scan: none (<reason>)`. It passes on exit 0; a failure only blocks the deploy when its output holds lines the run brought in. CodeQL is not used.',
     'If there is no way to deploy yet, plan the milestone that builds it (the script, its config) before the others need it; deploys start once the command exists on the default branch.',
     'Only a repository with nothing to run anywhere (a library, a document set) writes `Deploy: none (<why>)`. A deploy that needs credentials you do not have is still planned; the milestone that needs them calls defer_goal.',
   ]

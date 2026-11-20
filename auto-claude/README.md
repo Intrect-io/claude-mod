@@ -120,14 +120,15 @@ Claude finds how the repository deploys (`scripts/deploy*`, Makefile targets, `w
 ```
 Deploy: `bash scripts/deploy.sh`
 Smoke check: `curl -fsS https://api.example.com/health`
-CodeQL: python
+Scan: bandit -q -r src
 ```
 
 - `Deploy:` is run by auto-claude after each merge, with `bash -lc`, in a fresh detached checkout of the default branch (`worktrees/auto-deploy`). The model never deploys. Its deploy and cluster commands stay refused, except read-only looks such as `kubectl get|logs|describe`, `fly status|logs` and `wrangler tail`, which it can use to debug a failed smoke check.
 - `Smoke check:` runs right after the deploy. It must pass only when the deployed service really works.
-- `CodeQL:` names the languages scanned before each deploy (`<lang>-security-and-quality`), or says `none (<reason>)`. An error-level result the run brought in blocks the deploy. One that was already there before the run is reported and does not block. Warnings are only reported. The database and the SARIF go to `$TMPDIR`.
-  - "Before the run" is the default branch's commit when the run started. It is scanned once, in `worktrees/auto-codeql-base`, the first time a deploy's scan finds an error. After that the record keeps the set of known results: what the last passing scan found. A result is matched by its rule, its file and CodeQL's `primaryLocationLineHash` (else its message), so moving it to another line does not make it new.
+- `Scan:` is a local security tool run before each deploy, from the same fresh checkout, with `bash -lc` (for example `bandit -q -r src`, `cargo audit`, `gitleaks detect --no-git`; chain several with `&&`), or `none (<reason>)`. CodeQL is no longer used (1.10.0). Exit 0 passes. A failure blocks the deploy only when its output holds lines the run brought in; a failure that prints only what was already there before the run is reported and does not block. Output is compared by its lines with digits turned to `#`, so a finding that moved to another line is the same finding. Pick a tool whose output is stable between runs (no timestamps, no random ids).
+  - "Before the run" is the default branch's commit when the run started. It is scanned once, in `worktrees/auto-scan-base`, the first time a deploy's scan fails. After that the record keeps the set of known lines: what the last passing or only-old scan printed. When that commit cannot be scanned the failure blocks, since old output cannot be told from new.
   - Why: blocking on results that were live before the run stopped whole runs. intrect-platform stopped on 48 old results on 2026-11-17. kyte-portal deferred for 112 h on the same cause.
+  - A plan accepted before 1.10.0 with a `CodeQL:` line still reads; that line now stands for no scan.
 - A repository with nothing to run anywhere (a library, a document set) writes `Deploy: none (<reason>)`. `none` without a reason is not accepted.
 - When there is no way to deploy yet, the plan's early milestones build it. While a script the command names (`bash scripts/deploy.sh`, `./deploy`) is missing from the default branch, the deploy waits ("a deploy is due" in `status`) instead of failing. It runs once the script lands, and at the latest before the run is done.
 - The lines are fixed when `auto_plan_ready` accepts the plan. A milestone that edits them does not change what the run executes. A replan may change them, and the change is announced.
@@ -135,12 +136,12 @@ CodeQL: python
 A committed `.claude/auto-deploy.json` takes precedence: the person decided. The plan then needs no Deploy line. The file is read once, when the run starts. A broken file keeps the run from starting.
 
 ```json
-{ "command": "bash scripts/deploy.sh", "smoke": "curl -fsS https://x/health", "codeql": "python", "timeoutSec": 600 }
+{ "command": "bash scripts/deploy.sh", "smoke": "curl -fsS https://x/health", "scan": "bandit -q -r src", "timeoutSec": 600 }
 ```
 
 `timeoutSec` is 600 by default, and also at most 600.
 
-**A failed deploy does not stop the run.** That covers a non-zero exit, a timeout, new CodeQL errors and a failed smoke check.
+**A failed deploy does not stop the run.** That covers a non-zero exit, a timeout, a scan that finds new output and a failed smoke check.
 - A milestone that repairs the deploy goes into the queue first. It is built from the default branch, because the shipped branch is merged and gone, and it is judged by the final check.
 - It is merged like any milestone, and the deploy then runs again.
 - 3 deploys failing in a row stop the run. Nothing more is merged on top of a broken live service.
