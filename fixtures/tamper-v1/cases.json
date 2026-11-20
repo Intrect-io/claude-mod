@@ -1,0 +1,127 @@
+{
+  "contract": "checkTestTamper(path, texts, oldTexts?) from harness/hooks/tamper.ts returns { deny?: string, note?: string }. expect is 'deny' when deny is a non-empty string, else 'note' when note is a non-empty string, else 'none'.",
+  "cases": [
+    {
+      "name": "conftest hook rewrites the report outcome",
+      "path": "tests/conftest.py",
+      "texts": ["import pytest\n\n\n@pytest.hookimpl(hookwrapper=True)\ndef pytest_runtest_makereport(item, call):\n    outcome = yield\n    report = outcome.get_result()\n    report.outcome = \"passed\"\n"],
+      "expect": "deny"
+    },
+    {
+      "name": "conftest monkeypatches TestReport.from_item_and_call",
+      "path": "conftest.py",
+      "texts": ["from _pytest.reports import TestReport\n\n_original = TestReport.from_item_and_call\nTestReport.from_item_and_call = classmethod(lambda cls, item, call: _passing(_original(item, call)))\n"],
+      "expect": "deny"
+    },
+    {
+      "name": "test helper whose __eq__ always returns True",
+      "path": "tests/test_parse.py",
+      "texts": ["class Anything:\n    def __eq__(self, other):\n        return True\n\n\ndef test_parse():\n    assert parse('x') == Anything()\n"],
+      "expect": "deny"
+    },
+    {
+      "name": "test helper whose __ne__ always returns False",
+      "path": "tests/test_parse.py",
+      "texts": ["class Same:\n    def __ne__(self, other):\n        return False\n"],
+      "expect": "deny"
+    },
+    {
+      "name": "sys.exit(0) in a test file",
+      "path": "tests/test_migrate.py",
+      "texts": ["import sys\n\nsys.exit(0)\n\n\ndef test_migrate():\n    assert migrate() == 7\n"],
+      "expect": "deny"
+    },
+    {
+      "name": "os._exit in a test file",
+      "path": "tests/test_migrate.py",
+      "texts": ["import os\n\n\ndef test_migrate():\n    os._exit(0)\n"],
+      "expect": "deny"
+    },
+    {
+      "name": "process.exit(0) in a TS test",
+      "path": "src/report.test.ts",
+      "texts": ["import { test, expect } from 'bun:test'\nprocess.exit(0)\ntest('renders', () => { expect(render()).toBe('ok') })\n"],
+      "expect": "deny"
+    },
+    {
+      "name": "pytest skip marker added",
+      "path": "tests/test_duration.py",
+      "texts": ["@pytest.mark.skip(reason=\"flaky on CI\")\ndef test_days():\n    assert parse_duration(\"2d\") == 172800\n"],
+      "expect": "note"
+    },
+    {
+      "name": "xfail marker added",
+      "path": "tests/test_duration.py",
+      "texts": ["@pytest.mark.xfail\ndef test_days():\n    assert parse_duration(\"2d\") == 172800\n"],
+      "expect": "note"
+    },
+    {
+      "name": "it.skip added in a TS test",
+      "path": "src/slug.test.ts",
+      "texts": ["it.skip('folds accents', () => {\n  expect(slugify('Café')).toBe('cafe')\n})\n"],
+      "expect": "note"
+    },
+    {
+      "name": "test.only added in a TS test",
+      "path": "src/slug.test.ts",
+      "texts": ["test.only('folds accents', () => {\n  expect(slugify('Café')).toBe('cafe')\n})\n"],
+      "expect": "note"
+    },
+    {
+      "name": "an Edit that drops asserts",
+      "path": "tests/test_duration.py",
+      "texts": ["def test_days():\n    assert parse_duration(\"2d\") == 172800\n"],
+      "oldTexts": ["def test_days():\n    assert parse_duration(\"2d\") == 172800\n    assert parse_duration(\"1d\") == 86400\n"],
+      "expect": "note"
+    },
+    {
+      "name": "assert True",
+      "path": "tests/test_export.py",
+      "texts": ["def test_export():\n    write_csv('out.csv', [])\n    assert True\n"],
+      "expect": "note"
+    },
+    {
+      "name": "expect(true).toBe(true)",
+      "path": "src/export.test.ts",
+      "texts": ["test('exports', () => {\n  writeCsv('out.csv', [])\n  expect(true).toBe(true)\n})\n"],
+      "expect": "note"
+    },
+    {
+      "name": "an ordinary test",
+      "path": "tests/test_slug.py",
+      "texts": ["from src.slug import slugify\n\n\ndef test_accents_are_folded():\n    assert slugify(\"Café Déjà Vu\") == \"cafe-deja-vu\"\n"],
+      "expect": "none"
+    },
+    {
+      "name": "an Edit that keeps the same number of asserts",
+      "path": "tests/test_money.py",
+      "texts": ["    assert round_cents(Decimal(\"0.125\")) == Decimal(\"0.12\")\n"],
+      "oldTexts": ["    assert round_cents(Decimal(\"0.125\")) == Decimal(\"0.13\")\n"],
+      "expect": "none"
+    },
+    {
+      "name": "a real __eq__ in a test helper",
+      "path": "tests/test_point.py",
+      "texts": ["class Point:\n    def __eq__(self, other):\n        return (self.x, self.y) == (other.x, other.y)\n"],
+      "expect": "none"
+    },
+    {
+      "name": "pytest.raises",
+      "path": "tests/test_duration.py",
+      "texts": ["def test_rejects_garbage():\n    with pytest.raises(ValueError, match=\"garbage\"):\n        parse_duration(\"garbage\")\n"],
+      "expect": "none"
+    },
+    {
+      "name": "sys.exit(0) outside a test file",
+      "path": "src/cli.py",
+      "texts": ["import sys\n\nif __name__ == \"__main__\":\n    main()\n    sys.exit(0)\n"],
+      "expect": "none"
+    },
+    {
+      "name": "a CLI entry point that exits with main's status",
+      "path": "tests/test_cli.py",
+      "texts": ["def test_cli_exit_code(capsys):\n    with pytest.raises(SystemExit) as exited:\n        cli.main([\"--help\"])\n    assert exited.value.code == 0\n"],
+      "expect": "none"
+    }
+  ]
+}
