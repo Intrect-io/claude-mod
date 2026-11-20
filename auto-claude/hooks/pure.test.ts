@@ -4,7 +4,7 @@ import { baselineSeen, lineIssues, MAX_FOLLOW_UPS, planSync } from './linear'
 import { findingsOf, parseDeploy, scriptsOf, specOfPlan } from './deploy'
 import { parseVerdict, transcriptTail } from './evaluator'
 import { checkBash, checkPath, deploysSomething, uncommitted, waitsLong } from './guard'
-import { guardRefusal, maxBranchSeq } from './loop'
+import { guardRefusal, maxBranchSeq, serial } from './loop'
 import type { ShipState } from '../types'
 import { ciEvent, cycleLine, DAY_MS, dayCapHit, dueSources, eventLines, failedRuns, issueEvent, lineGhIssues, MAX_EVENT_LINES, nextRunBlock, nextTimers, openIssues, recentMerges, sourcesOf, withCycle } from './standby'
 import { hostLoadWait } from './plan'
@@ -755,5 +755,26 @@ describe('diff judge (pure)', () => {
     expect(parseDiffVerdict('{"verdict": "circumvents", "reason": "r"}')).toEqual({ verdict: 'circumvents', reason: 'r' })
     expect(parseDiffVerdict('{"verdict": "maybe"}')).toBeUndefined()
     expect(diffJudgePrompt({ goal: 'g', check: 'c', classified: { ...none, testInfra: ['conftest.py'] }, diff: 'D' })).toContain('test infrastructure changed: conftest.py')
+  })
+})
+
+describe('diff judge: goal-loop.log appends', () => {
+  test('diff judge: read-modify-write appends made at once keep every line once serialized (the Stop hook and a tick lost one in 1.11.0)', async () => {
+    let file = ''
+    const tick = () => new Promise(resolve => setTimeout(resolve, 1))
+    const append = async (line: string) => {
+      const text = file
+      await tick()
+      file = `${text}${line}\n`
+    }
+    await Promise.all(['a', 'b', 'c'].map(append))
+    expect(file.trim().split('\n').length).toBeLessThan(3)
+    file = ''
+    const queue = serial()
+    await Promise.all(['a', 'b', 'c', 'd'].map(l => queue(() => append(l))))
+    expect(file).toBe('a\nb\nc\nd\n')
+    // A job that throws does not stop the ones after it.
+    const after = await Promise.all([queue(async () => { throw new Error('x') }).then(() => 'ok', e => String(e)), queue(async () => 'next')])
+    expect(after).toEqual(['Error: x', 'next'])
   })
 })

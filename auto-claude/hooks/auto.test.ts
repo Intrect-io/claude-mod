@@ -921,7 +921,7 @@ describe('the diff judge (1.12.0)', () => {
     w.patch = PATCH
     w.verdicts.push('{"met": true, "reason": "tests pass"}', verdict)
   }
-  const activity = (w: W) => w.files.get('/repo/.claude/auto-activity.log') ?? ''
+  const activity = (w: W) => w.files.get(LOG) ?? ''
 
   test('diff judge: a circumventing diff is held for a person with the PR left open and labelled, after the check re-ran on the base tests', async ($, on) => {
     const w = world(on)

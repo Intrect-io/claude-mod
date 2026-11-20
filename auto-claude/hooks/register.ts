@@ -467,7 +467,7 @@ async function diffGate($: EngineInterface, r: AutoRecord, item: ShipItem, ref: 
   if (!diffJudgeOn) return {}
   const base = (await run($, ['git', '-C', r.root, 'merge-base', refOf(r), ref], r.root)).stdout.trim()
   if (!/^[0-9a-f]{7,40}$/.test(base)) {
-    await appendActivity($, r.root, { event: 'diff-judge', run: r.startedAt, goal: item.goal, verdict: 'skipped', reason: `no merge base of ${ref} and ${refOf(r)}` })
+    await appendLog($, r.root, { event: 'diff-judge', run: r.startedAt, goal: item.goal, verdict: 'skipped', reason: `no merge base of ${ref} and ${refOf(r)}` })
     return {}
   }
   const nameStatus = (await run($, ['git', '-C', r.root, 'diff', '--name-status', '-M', base, ref], r.root, 60_000)).stdout
@@ -490,7 +490,7 @@ async function diffGate($: EngineInterface, r: AutoRecord, item: ShipItem, ref: 
   }
   const verdict = await judgeDiff($, { goal: item.goal, check: item.check, classified, baseRerun, diff: judgeDiffText(patch, classified) })
   const action = diffAction(verdict, classified)
-  await appendActivity($, r.root, { event: 'diff-judge', run: r.startedAt, goal: item.goal, ...(item.pr !== undefined ? { pr: item.pr } : {}), verdict: verdict.verdict, action, reason: verdict.reason, testInfra: classified.testInfra, testsModified: classified.testsModified, assertsRemoved: classified.assertsRemoved, ...(baseRerun !== undefined ? { baseRerun: baseRerun.slice(0, 200) } : {}) })
+  await appendLog($, r.root, { event: 'diff-judge', run: r.startedAt, goal: item.goal, ...(item.pr !== undefined ? { pr: item.pr } : {}), verdict: verdict.verdict, action, reason: verdict.reason, testInfra: classified.testInfra, testsModified: classified.testsModified, assertsRemoved: classified.assertsRemoved, ...(baseRerun !== undefined ? { baseRerun: baseRerun.slice(0, 200) } : {}) })
   const why = `diff judge: ${verdict.verdict}: ${verdict.reason}`
   if (action === 'go') return {}
   if (action === 'note') return { note: why }

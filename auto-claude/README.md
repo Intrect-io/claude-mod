@@ -92,7 +92,7 @@ For each run it also prints its merges, holds and deferrals, and the idle-quiet 
 - On each tick the driver works out the state from the turn events (`turn.start`, `turn.complete`), the Stop hook, the background tasks and the run record. It appends an `activity` event to `.claude/auto-activity.log` (git-excluded, last 5000 lines) when the state changes, and once every 30 min while it stays the same. The time between two activity events belongs to the earlier one.
 - A gap longer than 60 min means the driver was not running (the session exited, or the machine slept). Only 60 min of it is counted to the state; the rest is shown as unobserved.
 - A run ends at its `run-done` or `run-stopped` event, or where the next run's first event comes. Stopped time inside a run is left out.
-- Merges and holds are logged by the driver (`merged`, `held`) in the same file from 1.11.0. It is a file of its own because the loop's Stop hook rewrites `goal-loop.log` whole, and a tick writing that log at the same moment lost the hook's `met` line (seen in the tests). Blocked lines and deferrals come from the loop's `blocked` and `deferred` events. Runs before 1.11.0 have no activity events, so they are not shown.
+- Merges and holds are logged by the driver (`merged`, `held`) in the same file from 1.11.0. It is a file of its own because the loop's Stop hook rewrites `goal-loop.log` whole, and in 1.11.0 a tick writing that log at the same moment lost the hook's `met` line (seen in the tests). Since 1.12.0 those appends run one after another, and the activity events, which are frequent, stay in their own file. Blocked lines and deferrals come from the loop's `blocked` and `deferred` events. Runs before 1.11.0 have no activity events, so they are not shown.
 - The log keeps its last 2000 lines, so stats covers about as far back as those reach.
 
 ## The diff judge
@@ -114,7 +114,7 @@ A check that passes proves little when the same branch changed the tests, or wha
    - Any other `unsure` goes on, with a note to the person.
    - `ok` goes on.
 
-Each verdict is a `diff-judge` event in `.claude/auto-activity.log`. `/auto-claude stats` counts the judged and held ones per run. The milestone condition asked for `.claude/goal-loop.log`, but a tick writing that log can lose the loop's lines (see "Where the time goes"), so the event goes to the driver's own file. A missing merge base skips the gate, with a `skipped` event. `diffJudge: false` turns the gate off.
+Each verdict is a `diff-judge` event in `.claude/goal-loop.log`. `/auto-claude stats` counts the judged and held ones per run. From 1.12.0, appends to that log in one process run one after another. A tick and the Stop hook appending at once used to lose a line, because each rewrites the whole file. A missing merge base skips the gate, with a `skipped` event. `diffJudge: false` turns the gate off.
 
 `fixtures/tamper-v1` pins `classifyDiff`'s results (`bun fixtures/tamper-v1/run.ts --section classify`). `/auto-claude judge-eval` (1.13.0) measures the judge on its diffs.
 
