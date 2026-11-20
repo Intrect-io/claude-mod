@@ -8,7 +8,7 @@ import type { DeploySpec } from './deploy'
 import { deployMerged } from './deploy-run'
 import { bootstrapRepo } from './bootstrap'
 import { ensureLines, FILES, fetchRemote, LOCAL, out, readText, refOf, repoRoot, run, tell } from './io'
-import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, WAIT_TOOL, WAIT_TOOL_ID, waitCall, guardRefusal, LOOP_EXCLUDES, LOOP_POLICY, loopView, MIN_CHECKS_TO_DEFER, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop, AGENT_PARKS, backgroundBusy, noteBackground } from './loop'
+import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, WAIT_TOOL, WAIT_TOOL_ID, waitCall, guardRefusal, LOOP_EXCLUDES, loopPolicy, loopView, DEFER_CATEGORIES, deferRule, setDeferAfter, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop, AGENT_PARKS, backgroundBusy, noteBackground } from './loop'
 import { capReached, causeOf, ciAction, diagnose, httpsOf, idleDue, inFlight, isWaiting, onlyWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, summary, unfinished, wakeDue } from './ship'
 import { markItem, nextPending, waitingItems } from './queue'
 import { classifyDiff, diffAction, judgeDiffText, restorePlan } from './verify'
@@ -1790,6 +1790,7 @@ export const register: Register = (on, options) => {
   runCfg = { continueRuns: options.continueRuns !== false, maxRunsPerDay: Math.max(Number(options.maxRunsPerDay ?? 6) || 6, 1) }
   ultracodeWanted = options.ultracode !== false
   diffJudgeOn = options.diffJudge !== false
+  setDeferAfter(Number(options.deferAfterChecks ?? 0))
   ultracodeKey = undefined
   ultracodePending = false
 
@@ -1810,8 +1811,15 @@ export const register: Register = (on, options) => {
     })
     await $.tool.register({
       name: DEFER_TOOL,
-      description: `auto-claude run only: give up on the current milestone because of an external blocker (credentials, a human decision, missing access), so it is marked blocked and the run moves on. Allowed only after at least ${MIN_CHECKS_TO_DEFER} failed checks; stop right after calling it. Waiting on compute (training, a cache build) is not a blocker: use ${WAIT_TOOL_ID}.`,
-      inputSchema: { type: 'object', properties: { reason: { type: 'string', description: 'The external blocker, in one or two sentences.' } }, required: ['reason'] },
+      description: `auto-claude run only: give up on the current milestone, so it is marked blocked for a person and the run moves on. ${deferRule()} Stop right after calling it. Waiting on compute (training, a cache build) is not a blocker: use ${WAIT_TOOL_ID}.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          reason: { type: 'string', description: 'The blocker, in one or two sentences; for spec-ambiguous, what contradicts what.' },
+          category: { type: 'string', enum: [...DEFER_CATEGORIES], description: 'credentials, payment, human-decision or access for an external blocker; spec-ambiguous when the spec and the check or its tests contradict each other.' },
+        },
+        required: ['reason', 'category'],
+      },
       isDeferred: false,
     })
     await $.tool.register({
@@ -1885,7 +1893,7 @@ export const register: Register = (on, options) => {
       sections: [
         ...composed.sections,
         { id: 'auto-claude:policy', text: POLICY, scope: 'session' as const },
-        ...(building ? [{ id: 'auto-claude:loop', text: LOOP_POLICY, scope: 'session' as const }] : []),
+        ...(building ? [{ id: 'auto-claude:loop', text: loopPolicy(), scope: 'session' as const }] : []),
       ],
     }
   })
@@ -1909,7 +1917,8 @@ export const register: Register = (on, options) => {
   // @ts-expect-error TS2589 in claude-code's Matcher<Args<'tool.call'>>
   on('tool.call', { tool: DEFER_TOOL_ID }, async ($, e) => {
     if ((e as unknown as { agentId?: unknown }).agentId !== undefined) return { result: AGENT_PARKS }
-    return deferCall($, (e as unknown as { reason?: unknown }).reason)
+    const input = e as unknown as { reason?: unknown; category?: unknown }
+    return deferCall($, input.reason, input.category)
   })
 
   on('tool.call', { tool: WAIT_TOOL_ID }, async ($, e) => {

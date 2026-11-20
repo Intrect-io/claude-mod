@@ -719,6 +719,13 @@ describe('stats', () => {
     expect(second.ms.building).toBe(20 * MIN)
   })
 
+  test('stats: deferrals are counted per run by category', () => {
+    const log = [act(0, 'building'), line(1, { event: 'deferred', goal: 'a', category: 'spec-ambiguous', checks: 0 }), line(2, { event: 'deferred', goal: 'b', category: 'credentials', checks: 1 }), line(3, { event: 'deferred', goal: 'c' })]
+    const [r] = summarizeStats(log, T0 + 5 * MIN)
+    expect(r.deferralsBy).toEqual({ 'spec-ambiguous': 1, credentials: 1, uncategorized: 1 })
+    expect(statsText([r], 7)).toContain('3 deferred (spec-ambiguous 1, credentials 1, uncategorized 1)')
+  })
+
   test('stats: days and its argument', () => {
     const log = [act(0, 'building'), line(10, { event: 'run-done', reason: 'x' })]
     expect(summarizeStats(log, T0 + 8 * 86_400_000, 7)).toEqual([])

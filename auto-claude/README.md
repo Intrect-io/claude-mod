@@ -286,7 +286,14 @@ Measured in ArtifactNet (2026-11-09 to 11-15): lines carried prose start conditi
 ## The loop
 
 - **Stuck.** 5 unmet checks in one turn, two unreadable verdicts, or an evaluator that fails: the loop waits 2 minutes, then sends a "change your approach" prompt, at most twice. After that the line is marked `[!]` and the run moves on.
-- **Deferring.** The model may call `mcp__auto-claude__defer_goal` for an external blocker after 2 failed checks. The deferral is applied at the next stop. Waiting on compute is not a blocker: it uses `wait_until`.
+- **Deferring (1.14.0).** The model may call `mcp__auto-claude__defer_goal` at any point, from the first check on. The call needs a `category`, one of:
+  - credentials, payment, human-decision or access, for an external blocker;
+  - spec-ambiguous, when the spec and the check or its tests contradict each other.
+
+  The deferral is applied at the next stop. The milestone is marked `[!]` with its category, and the `deferred` event in `.claude/goal-loop.log` carries `category` and `checks`. `/auto-claude stats` counts deferrals per run by category. `deferAfterChecks` (default 0) restores a minimum of failed checks first. Until 1.14.0 that minimum was a fixed 2, and nothing measured backed it.
+
+  Why at once: ImpossibleBench (Carlini et al., arXiv 2510.20270) gave coding agents tasks whose tests contradict the spec. GPT-5 "passed" 54% of them by gaming the tests, and Claude Opus 4.1 about half. Giving the agent an explicit abort tool cut GPT-5's rate to 9% and o3's from 49% to 12%, with a much weaker effect on Claude Opus 4.1. A gate that makes the model fail twice before it may escalate keeps it working on making the check pass. Whether the tool helps on Claude in these runs is unmeasured, so the stats count deferrals by category and the diff judge counts what it holds.
+- Waiting on compute is not a blocker: it uses `wait_until`.
 - **Evaluator.** Each call takes about 2–20 s. It is billed to the session's credentials but does not appear in `/cost`. A transcript over the 4 MiB read cap is judged by a fork of the session instead.
 - **Files.** `.claude/goals.md`, `.claude/goal-loop.log` (JSONL, its last 2000 lines) and `.claude/goal-loop.deny` are excluded from git through `.git/info/exclude`, along with `worktrees/`.
 - **`--queue`.** `/auto-claude start --queue` builds the queue you wrote, line by line, with the same loop. Nothing is pushed, merged or deployed, and the branches are left for review, as goal-mode's `loop on` did.
