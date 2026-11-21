@@ -43,7 +43,7 @@ The scheduled handler (cron `0 */6 * * *`) is the only code that refreshes the t
 - `created_at`;
 - `confirmed` (0002): 1 once a delivery was answered 200.
 
-`oauth_token` (0003) holds the token record in one row (`id = 1`, `value`, `saved_at`), next to its KV copy.
+`oauth_token` (0003) holds the token record in one row (`id = 1`, `value`, `saved_at`), next to its KV copy. A dropped token (revoke, dead grant) is written to both as a tombstone with a later `saved_at`, so a copy that a one-sided failure left behind can never win the read again. The cron refreshes or drops a grant only when it could read both stores.
 
 ## Bindings and secrets
 

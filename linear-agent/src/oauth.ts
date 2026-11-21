@@ -37,32 +37,56 @@ type TokenReply = { access_token?: string; refresh_token?: string; expires_in?: 
 
 type Stores = Pick<Env, 'DB' | 'TOKENS'>
 
-function parseToken(raw: string | null | undefined): StoredToken | undefined {
+// A dropped token is a tombstone, not a deleted row: it carries a later savedAt than any copy a
+// one-sided delete could leave behind, so the newest-wins read cannot bring a revoked grant back.
+type Tombstone = { dropped: true; savedAt: number }
+type TokenRecord = StoredToken | Tombstone
+
+function parseRecord(raw: string | null | undefined): TokenRecord | undefined {
   if (raw === null || raw === undefined) return undefined
   try {
-    return JSON.parse(raw) as StoredToken
+    return JSON.parse(raw) as TokenRecord
   } catch {
     return undefined
   }
 }
 
+// Each store's record, or 'unreadable' when the read itself failed (not the same as no record).
+type Copy = TokenRecord | undefined | 'unreadable'
+
 function unreadable(where: string) {
-  return (error: unknown): undefined => {
+  return (error: unknown): 'unreadable' => {
     console.warn(`reading the token from ${where} failed: ${errorText(error)}`)
-    return undefined
+    return 'unreadable'
   }
 }
 
-// The later of the two copies; either store alone is enough.
-export async function readToken(env: Stores): Promise<StoredToken | undefined> {
-  const [kv, db] = await Promise.all([
-    env.TOKENS.get(TOKEN_KEY).then(parseToken, unreadable('KV')),
+async function readCopies(env: Stores): Promise<[Copy, Copy]> {
+  return Promise.all([
+    env.TOKENS.get(TOKEN_KEY).then(parseRecord, unreadable('KV')),
     env.DB.prepare('SELECT value FROM oauth_token WHERE id = 1')
       .first<{ value: string }>()
-      .then(row => parseToken(row?.value), unreadable('D1')),
+      .then(row => parseRecord(row?.value), unreadable('D1')),
   ])
-  if (kv === undefined || db === undefined) return kv ?? db
-  return db.savedAt >= kv.savedAt ? db : kv
+}
+
+// Copies come as [KV, D1]; on a tie D1 (strongly consistent) wins.
+function newest(copies: Copy[]): StoredToken | undefined {
+  const records = copies.filter((c): c is TokenRecord => c !== undefined && c !== 'unreadable')
+  const latest = records.reduce<TokenRecord | undefined>((best, r) => (best === undefined || r.savedAt >= best.savedAt ? r : best), undefined)
+  return latest === undefined || 'dropped' in latest ? undefined : latest
+}
+
+// The later of the two copies; for serving requests either store alone is enough.
+export async function readToken(env: Stores): Promise<StoredToken | undefined> {
+  return newest(await readCopies(env))
+}
+
+// The token only when both stores answered, for decisions that must not rest on a stale copy
+// (refreshing with a rotated-away refresh token, or dropping a grant as dead).
+export async function readTokenStrict(env: Stores): Promise<{ token: StoredToken | undefined } | 'unreadable'> {
+  const copies = await readCopies(env)
+  return copies.includes('unreadable') ? 'unreadable' : { token: newest(copies) }
 }
 
 async function both(what: string, kv: () => Promise<unknown>, db: () => Promise<unknown>): Promise<void> {
@@ -71,23 +95,23 @@ async function both(what: string, kv: () => Promise<unknown>, db: () => Promise<
   if (k.status === 'rejected' && d.status === 'rejected') throw new Error(`${what} failed in both KV and D1`)
 }
 
-// The whole pair in one record, so a reader never sees a new access token with an old refresh
-// token. It counts as saved when either store took it.
-export async function writeToken(env: Stores, token: StoredToken): Promise<void> {
-  const value = JSON.stringify(token)
+async function writeRecord(env: Stores, record: TokenRecord, what: string): Promise<void> {
+  const value = JSON.stringify(record)
   await both(
-    'writing the token',
+    what,
     () => env.TOKENS.put(TOKEN_KEY, value),
-    () => env.DB.prepare('INSERT INTO oauth_token (id, value, saved_at) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET value = excluded.value, saved_at = excluded.saved_at').bind(value, token.savedAt).run(),
+    () => env.DB.prepare('INSERT INTO oauth_token (id, value, saved_at) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET value = excluded.value, saved_at = excluded.saved_at').bind(value, record.savedAt).run(),
   )
 }
 
-export async function deleteToken(env: Stores): Promise<void> {
-  await both(
-    'deleting the token',
-    () => env.TOKENS.delete(TOKEN_KEY),
-    () => env.DB.prepare('DELETE FROM oauth_token WHERE id = 1').run(),
-  )
+// The whole pair in one record, so a reader never sees a new access token with an old refresh
+// token. It counts as saved when either store took it: the later savedAt wins on read.
+export async function writeToken(env: Stores, token: StoredToken): Promise<void> {
+  await writeRecord(env, token, 'writing the token')
+}
+
+export async function deleteToken(env: Stores, now: number): Promise<void> {
+  await writeRecord(env, { dropped: true, savedAt: now }, 'dropping the token')
 }
 
 function randomHex(bytes: number): string {
@@ -212,7 +236,9 @@ async function attempts<T>(delays: readonly number[], sleep: (ms: number) => Pro
 // rotate past the pair just issued. A grant Linear calls invalid is dropped (unless a newer pair
 // was saved meanwhile), so health and the API say "not installed" instead of failing every call.
 export async function refreshIfDue(env: Env, now: number, sleep: (ms: number) => Promise<void> = wait): Promise<RefreshResult> {
-  const token = await readToken(env)
+  const read = await readTokenStrict(env)
+  if (read === 'unreadable') return 'failed'
+  const token = read.token
   if (token === undefined) return 'not-installed'
   if (token.expiresAt - now > REFRESH_WITHIN_MS) return 'fresh'
   const form = { grant_type: 'refresh_token', refresh_token: token.refreshToken, client_id: env.LINEAR_CLIENT_ID, client_secret: env.LINEAR_CLIENT_SECRET }
@@ -220,10 +246,10 @@ export async function refreshIfDue(env: Env, now: number, sleep: (ms: number) =>
   try {
     reply = await attempts(REFRESH_BACKOFF_MS, sleep, 'token refresh', () => tokenRequest(form))
   } catch (error) {
-    const current = await readToken(env)
-    if (current === undefined || current.savedAt !== token.savedAt) return 'failed'
+    const current = await readTokenStrict(env)
+    if (current === 'unreadable' || current.token === undefined || current.token.savedAt !== token.savedAt) return 'failed'
     console.warn(`${errorText(error)}: dropping the dead grant; reinstall through POST /v1/install`)
-    await deleteToken(env)
+    await deleteToken(env, now)
     return 'dead'
   }
   if (reply === undefined) return 'failed'

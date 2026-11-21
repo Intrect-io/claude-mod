@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { MAX_WEBHOOK_BYTES, route } from '../src/index'
-import { TOKEN_KEY } from '../src/oauth'
+import { readToken, TOKEN_KEY } from '../src/oauth'
 import { fakeCtx, gqlReply, installedToken, makeEnv, mockFetch, sign } from './fakes'
 
 const NOW = 1_795_000_000_000
@@ -81,9 +81,28 @@ describe('POST /webhook', () => {
     restore = mockFetch().restore
     const other = { type: 'OAuthApp', action: 'revoked', webhookTimestamp: NOW - 500, organizationId: 'org-other', oauthClientId: 'client-id-fixture' }
     expect((await post(env, other)).status).toBe(200)
-    expect(kv.has(TOKEN_KEY)).toBe(true)
+    expect(await readToken(env)).toBeDefined()
     expect((await post(env, { ...other, organizationId: 'org-1' })).status).toBe(200)
-    expect(kv.has(TOKEN_KEY)).toBe(false)
+    expect(await readToken(env)).toBeUndefined()
+  })
+
+  test('a revoke whose D1 write fails still drops the token: the KV tombstone outranks the stale D1 copy', async () => {
+    const { env, kv, db } = makeEnv()
+    const old = installedToken(NOW - 60_000, { savedAt: NOW - 60_000 })
+    kv.set(TOKEN_KEY, old)
+    db.query('INSERT INTO oauth_token (id, value, saved_at) VALUES (1, ?, ?)').run(old, NOW - 60_000)
+    // From here on every D1 write fails; reads still work.
+    const prepare = env.DB.prepare.bind(env.DB)
+    ;(env.DB as { prepare: unknown }).prepare = (sql: string) => {
+      const stmt = prepare(sql)
+      if (!sql.startsWith('INSERT INTO oauth_token')) return stmt
+      const boom = { run: async () => { throw new Error('D1 is unavailable') } }
+      return { ...stmt, ...boom, bind: () => boom }
+    }
+    restore = mockFetch().restore
+    const revoke = { type: 'OAuthApp', action: 'revoked', webhookTimestamp: NOW - 500, organizationId: 'org-1', oauthClientId: 'client-id-fixture' }
+    expect((await post(env, revoke)).status).toBe(200)
+    expect(await readToken(env)).toBeUndefined()
   })
 
   test('a bad signature is refused before anything is written', async () => {

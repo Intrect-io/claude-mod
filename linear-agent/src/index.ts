@@ -23,12 +23,12 @@ async function resolveProject(env: Env, e: QueuedEvent): Promise<void> {
 
 // An app revoke for this client and the installed workspace drops the token, so health and the
 // API say "not installed" instead of failing every call with a dead token.
-async function onIgnored(env: Env, body: unknown): Promise<void> {
+async function onIgnored(env: Env, body: unknown, now: number): Promise<void> {
   if (typeof body !== 'object' || body === null) return
   const b = body as Record<string, unknown>
   if (b.type !== 'OAuthApp' || b.action !== 'revoked' || b.oauthClientId !== env.LINEAR_CLIENT_ID) return
   const token = await readToken(env)
-  if (token !== undefined && token.organizationId === b.organizationId) await deleteToken(env)
+  if (token !== undefined && token.organizationId === b.organizationId) await deleteToken(env, now)
 }
 
 // Linear's payloads are a few kilobytes; anything far larger is refused before it is hashed.
@@ -98,7 +98,7 @@ export async function webhook(req: Request, env: Env, ctx: ExecutionContext, now
       }
       return fresh
     },
-    ignored: body => onIgnored(env, body),
+    ignored: body => onIgnored(env, body, now),
     thought: async (sessionId, body) => {
       const token = await readToken(env)
       if (token === undefined) throw new Error('the app is not installed')

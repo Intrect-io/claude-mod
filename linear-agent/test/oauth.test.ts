@@ -185,6 +185,21 @@ describe('scheduled token refresh', () => {
     expect(await readToken(env)).toBeDefined()
   })
 
+  test('a cron that cannot read one store neither refreshes nor drops the token', async () => {
+    const { env, kv, kvApi, db } = makeEnv()
+    // D1 still holds the pair before the last rotation; KV, which holds the live pair, cannot be read.
+    db.query('INSERT INTO oauth_token (id, value, saved_at) VALUES (1, ?, ?)').run(installedToken(NOW, { refreshToken: 'rotated-away', expiresAt: NOW + 3_600_000, savedAt: NOW - 1 }), NOW - 1)
+    kv.set(TOKEN_KEY, installedToken(NOW, { refreshToken: 'live', savedAt: NOW }))
+    kvApi.get = async () => {
+      throw new Error('KV read failed')
+    }
+    const m = mockFetch(call => (call.url.includes('/oauth/token') ? { status: 400, json: { error: 'invalid_grant' } } : undefined))
+    restore = m.restore
+    expect(await refreshIfDue(env, NOW, noSleep)).toBe('failed')
+    expect(m.calls).toHaveLength(0)
+    expect(JSON.parse(kv.get(TOKEN_KEY)!).refreshToken).toBe('live')
+  })
+
   test('the later of the KV and D1 copies wins on read', async () => {
     const { env, kv, db } = makeEnv()
     kv.set(TOKEN_KEY, installedToken(NOW, { refreshToken: 'kv-old', savedAt: NOW - 1 }))
