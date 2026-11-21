@@ -2,8 +2,8 @@
 
 import { type Env, errorText, json } from './env'
 import { type ActivityContent, addExternalUrl, createActivity, createIssue, issueProject, type PlanEntry, projectFingerprints, teamByKey, updatePlan } from './linear'
-import { readToken, type StoredToken } from './oauth'
-import { eventsSince, giveUpUnresolved, HOLD_BACK_MS, LOOKUP_BATCH, NO_PROJECT, setProjectById, unresolvedSince } from './store'
+import { mintInstallUrl, readToken, type StoredToken } from './oauth'
+import { eventsSince, HOLD_BACK_MS, LOOKUP_BATCH, NO_PROJECT, setProjectById, unresolvedSince } from './store'
 import { constantTimeEqual } from './webhook'
 
 const encoder = new TextEncoder()
@@ -15,6 +15,7 @@ const MAX_TEXT = 10_000
 // Activity body and action result (Linear: up to 250 000 characters).
 const MAX_ACTIVITY_TEXT = 250_000
 const EPHEMERAL_TYPES = new Set(['thought', 'action'])
+const NOT_INSTALLED = 'the app is not installed yet: mint an install link with POST /v1/install'
 
 export function authorized(req: Request, env: Env): boolean {
   const header = req.headers.get('authorization') ?? ''
@@ -69,11 +70,17 @@ async function lookUp(env: Env, token: StoredToken | undefined, row: { id: numbe
 
 // Rows whose project is unknown are looked up again before reading. The answer stops below the
 // first one still unknown (so the driver's cursor does not pass it), and below the rest of a full
-// batch, which the next read looks at. Rows unknown for longer than HOLD_BACK_MS are given up.
+// batch, which the next read looks at. A row is given up (no project) only after a lookup made
+// here with a token failed and the row is older than HOLD_BACK_MS, so rows that waited while
+// nobody polled still get their lookup. Without a token nothing is looked up or given up.
 async function resolvePending(env: Env, token: StoredToken | undefined, since: number, now: number): Promise<number | undefined> {
-  await giveUpUnresolved(env.DB, now - HOLD_BACK_MS)
-  const pending = await unresolvedSince(env.DB, since, now - HOLD_BACK_MS)
-  for (const row of pending) if (!(await lookUp(env, token, row))) return row.id
+  const pending = await unresolvedSince(env.DB, since)
+  if (token === undefined) return pending[0]?.id
+  for (const row of pending) {
+    if (await lookUp(env, token, row)) continue
+    if (row.createdAt > now - HOLD_BACK_MS) return row.id
+    await setProjectById(env.DB, row.id, NO_PROJECT)
+  }
   return pending.length === LOOKUP_BATCH ? pending[pending.length - 1]!.id + 1 : undefined
 }
 
@@ -81,7 +88,7 @@ async function events(env: Env, url: URL, now: number): Promise<Response> {
   const project = url.searchParams.get('project')
   const since = Number(url.searchParams.get('since') ?? '0')
   if (project === null || project === '' || !Number.isInteger(since) || since < 0) return json({ error: 'project and a non-negative integer since are required' }, 400)
-  const before = await resolvePending(env, await readToken(env.TOKENS), since, now)
+  const before = await resolvePending(env, await readToken(env), since, now)
   const rows = await eventsSince(env.DB, project, since, before)
   return json({ events: rows, cursor: rows.length > 0 ? rows[rows.length - 1]!.id : since })
 }
@@ -135,8 +142,8 @@ const issue: Handler = async (_env, token, input) => {
 async function fingerprints(env: Env, url: URL, now: number): Promise<Response> {
   const project = url.searchParams.get('project')
   if (project === null || project === '') return json({ error: 'project is required' }, 400)
-  const token = await readToken(env.TOKENS)
-  if (token === undefined) return json({ error: 'the app is not installed yet: open /oauth/start' }, 409)
+  const token = await readToken(env)
+  if (token === undefined) return json({ error: NOT_INSTALLED }, 409)
   try {
     return json({ fingerprints: await projectFingerprints(token.accessToken, project, now) })
   } catch (error) {
@@ -148,14 +155,15 @@ const POSTS: Record<string, Handler> = { '/v1/activity': activity, '/v1/plan': p
 
 export async function handleApi(req: Request, env: Env, url: URL, now: number): Promise<Response> {
   if (!authorized(req, env)) return json({ error: 'unauthorized' }, 401)
+  if (req.method === 'POST' && url.pathname === '/v1/install') return json({ url: await mintInstallUrl(env, url) })
   if (req.method === 'GET' && url.pathname === '/v1/events') return events(env, url, now)
   if (req.method === 'GET' && url.pathname === '/v1/fingerprints') return fingerprints(env, url, now)
   const handler = req.method === 'POST' ? POSTS[url.pathname] : undefined
   if (handler === undefined) return json({ error: 'not found' }, 404)
   const input = await body(req)
   if (input === undefined) return json({ error: 'a JSON object body is required' }, 400)
-  const token = await readToken(env.TOKENS)
-  if (token === undefined) return json({ error: 'the app is not installed yet: open /oauth/start' }, 409)
+  const token = await readToken(env)
+  if (token === undefined) return json({ error: NOT_INSTALLED }, 409)
   try {
     return await handler(env, token, input)
   } catch (error) {

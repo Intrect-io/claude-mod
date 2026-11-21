@@ -16,6 +16,10 @@ import { markItem, parseQueue, type QueueItem } from './queue'
 export const AGENT_CONFIG = '.claude/linear-agent.json'
 export const AGENT_POLL_MS = 60_000
 const CURL_TIMEOUT_S = 15
+// curl reads the authorization header from a file in a directory only this user can enter, so
+// the token is never in a process's argv (visible to every local user through ps).
+export const AGENT_HEADER_DIR = '.claude/linear-agent.d'
+export const AGENT_HEADER_FILE = 'auth.header'
 
 export type AgentConfig = { url: string; token: string }
 
@@ -50,13 +54,34 @@ export async function readAgentConfig($: EngineInterface): Promise<AgentConfig |
 
 export type AgentReply = { ok: true; json: unknown } | { ok: false; error: string }
 
-// One Worker call. The token goes only into curl's argv, never into a reply, a log or a message:
-// any text that comes back is scrubbed of it before it is used.
+// One Worker call. The token goes only into a header file curl reads (-H @file), never into an
+// argv, a reply, a log or a message: any text that comes back is scrubbed of it before it is used.
 export type AgentRequest = { method: 'GET' | 'POST'; path: string; body?: unknown }
+
+// The header file for this token, written when missing or stale. The directory is made mode 700
+// first by a command whose argv holds no secret, so the file is never readable by others.
+async function headerFile($: EngineInterface, cfg: AgentConfig, cwd: string): Promise<string | undefined> {
+  const home = (await $.env.get('HOME').catch(() => undefined))?.replace(/\/$/, '')
+  if (home === undefined) return undefined
+  const dir = `${home}/${AGENT_HEADER_DIR}`
+  const file = `${dir}/${AGENT_HEADER_FILE}`
+  const want = `authorization: Bearer ${cfg.token}\n`
+  if ((await readText($, file)) === want) return file
+  const made = await run($, ['sh', '-c', 'umask 077 && mkdir -p "$1" && chmod 700 "$1"', 'sh', dir], cwd, 10_000)
+  if (made.exitCode !== 0) return undefined
+  try {
+    await $.fs.write(file, want)
+  } catch {
+    return undefined
+  }
+  return file
+}
 
 export async function agentCall($: EngineInterface, cfg: AgentConfig, cwd: string, req: AgentRequest): Promise<AgentReply> {
   const { method, path, body } = req
-  const argv = ['curl', '-sS', '-m', String(CURL_TIMEOUT_S), '-X', method, '-H', `authorization: Bearer ${cfg.token}`, '-w', '\n%{http_code}']
+  const header = await headerFile($, cfg, cwd)
+  if (header === undefined) return { ok: false, error: `could not write the curl header file under ~/${AGENT_HEADER_DIR}` }
+  const argv = ['curl', '-sS', '-m', String(CURL_TIMEOUT_S), '-X', method, '-H', `@${header}`, '-w', '\n%{http_code}']
   if (body !== undefined) argv.push('-H', 'content-type: application/json', '--data-binary', JSON.stringify(body))
   argv.push(`${cfg.url}${path}`)
   const r = await run($, argv, cwd, (CURL_TIMEOUT_S + 5) * 1000)

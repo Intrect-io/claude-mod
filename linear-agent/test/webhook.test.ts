@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { route } from '../src/index'
+import { MAX_WEBHOOK_BYTES, route } from '../src/index'
 import { TOKEN_KEY } from '../src/oauth'
 import { fakeCtx, gqlReply, installedToken, makeEnv, mockFetch, sign } from './fakes'
 
@@ -112,5 +112,55 @@ describe('POST /webhook', () => {
     const body = { ...created(), action: 'prompted', promptContext: undefined, agentActivity: { id: 'act-1', content: { type: 'prompt', body: 'stop now' }, signal: 'stop' } }
     expect((await post(env, body)).status).toBe(200)
     expect(db.query('SELECT key, prompt, signal FROM events').all()).toEqual([{ key: 'prompted:act-1', prompt: 'stop now', signal: 'stop' }])
+  })
+})
+
+describe('webhook hardening', () => {
+  test('a body over the cap is refused with 413 before anything is written', async () => {
+    const { env, db } = makeEnv()
+    restore = mockFetch().restore
+    const big = 'x'.repeat(MAX_WEBHOOK_BYTES + 1)
+    const declared = new Request('https://linear-agent.intrect.io/webhook', { method: 'POST', headers: { 'Linear-Signature': 'ab'.repeat(32), 'content-length': String(big.length) }, body: big })
+    expect((await route(declared, env, fakeCtx().ctx as never, NOW)).status).toBe(413)
+    // No Content-Length: the stream itself is cut off at the cap.
+    const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(big)); c.close() } })
+    const chunked = new Request('https://linear-agent.intrect.io/webhook', { method: 'POST', headers: { 'Linear-Signature': 'ab'.repeat(32) }, body: stream, duplex: 'half' } as RequestInit)
+    expect((await route(chunked, env, fakeCtx().ctx as never, NOW)).status).toBe(413)
+    expect(db.query('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 0 })
+  })
+
+  test('a Korean title split across stream chunks still verifies and is stored intact', async () => {
+    const { env, db, kv } = makeEnv()
+    kv.set(TOKEN_KEY, installedToken(NOW))
+    restore = mockFetch(gqlReply('agentActivityCreate', { agentActivityCreate: { success: true } }), gqlReply('issue(id: $id)', { issue: { project: { id: 'proj-1' } } })).restore
+    const body = created()
+    body.agentSession.issue.title = '헬스 엔드포인트 추가'
+    const raw = JSON.stringify(body)
+    const bytes = new TextEncoder().encode(raw)
+    const cut = new TextEncoder().encode(raw.slice(0, raw.indexOf('헬') + 1)).length - 1
+    const stream = new ReadableStream({ start(c) { c.enqueue(bytes.slice(0, cut)); c.enqueue(bytes.slice(cut)); c.close() } })
+    const req = new Request('https://linear-agent.intrect.io/webhook', { method: 'POST', headers: { 'Linear-Signature': await sign(raw), 'Linear-Delivery': 'd-ko' }, body: stream, duplex: 'half' } as RequestInit)
+    const ctx = fakeCtx()
+    expect((await route(req, env, ctx.ctx as never, NOW)).status).toBe(200)
+    await ctx.settle()
+    expect(db.query('SELECT title FROM events').get()).toEqual({ title: '헬스 엔드포인트 추가' })
+  })
+
+  test('a signed session event from another workspace is answered 200 and not queued', async () => {
+    const { env, db, kv } = makeEnv()
+    kv.set(TOKEN_KEY, installedToken(NOW))
+    const m = mockFetch()
+    restore = m.restore
+    const res = await post(env, { ...created('sess-x'), organizationId: 'org-other' })
+    expect(res.status).toBe(200)
+    expect(db.query('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 0 })
+    expect(m.calls).toHaveLength(0)
+  })
+
+  test('before the install a session event is still queued (held until a token can resolve it)', async () => {
+    const { env, db } = makeEnv()
+    restore = mockFetch().restore
+    expect((await post(env, created('sess-early'))).status).toBe(200)
+    expect(db.query('SELECT key, project_id FROM events').all()).toEqual([{ key: 'created:sess-early', project_id: null }])
   })
 })

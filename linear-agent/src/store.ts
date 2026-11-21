@@ -5,7 +5,7 @@ import type { QueuedEvent } from './webhook'
 
 // project_id: null = not looked up yet (or the lookup failed), '' = the issue has no project.
 export const NO_PROJECT = ''
-// How long an unresolved row holds back the rows after it before it is passed over.
+// How long an unresolved row holds back the rows after it before a failed lookup gives it up.
 export const HOLD_BACK_MS = 30 * 60_000
 export const PAGE = 100
 
@@ -82,20 +82,13 @@ export async function setProjectById(db: D1Database, id: number, projectId: stri
 
 export const LOOKUP_BATCH = 20
 
-// Rows after the cursor whose project is not known yet and that are young enough to hold the
-// rest back, oldest first.
-export async function unresolvedSince(db: D1Database, since: number, youngerThan: number, limit = LOOKUP_BATCH): Promise<Array<{ id: number; issueId: string }>> {
+// Rows after the cursor whose project is not known yet, oldest first.
+export async function unresolvedSince(db: D1Database, since: number, limit = LOOKUP_BATCH): Promise<Array<{ id: number; issueId: string; createdAt: number }>> {
   const { results } = await db
-    .prepare('SELECT id, issue_id FROM events WHERE id > ? AND project_id IS NULL AND created_at > ? ORDER BY id LIMIT ?')
-    .bind(since, youngerThan, limit)
-    .all<{ id: number; issue_id: string }>()
-  return results.map(r => ({ id: r.id, issueId: r.issue_id }))
-}
-
-// Rows whose lookup kept failing past the hold-back window are given up (no project), so they
-// neither hold anything back nor cost a Linear call on every read.
-export async function giveUpUnresolved(db: D1Database, olderThan: number): Promise<void> {
-  await db.prepare('UPDATE events SET project_id = ? WHERE project_id IS NULL AND created_at <= ?').bind(NO_PROJECT, olderThan).run()
+    .prepare('SELECT id, issue_id, created_at FROM events WHERE id > ? AND project_id IS NULL ORDER BY id LIMIT ?')
+    .bind(since, limit)
+    .all<{ id: number; issue_id: string; created_at: number }>()
+  return results.map(r => ({ id: r.id, issueId: r.issue_id, createdAt: r.created_at }))
 }
 
 // The project's rows after the cursor, below `before` when an unresolved row holds the rest back.
