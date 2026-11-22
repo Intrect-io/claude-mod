@@ -2,6 +2,8 @@
 
 linear-agent is the Cloudflare Worker behind auto-claude's Linear agent app. Linear treats the app as its own user, with `actor=app`. Issues can be delegated to it, and it reports progress in Linear's agent session. auto-claude's driver reaches it through a small bearer-authenticated API.
 
+It ships in [claude-mod](../README.md) next to the mods, but it is not a mod.
+
 - **Webhooks.** It verifies Linear's webhooks and queues agent session events in D1. It answers within Linear's 5 s limit and sends the first activity within its 10 s limit.
 - **Token.** It holds the app's OAuth token and refreshes it on a cron.
 - **Session API.** It lets the driver post activities, replace the session plan, add the PR link, and create issues, all as the app.
