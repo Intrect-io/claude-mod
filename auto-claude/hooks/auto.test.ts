@@ -2398,6 +2398,60 @@ describe('the Linear agent session bridge (1.16.0)', () => {
     expect(w.files.get(GOALS)).toMatch(/- \[x\] add\(\)/)
   })
 
+  // ---- 1.17.2: the bridge says once per run whether it is on, and why not
+
+  const bridgeEvents = (w: W) => (w.files.get(LOG) ?? '').split('\n').filter(l => l.includes('"event":"agent-bridge"')).map(l => JSON.parse(l) as Record<string, unknown>)
+
+  test('bridge status: a configured run logs one agent-bridge on with the project at plan acceptance, told once, not again on later polls', async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    await start($, w, QUEUE)
+    for (let i = 0; i < 4; i++) await w.clock.advance(MIN)
+    const events = bridgeEvents(w)
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ on: true, projectId: 'proj-1' })
+    expect(w.notifies.filter(n => n.includes('Linear agent bridge on'))).toHaveLength(1)
+    expect((await cmd($, 'status')).text).toContain('linear agent bridge: on (project proj-1)')
+    expect(w.files.get(LOG) ?? '').not.toContain(TOKEN)
+  })
+
+  test('bridge status: a mapping without projectId is off with its reason, in /auto-claude status, and nothing is polled', async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    w.files.set('/home/.claude/linear.json', JSON.stringify({ repo_mapping: { repo: { team: 'AGT', projectName: 'repo' } } }))
+    await start($, w, QUEUE)
+    for (let i = 0; i < 3; i++) await w.clock.advance(MIN)
+    const events = bridgeEvents(w)
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ on: false, reason: 'repo_mapping.<folder> in ~/.claude/linear.json has no projectId' })
+    expect(w.notifies.filter(n => n.includes('Linear agent bridge off: repo_mapping.<folder>'))).toHaveLength(1)
+    expect((await cmd($, 'status')).text).toContain('linear agent bridge: off (repo_mapping.<folder> in ~/.claude/linear.json has no projectId)')
+    expect(w.agent.calls.filter(c => c.method === 'GET')).toHaveLength(0)
+  })
+
+  test('bridge status: an invalid config is off without the token in any reason, and fixing it logs on as a change', async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    w.files.set('/home/.claude/linear-agent.json', JSON.stringify({ url: 'agent.test', token: TOKEN }))
+    await start($, w, QUEUE)
+    await w.clock.advance(MIN)
+    expect(bridgeEvents(w)).toEqual([expect.objectContaining({ on: false, reason: expect.stringContaining('is not {"url"') })])
+    expect((await cmd($, 'status')).text).toContain('linear agent bridge: off (~/.claude/linear-agent.json is not')
+    for (const text of [w.files.get(LOG) ?? '', w.notifies.join('\n'), (await cmd($, 'status')).text]) expect(text).not.toContain(TOKEN)
+    w.files.set('/home/.claude/linear-agent.json', JSON.stringify({ url: 'https://agent.test', token: TOKEN }))
+    for (let i = 0; i < 3; i++) await w.clock.advance(MIN)
+    expect(bridgeEvents(w).map(e => e.on)).toEqual([false, true])
+  })
+
+  test('bridge status: without ~/.claude/linear-agent.json the run logs it off once and status stays quiet about it', async ($, on) => {
+    const w = world(on)
+    bridge(on, w, false)
+    await start($, w, QUEUE)
+    for (let i = 0; i < 3; i++) await w.clock.advance(MIN)
+    expect(bridgeEvents(w)).toEqual([expect.objectContaining({ on: false, reason: 'no ~/.claude/linear-agent.json' })])
+    expect((await cmd($, 'status')).text).not.toContain('linear agent bridge')
+  })
+
   // ---- 1.17.0: decomposition and Triage issues
 
   test('decompose: a plan for one delegated issue with 2 milestones gets a delegated sub-issue per line, tagged, and the parent session gets the plan', async ($, on) => {

@@ -8,7 +8,7 @@ import type { DeploySpec } from './deploy'
 import { deployMerged } from './deploy-run'
 import { bootstrapRepo } from './bootstrap'
 import { ensureLines, FILES, fetchRemote, LOCAL, out, readText, refOf, repoRoot, run, tell } from './io'
-import { agentMoment, agentSync, carryAgent, fileTriage, markPlanAccepted, noteCiRed, readAgentConfig, setMaxIssuesPerDay, SPEC_AMBIGUOUS_HINT, stoppedGoal } from './bridge'
+import { agentMoment, agentSync, bridgeStatusLine, carryAgent, fileTriage, markPlanAccepted, noteBridge, noteCiRed, readAgentConfig, setMaxIssuesPerDay, SPEC_AMBIGUOUS_HINT, stoppedGoal } from './bridge'
 import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, WAIT_TOOL, WAIT_TOOL_ID, waitCall, guardRefusal, LOOP_EXCLUDES, loopPolicy, loopView, DEFER_CATEGORIES, deferRule, setDeferAfter, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop, AGENT_PARKS, backgroundBusy, noteBackground } from './loop'
 import { awaitingHuman, nextStacked, capReached, causeOf, ciAction, diagnose, httpsOf, idleDue, inFlight, isWaiting, onlyWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, summary, unfinished, wakeDue } from './ship'
 import { markItem, nextPending, waitingItems } from './queue'
@@ -1447,7 +1447,7 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
     // The bridge first: a session mapped on this poll gets the moments read just below. Its cursor
     // is written at once, so a later throw in this tick cannot replay the replies it applied.
     const synced = await agentSync($, r, await $.clock.now())
-    if (synced.agent !== r.agent) await writeRecord($, synced)
+    if (synced.agent !== r.agent || synced.bridge !== r.bridge) await writeRecord($, synced)
     r = await shipSteps($, await readEvents($, synced))
     if (!r.on) return
     if ((r.holdStreak ?? 0) >= MAX_HOLD_STREAK) {
@@ -1818,6 +1818,7 @@ async function statusText($: EngineInterface): Promise<string> {
     r.linear !== undefined
       ? `linear: project ${r.linear.project} · ${Object.keys(r.linear.seen).length} issue(s) covered · last sync ${r.linear.syncedAt !== undefined ? `${Math.round(((await $.clock.now()) - r.linear.syncedAt) / 60_000)} min ago` : 'never'}${r.linear.error !== undefined ? ` · error: ${r.linear.error}` : ''}`
       : r.buildOnly === true ? undefined : 'linear: off (this folder maps to no project in ~/.claude/linear.json repo_mapping: add projectId or projectName)',
+    bridgeStatusLine(r),
     r.alwaysOn === true ? await standbyStatus($, r) : undefined,
     r.alwaysOn !== true && r.buildOnly !== true ? await chainStatus($, r) : undefined,
     r.note !== undefined ? `note: ${r.note}` : undefined,
@@ -2026,6 +2027,8 @@ export const register: Register = (on, options) => {
     // With the Linear agent bridge configured, the accepted plan is marked for splitting into sub-issues.
     const accepted: AutoRecord = { ...r, phase: 'run', queueEmpty: false }
     let next: AutoRecord = (await readAgentConfig($)) !== undefined ? markPlanAccepted(accepted, verdict.pending.map(i => i.condition)) : accepted
+    // The bridge's state, logged and told once per run (1.17.2), so a silent bridge says why.
+    next = await noteBridge($, next, true)
     let deployNote = ''
     if (!fixed && verdict.deploy !== undefined) {
       if (verdict.deploy.kind === 'command') {
