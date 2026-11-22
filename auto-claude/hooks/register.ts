@@ -2041,6 +2041,16 @@ export const register: Register = (on, options) => {
         deployNote = `; deploys nothing (${verdict.deploy.reason})`
       }
     }
+    // Split first (1.17.3): one bridge poll and the decomposition run here, before the first
+    // milestone starts, so every planned line gets its sub-issue (a line being built is never split).
+    // A Worker that fails leaves the split pending for later polls; the run starts as before.
+    if (next.agent?.decomposePending !== undefined) {
+      const before = next
+      next = await agentSync($, { ...next, agent: { ...next.agent, polledAt: undefined } }, await $.clock.now()).catch(async (error: unknown) => {
+        await appendLog($, before.root, { event: 'agent-split-first', run: before.startedAt, error: String(error).slice(0, 200) })
+        return before
+      })
+    }
     await writeRecord($, next)
     await tell($, next, `round ${next.round} planned: ${verdict.pending.length} milestone(s); final check \`${verdict.finalCheck}\`${deployNote}`)
     $.clock.after(100, () => void tick($, caps, pollMs))
