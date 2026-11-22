@@ -251,6 +251,7 @@ The MCP sync above writes as the person, so Linear's agent model is out of its r
 
 - **Config.** `~/.claude/linear-agent.json` holds `{"url": "https://linear-agent.example", "token": "<SESSION_TOKEN>"}`.
   - The bridge runs only when this file exists and the repository maps to a project in `~/.claude/linear.json`. Without it nothing changes.
+  - Deploy the Worker and install the app first: [Ship (by hand)](../linear-agent/README.md#ship-by-hand) mints the install link with `POST /v1/install`.
   - The Worker stores project ids, so the mapping needs `projectId`. A mapping by `projectName` only is told once, and nothing is polled.
   - The calls go through curl, because `$` has no HTTP API. Since 1.17.1 curl reads the authorization header from `~/.claude/linear-agent.d/auth.header` (`-H @file`, the directory made mode 700 before the file is written), so the token is in no process's argv, where `ps` would show it to every local user. It never reaches `goal-loop.log`, a told message, `goals.md` or `auto-plan.md`, and any text the Worker sends back is scrubbed of it.
 - **Polling.** About once a minute, on the driver's tick and in standby, the driver reads `GET <url>/v1/events?since=<cursor>&project=<projectId>`. The cursor and each issue's session are kept in the run record (`agent`).
