@@ -6,7 +6,7 @@ It ships in [claude-mod](../README.md) next to the mods, but it is not a mod.
 
 - **Webhooks.** It verifies Linear's webhooks and queues agent session events in D1. It answers within Linear's 5 s limit and sends the first activity within its 10 s limit.
 - **Token.** It holds the app's OAuth token and refreshes it on a cron.
-- **Session API.** It lets the driver post activities, replace the session plan, add the PR link, and create issues, all as the app.
+- **Session API.** It lets the driver post activities, replace the session plan, add the PR link, and create issues, all as the app. The driver's side is documented in [auto-claude's Linear agent sessions](../auto-claude/README.md#linear-agent-sessions-1160).
 
 The webhook contract is pinned by `fixtures/linear-agent-v1` (`bun fixtures/linear-agent-v1/run.ts --section worker` from the repository root). Its README lists the Linear facts the code rests on.
 
