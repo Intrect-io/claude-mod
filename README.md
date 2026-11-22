@@ -15,7 +15,7 @@ Claude Code mods (plugins with a hooks module), served as a local folder marketp
 - it holds the app's OAuth token;
 - it gives auto-claude's driver a small session API for activities, plans, links and issues.
 
-It is shipped by hand, never by a run. See its README.
+It is shipped by hand, never by a run. To deploy it and install the app (an install link from `POST /v1/install`), follow [Ship (by hand)](linear-agent/README.md#ship-by-hand) in its README.
 
 ## Install
 
