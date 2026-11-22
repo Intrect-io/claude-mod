@@ -52,6 +52,61 @@ export async function readAgentConfig($: EngineInterface): Promise<AgentConfig |
   }
 }
 
+// Why the bridge is off, one reason per input it needs (never the token or the config's text).
+export const BRIDGE_OFF = {
+  buildOnly: 'a build-only run does not use the bridge',
+  noConfig: 'no ~/.claude/linear-agent.json',
+  badConfig: '~/.claude/linear-agent.json is not {"url": "https://...", "token": "<SESSION_TOKEN>"}',
+  noMapping: 'this folder maps to no project in ~/.claude/linear.json repo_mapping',
+  noProjectId: 'repo_mapping.<folder> in ~/.claude/linear.json has no projectId',
+  noSync: 'the Linear sync is off for this run',
+} as const
+
+export type BridgeState = { on: true; projectId: string } | { on: false; reason: string }
+
+// Whether agentSync would poll the Worker for this run, and if not, the first input that stops it.
+export async function bridgeState($: EngineInterface, r: AutoRecord): Promise<BridgeState> {
+  if (r.buildOnly === true) return { on: false, reason: BRIDGE_OFF.buildOnly }
+  const home = (await $.env.get('HOME').catch(() => undefined))?.replace(/\/$/, '')
+  if (home === undefined || (await readText($, `${home}/${AGENT_CONFIG}`)) === undefined) return { on: false, reason: BRIDGE_OFF.noConfig }
+  if ((await readAgentConfig($)) === undefined) return { on: false, reason: BRIDGE_OFF.badConfig }
+  let entry: { projectId?: unknown } | undefined
+  try {
+    entry = (JSON.parse(await $.fs.read(`${home}/.claude/linear.json`)) as { repo_mapping?: Record<string, { projectId?: unknown }> }).repo_mapping?.[r.root.split('/').pop() ?? '']
+  } catch {
+    entry = undefined
+  }
+  if (entry === undefined || entry === null) return { on: false, reason: BRIDGE_OFF.noMapping }
+  if (typeof entry.projectId !== 'string' || entry.projectId === '') return { on: false, reason: BRIDGE_OFF.noProjectId }
+  if (r.linear === undefined) return { on: false, reason: BRIDGE_OFF.noSync }
+  return { on: true, projectId: entry.projectId }
+}
+
+// The bridge's state, logged as one agent-bridge event and told, once per run and again only when
+// it changes. Looked at no more than once a poll interval unless forced (at plan acceptance).
+export async function noteBridge($: EngineInterface, r: AutoRecord, force = false): Promise<AutoRecord> {
+  const now = await $.clock.now()
+  if (!force && r.bridge !== undefined && now - r.bridge.at < AGENT_POLL_MS) return r
+  const s = await bridgeState($, r)
+  const sig = s.on ? `on:${s.projectId}` : `off:${s.reason}`
+  if (r.bridge?.sig === sig) return { ...r, bridge: { ...r.bridge, at: now } }
+  if (s.on) {
+    await appendLog($, r.root, { event: 'agent-bridge', run: r.startedAt, on: true, projectId: s.projectId })
+    await tell($, r, `Linear agent bridge on: delegated issues of project ${s.projectId} are polled from the Worker`)
+  } else {
+    await appendLog($, r.root, { event: 'agent-bridge', run: r.startedAt, on: false, reason: s.reason })
+    await tell($, r, `Linear agent bridge off: ${s.reason}`)
+  }
+  return { ...r, bridge: { sig, on: s.on, ...(s.on ? { projectId: s.projectId } : { reason: s.reason }), at: now } }
+}
+
+// The status line for the bridge: off for a missing config file says nothing (most repositories).
+export function bridgeStatusLine(r: AutoRecord): string | undefined {
+  const b = r.bridge
+  if (b === undefined || (!b.on && b.reason === BRIDGE_OFF.noConfig)) return undefined
+  return b.on ? `linear agent bridge: on (project ${b.projectId})` : `linear agent bridge: off (${b.reason})`
+}
+
 export type AgentReply = { ok: true; json: unknown } | { ok: false; error: string }
 
 // One Worker call. The token goes only into a header file curl reads (-H @file), never into an
@@ -248,6 +303,7 @@ async function syncPlans($: EngineInterface, r: AutoRecord, cfg: AgentConfig, qu
 
 // One poll: new sessions become queue lines, replies and stops are applied, plans are refreshed.
 export async function agentSync($: EngineInterface, r: AutoRecord, now: number): Promise<AutoRecord> {
+  r = await noteBridge($, r)
   if (r.buildOnly === true || r.linear === undefined) return r
   const cfg = await readAgentConfig($)
   if (cfg === undefined) return r

@@ -158,6 +158,9 @@ export type AutoRecord = {
   linear?: LinearSync
   // The Linear agent session bridge; unset until ~/.claude/linear-agent.json exists and a poll ran.
   agent?: AgentBridge
+  // The bridge's state as last logged and told (1.17.2): on with the project, or off with the reason.
+  // A new run starts without it, so each run logs its bridge state once.
+  bridge?: { sig: string; on: boolean; projectId?: string; reason?: string; at: number }
   // Queue lines waiting on their `:: after:` command, by condition (register.ts pollWaits).
   waits?: Record<string, WaitState>
   // How many pending lines wait, as of the last tick: while only waits are left the run is not idle.

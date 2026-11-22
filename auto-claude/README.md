@@ -253,6 +253,10 @@ The MCP sync above writes as the person, so Linear's agent model is out of its r
   - The bridge runs only when this file exists and the repository maps to a project in `~/.claude/linear.json`. Without it nothing changes.
   - Deploy the Worker and install the app first: [Ship (by hand)](../linear-agent/README.md#ship-by-hand) mints the install link with `POST /v1/install`.
   - The Worker stores project ids, so the mapping needs `projectId`. A mapping by `projectName` only is told once, and nothing is polled.
+- **Bridge status.** Since 1.17.2 each run says once whether the bridge is on. At plan acceptance, and again whenever the state changes (looked at about once a minute), the driver appends one `agent-bridge` event to `goal-loop.log` and tells it:
+  - `{"on": true, "projectId": "..."}` when the run will poll the Worker;
+  - `{"on": false, "reason": "..."}` with the first input that stops it: no `~/.claude/linear-agent.json`, a config that is not `{url, token}`, no `repo_mapping` entry for the folder, an entry without `projectId`, the Linear sync off for the run, or a build-only run.
+  - The reason is a fixed text, so it never carries the token. `/auto-claude status` shows `linear agent bridge: on (project ...)` or `off (<reason>)`; it says nothing when the config file is simply absent.
   - The calls go through curl, because `$` has no HTTP API. Since 1.17.1 curl reads the authorization header from `~/.claude/linear-agent.d/auth.header` (`-H @file`, the directory made mode 700 before the file is written), so the token is in no process's argv, where `ps` would show it to every local user. It never reaches `goal-loop.log`, a told message, `goals.md` or `auto-plan.md`, and any text the Worker sends back is scrubbed of it.
 - **Polling.** About once a minute, on the driver's tick and in standby, the driver reads `GET <url>/v1/events?since=<cursor>&project=<projectId>`. The cursor and each issue's session are kept in the run record (`agent`).
 - **A delegated issue** becomes a queue line, `- [ ] [AGT-12] <title>: what Linear AGT-12 asks (delegated to auto-claude) is resolved on this branch`, unless a line already names it.
