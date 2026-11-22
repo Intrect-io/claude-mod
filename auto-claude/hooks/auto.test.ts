@@ -1587,6 +1587,61 @@ describe('Linear sync', () => {
     expect((await cmd($, 'status')).text).toContain('linear: project Repo')
   })
 
+  // ---- 1.17.4: Done only on the last line naming the issue; no person comment on an app-owned issue
+
+  async function plannedWith($: Engine, w: W, queue: string) {
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start --once')
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set(GOALS, queue)
+    await ready($)
+    await w.clock.advance(1_200)
+  }
+
+  test('last line: two lines naming one issue keep it open after the first lands; only the second moves it to Done', async ($, on) => {
+    const w = world(on)
+    const l = linear(on, w)
+    await plannedWith($, w, QUEUE.replace('- [ ] add()', '- [ ] [KT-1] add()').replace('- [ ] sub()', '- [ ] [KT-1] sub()'))
+    await meet($, w)
+    await w.clock.advance(TICK)
+    expect(w.files.get(GOALS)).toMatch(/- \[x\] \[KT-1\] add\(\)/)
+    expect(l.writes).not.toContain('state KT-1 completed')
+    expect(l.writes.find(x => x.startsWith('comment KT-1'))).toContain('1 more milestone(s) naming this issue are still open')
+    await meet($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
+    expect(l.writes.filter(x => x === 'state KT-1 completed')).toHaveLength(1)
+    expect(l.writes.filter(x => x.startsWith('comment KT-1')).at(-1)).toContain('Moved to Done by auto-claude')
+  })
+
+  test('last line: an issue that is a mapped agent session gets no comment under the person, and still moves to Done', async ($, on) => {
+    const w = world(on)
+    const l = linear(on, w)
+    w.files.set('/home/.claude/linear.json', JSON.stringify({ repo_mapping: { repo: { team: 'T', projectId: 'proj-1', projectName: 'Repo' } } }))
+    w.files.set('/home/.claude/linear-agent.json', JSON.stringify({ url: 'https://agent.test', token: 'tok-x' }))
+    w.agent.events.push({ id: 1, action: 'created', sessionId: 'sess-1', projectId: 'proj-1', identifier: 'KT-1', title: 'add() is wrong' })
+    // The other line names another issue, so KT-1 is not split into sub-issues.
+    await plannedWith($, w, QUEUE.replace('- [ ] add()', '- [ ] [KT-1] add()').replace('- [ ] sub()', '- [ ] [KT-9] sub()'))
+    await w.clock.advance(TICK)
+    await meet($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
+    expect(l.writes).toContain('state KT-1 completed')
+    expect(l.writes.filter(x => x.startsWith('comment KT-1'))).toEqual([])
+    // The evidence went to the session as the app's response, with the PR.
+    expect(w.agent.calls.some(c => c.method === 'POST' && c.path === '/v1/activity' && c.body.sessionId === 'sess-1' && c.body.content.type === 'response')).toBe(true)
+  })
+
+  test('last line: a single line naming an issue moves it to Done with the evidence comment, as before', async ($, on) => {
+    const w = world(on)
+    const l = linear(on, w)
+    await plannedWith($, w, QUEUE.replace('- [ ] add()', '- [ ] [KT-1] add()'))
+    await meet($, w)
+    await w.clock.advance(TICK)
+    expect(l.writes).toContain('state KT-1 completed')
+    const c = l.writes.find(x => x.startsWith('comment KT-1')) ?? ''
+    expect(c).toContain('Moved to Done by auto-claude')
+    expect(c).not.toContain('still open')
+  })
+
   test('an issue opened or commented on mid-run is queued as a milestone; the driver\'s own comments are not changes', async ($, on) => {
     const w = world(on)
     const l = linear(on, w)
