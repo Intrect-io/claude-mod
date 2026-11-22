@@ -257,20 +257,34 @@ export async function onStart($: EngineInterface, sync: LinearSync, ids: readonl
   return sync
 }
 
+// What the merge site knows beyond the line (1.17.4): how many other open lines (pending, being
+// built or shipping) still name each issue, and which issues are the app's agent sessions, whose
+// evidence goes through the app's response activity rather than a comment under the person's name.
+export type MergeContext = { remaining?: Readonly<Record<string, number>>; agentOwned?: ReadonlySet<string> }
+
 // A milestone naming issues merged: each moves to completed with the evidence,
 // unless a person changed it while it was built; then a follow-up line is
-// queued and the issue stays open.
-export async function onMerged($: EngineInterface, sync: LinearSync, ids: readonly string[], evidence: string): Promise<{ sync: LinearSync; lines: string[] }> {
+// queued and the issue stays open. An issue other open lines still name stays
+// as it is until the last of them lands.
+export async function onMerged($: EngineInterface, sync: LinearSync, ids: readonly string[], evidence: string, ctx: MergeContext = {}): Promise<{ sync: LinearSync; lines: string[] }> {
   const lines: string[] = []
   for (const id of ids) {
+    const owned = ctx.agentOwned?.has(id) === true
+    const left = ctx.remaining?.[id] ?? 0
     try {
       const issue = await getIssue($, id)
       if (issue === undefined) continue
       if (!isOpen(issue)) {
-        await comment($, id, `${evidence}. The issue was already ${issue.status ?? issue.statusType ?? 'closed'}, so its state is left as it is.`)
+        if (!owned) await comment($, id, `${evidence}. The issue was already ${issue.status ?? issue.statusType ?? 'closed'}, so its state is left as it is.`)
         continue
       }
       const stamp = stampOf(issue, await listComments($, id))
+      if (left > 0) {
+        // Not the last line: the state stays, and the last landing line checks for changes.
+        if (!owned) await comment($, id, `${evidence}. ${left} more milestone(s) naming this issue are still open, so it stays open until the last one lands.`)
+        sync = { ...sync, seen: { ...sync.seen, [id]: stamp } }
+        continue
+      }
       const covered = sync.seen[id]
       const ups = sync.followUps?.[id] ?? 0
       if (covered !== undefined && stamp > covered && ups < MAX_FOLLOW_UPS) {
@@ -279,7 +293,7 @@ export async function onMerged($: EngineInterface, sync: LinearSync, ids: readon
         sync = { ...sync, seen: { ...sync.seen, [id]: stamp }, followUps: { ...(sync.followUps ?? {}), [id]: ups + 1 } }
         continue
       }
-      await comment($, id, `${evidence}. Moved to Done by auto-claude.`)
+      if (!owned) await comment($, id, `${evidence}. Moved to Done by auto-claude.`)
       await setState($, id, 'completed')
       sync = { ...sync, seen: { ...sync.seen, [id]: stamp } }
     } catch (error) {

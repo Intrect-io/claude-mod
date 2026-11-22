@@ -735,7 +735,14 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
       // The merged tip, fetched first: the local ref still points before the merge.
       await fetchRemote($, r, r.root)
       const sha = (await run($, ['git', '-C', r.root, 'rev-parse', '--short', refOf(r)], r.root, 15_000)).stdout.trim()
-      const done = await onMerged($, next.linear, ids, `Merged ${landed}${sha !== '' ? ` (${r.defaultBranch} at ${sha})` : ''}: ${item.goal.slice(0, 160)}`)
+      // Done only on the last line naming the issue (1.17.4): other open lines, pending in
+      // goals.md or shipping, keep it open. An app-owned issue gets no comment as the person.
+      const open = parseQueue((await readText($, FILES(r.root).queue)) ?? '').filter(i => i.mark === ' ' && i.condition !== item.goal).map(i => i.condition)
+      const shipping = next.ships.filter(s => s.goal !== item.goal && s.state !== 'merged' && s.state !== 'held').map(s => s.goal)
+      const remaining = Object.fromEntries(ids.map(id => [id, [...open, ...shipping].filter(c => lineIssues(c).includes(id)).length]))
+      const sessions = next.agent?.sessions ?? {}
+      const agentOwned = new Set(ids.filter(id => Object.prototype.hasOwnProperty.call(sessions, id)))
+      const done = await onMerged($, next.linear, ids, `Merged ${landed}${sha !== '' ? ` (${r.defaultBranch} at ${sha})` : ''}: ${item.goal.slice(0, 160)}`, { remaining, agentOwned })
       for (const line of done.lines) await appendQueue($, r.root, line)
       next = { ...next, linear: done.sync }
     }
