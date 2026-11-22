@@ -2268,7 +2268,12 @@ describe('the Linear agent session bridge (1.16.0)', () => {
     // After the merge goals.md changed, so the plan was sent again with the line completed.
     await w.clock.advance(MIN)
     expect(posts(w, '/v1/plan').at(-1)!.body.plan[0].status).toBe('completed')
-    // The token is only ever in curl's argv.
+    // The token is never in any process's argv (ps shows those to every local user): curl reads it
+    // from a header file in a directory made mode 700 before the file is written.
+    expect(w.runs.join('\n')).not.toContain(TOKEN)
+    expect(w.runs.some(r => r.startsWith('curl ') && r.includes('-H @/home/.claude/linear-agent.d/auth.header'))).toBe(true)
+    expect(w.runs.some(r => r.includes('umask 077 && mkdir -p') && r.endsWith('/home/.claude/linear-agent.d'))).toBe(true)
+    expect(w.files.get('/home/.claude/linear-agent.d/auth.header')).toBe(`authorization: Bearer ${TOKEN}\n`)
     for (const f of [LOG, GOALS, PLAN_FILE]) expect(w.files.get(f) ?? '').not.toContain(TOKEN)
     expect(w.notifies.join('\n')).not.toContain(TOKEN)
   })

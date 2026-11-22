@@ -73,7 +73,15 @@ describe('GET /v1/events', () => {
     expect((await (await call(env, 'GET', '/v1/events?since=0&project=p1')).json()).events.map((e: { id: number }) => e.id)).toEqual([22])
   })
 
-  test('rows still unresolved after the hold-back window are given up and cost no lookup', async () => {
+  test('a row that waited past the hold-back window while nobody polled still gets its lookup before it is given up', async () => {
+    const { env, db, kv } = makeEnv()
+    kv.set(TOKEN_KEY, installedToken(NOW))
+    insert(db, 'slept', null, { created_at: NOW - 3 * HOLD_BACK_MS })
+    restore = mockFetch(gqlReply('issue(id: $id)', { issue: { project: { id: 'p1' } } })).restore
+    expect((await (await call(env, 'GET', '/v1/events?since=0&project=p1')).json()).events.map((e: { key?: string; sessionId: string }) => e.sessionId)).toEqual(['s-slept'])
+  })
+
+  test('old rows whose read-time lookup fails are given up once and cost no lookup after that', async () => {
     const { env, db, kv } = makeEnv()
     kv.set(TOKEN_KEY, installedToken(NOW))
     for (let i = 0; i < 25; i++) insert(db, `old${i}`, null, { created_at: NOW - HOLD_BACK_MS - 1 })
@@ -81,9 +89,21 @@ describe('GET /v1/events', () => {
     insert(db, 'mine', 'p1')
     const m = mockFetch()
     restore = m.restore
-    expect((await (await call(env, 'GET', '/v1/events?since=0&project=p1')).json()).events).toEqual([])
-    expect(m.calls).toHaveLength(1)
+    await call(env, 'GET', '/v1/events?since=0&project=p1')
+    await call(env, 'GET', '/v1/events?since=0&project=p1')
     expect(db.query("SELECT COUNT(*) AS n FROM events WHERE project_id = ''").get()).toEqual({ n: 25 })
+    const before = m.calls.length
+    expect((await (await call(env, 'GET', '/v1/events?since=0&project=p1')).json()).events).toEqual([])
+    expect(m.calls.length - before).toBe(1)
+  })
+
+  test('without a token, unresolved rows of any age are held, never given up', async () => {
+    const { env, db } = makeEnv()
+    insert(db, 'old', null, { created_at: NOW - 3 * HOLD_BACK_MS })
+    insert(db, 'mine', 'p1')
+    restore = mockFetch().restore
+    expect((await (await call(env, 'GET', '/v1/events?since=0&project=p1')).json()).events).toEqual([])
+    expect(db.query("SELECT project_id FROM events WHERE key = 'old'").get()).toEqual({ project_id: null })
   })
 
   test('project and since are required', async () => {

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { route } from '../src/index'
-import { REFRESH_BACKOFF_MS, REFRESH_WITHIN_MS, refreshIfDue, STATE_PREFIX, TOKEN_KEY } from '../src/oauth'
+import { readToken, REFRESH_BACKOFF_MS, REFRESH_WITHIN_MS, refreshIfDue, STATE_PREFIX, TOKEN_KEY } from '../src/oauth'
 import { fakeCtx, gqlReply, installedToken, makeEnv, mockFetch, SECRETS } from './fakes'
 
 const NOW = 1_795_000_000_000
@@ -14,17 +14,26 @@ const tokenReply = (access = 'access-new', refresh = 'refresh-new') => (call: { 
   call.url === 'https://api.linear.app/oauth/token' ? { json: { access_token: access, refresh_token: refresh, expires_in: 86_399, scope: 'read write app:assignable app:mentionable', token_type: 'Bearer' } } : undefined
 
 describe('oauth install', () => {
-  test('/oauth/start redirects to Linear with actor=app, the app scopes and a stored single-use state', async () => {
+  test('install: POST /v1/install with the session token mints an authorize link with actor=app, the app scopes and a stored single-use state', async () => {
     const { env, kv } = makeEnv()
-    const res = await get(env, '/oauth/start')
-    expect(res.status).toBe(302)
-    const to = new URL(res.headers.get('location')!)
+    const req = new Request('https://linear-agent.intrect.io/v1/install', { method: 'POST', headers: { authorization: `Bearer ${SECRETS.SESSION_TOKEN}` } })
+    const res = await route(req, env, fakeCtx().ctx as never, NOW)
+    expect(res.status).toBe(200)
+    const to = new URL(((await res.json()) as { url: string }).url)
     expect(to.origin + to.pathname).toBe('https://linear.app/oauth/authorize')
     expect(to.searchParams.get('actor')).toBe('app')
     expect(to.searchParams.get('scope')).toBe('read,write,app:assignable,app:mentionable')
     expect(to.searchParams.get('client_id')).toBe(SECRETS.LINEAR_CLIENT_ID)
     expect(to.searchParams.get('redirect_uri')).toBe('https://linear-agent.intrect.io/oauth/callback')
     expect(kv.has(`${STATE_PREFIX}${to.searchParams.get('state')}`)).toBe(true)
+  })
+
+  test('install: nobody without the session token can mint a state (no KV write), and /oauth/start is gone', async () => {
+    const { env, kv } = makeEnv()
+    const anon = new Request('https://linear-agent.intrect.io/v1/install', { method: 'POST' })
+    expect((await route(anon, env, fakeCtx().ctx as never, NOW)).status).toBe(401)
+    expect((await get(env, '/oauth/start')).status).toBe(410)
+    expect(kv.size).toBe(0)
   })
 
   test('the callback exchanges the code, stores the pair with the app user, and never shows a token', async () => {
@@ -58,6 +67,15 @@ describe('oauth install', () => {
     kv.set(`${STATE_PREFIX}s2`, '1')
     restore = mockFetch(tokenReply('access-evil'), gqlReply('viewer', { viewer: { id: 'u-x', organization: { id: 'org-other' } } })).restore
     expect((await get(env, '/oauth/callback?code=c2&state=s2')).status).toBe(409)
+    expect(JSON.parse(kv.get(TOKEN_KEY)!).accessToken).toBe('access-fixture')
+  })
+
+  test('install: a grant for a different user in the installed workspace does not replace the app token', async () => {
+    const { env, kv } = makeEnv()
+    kv.set(TOKEN_KEY, installedToken(NOW))
+    kv.set(`${STATE_PREFIX}s3`, '1')
+    restore = mockFetch(tokenReply('access-person'), gqlReply('viewer', { viewer: { id: 'person-1', organization: { id: 'org-1' } } })).restore
+    expect((await get(env, '/oauth/callback?code=c3&state=s3')).status).toBe(409)
     expect(JSON.parse(kv.get(TOKEN_KEY)!).accessToken).toBe('access-fixture')
   })
 
@@ -114,20 +132,81 @@ describe('scheduled token refresh', () => {
     expect(JSON.parse(kv.get(TOKEN_KEY)!).refreshToken).toBe('r3')
   })
 
-  test('when the KV write fails after Linear rotated, only the write is retried, not the refresh', async () => {
+  test('when KV refuses every write after Linear rotated, the pair lands in D1 and the next cron reads it', async () => {
     const { env, kv, kvApi } = makeEnv()
     kv.set(TOKEN_KEY, installedToken(NOW, { expiresAt: NOW + 3_600_000 }))
-    const put = kvApi.put
-    let puts = 0
-    kvApi.put = async (k: string, v: string) => {
-      if (++puts === 1) throw new Error('KV unavailable')
-      return put(k, v)
+    kvApi.put = async () => {
+      throw new Error('KV write quota used up')
     }
     const m = mockFetch(tokenReply('access-4', 'refresh-4'))
     restore = m.restore
     expect(await refreshIfDue(env, NOW, noSleep)).toBe('refreshed')
     expect(m.calls).toHaveLength(1)
-    expect(JSON.parse(kv.get(TOKEN_KEY)!).refreshToken).toBe('refresh-4')
+    expect(JSON.parse(kv.get(TOKEN_KEY)!).refreshToken).toBe('refresh-fixture')
+    expect((await readToken(env))!.refreshToken).toBe('refresh-4')
+    // The next cron, a day later, refreshes with the pair D1 kept, not the stale KV copy.
+    const later = NOW + 23 * 3_600_000
+    const m2 = mockFetch(tokenReply('access-5', 'refresh-5'))
+    restore = m2.restore
+    expect(await refreshIfDue(env, later, noSleep)).toBe('refreshed')
+    expect(new URLSearchParams(m2.calls[0]!.body).get('refresh_token')).toBe('refresh-4')
+  })
+
+  test('when both stores refuse every write, only the write is retried, never the refresh', async () => {
+    const { env, kv, kvApi } = makeEnv({ failWrites: true })
+    kv.set(TOKEN_KEY, installedToken(NOW, { expiresAt: NOW + 3_600_000 }))
+    kvApi.put = async () => {
+      throw new Error('KV unavailable')
+    }
+    const m = mockFetch(tokenReply('access-6', 'refresh-6'))
+    restore = m.restore
+    expect(await refreshIfDue(env, NOW, noSleep)).toBe('failed')
+    expect(m.calls).toHaveLength(1)
+  })
+
+  test('an invalid_grant answer is not retried and drops the dead token, so health says not installed', async () => {
+    const { env, kv } = makeEnv()
+    kv.set(TOKEN_KEY, installedToken(NOW, { expiresAt: NOW + 3_600_000 }))
+    const m = mockFetch(call => (call.url.includes('/oauth/token') ? { status: 400, json: { error: 'invalid_grant' } } : undefined))
+    restore = m.restore
+    expect(await refreshIfDue(env, NOW, noSleep)).toBe('dead')
+    expect(m.calls).toHaveLength(1)
+    expect(await readToken(env)).toBeUndefined()
+    expect(await (await get(env, '/health')).json()).toEqual({ ok: true, installed: false })
+  })
+
+  test('a 400 that is not invalid_grant is retried and keeps the token', async () => {
+    const { env, kv } = makeEnv()
+    kv.set(TOKEN_KEY, installedToken(NOW, { expiresAt: NOW + 3_600_000 }))
+    const m = mockFetch(call => (call.url.includes('/oauth/token') ? { status: 400, json: { error: 'invalid_request' } } : undefined))
+    restore = m.restore
+    expect(await refreshIfDue(env, NOW, noSleep)).toBe('failed')
+    expect(m.calls).toHaveLength(REFRESH_BACKOFF_MS.length)
+    expect(await readToken(env)).toBeDefined()
+  })
+
+  test('a cron that cannot read one store neither refreshes nor drops the token', async () => {
+    const { env, kv, kvApi, db } = makeEnv()
+    // D1 still holds the pair before the last rotation; KV, which holds the live pair, cannot be read.
+    db.query('INSERT INTO oauth_token (id, value, saved_at) VALUES (1, ?, ?)').run(installedToken(NOW, { refreshToken: 'rotated-away', expiresAt: NOW + 3_600_000, savedAt: NOW - 1 }), NOW - 1)
+    kv.set(TOKEN_KEY, installedToken(NOW, { refreshToken: 'live', savedAt: NOW }))
+    kvApi.get = async () => {
+      throw new Error('KV read failed')
+    }
+    const m = mockFetch(call => (call.url.includes('/oauth/token') ? { status: 400, json: { error: 'invalid_grant' } } : undefined))
+    restore = m.restore
+    expect(await refreshIfDue(env, NOW, noSleep)).toBe('failed')
+    expect(m.calls).toHaveLength(0)
+    expect(JSON.parse(kv.get(TOKEN_KEY)!).refreshToken).toBe('live')
+  })
+
+  test('the later of the KV and D1 copies wins on read', async () => {
+    const { env, kv, db } = makeEnv()
+    kv.set(TOKEN_KEY, installedToken(NOW, { refreshToken: 'kv-old', savedAt: NOW - 1 }))
+    db.query('INSERT INTO oauth_token (id, value, saved_at) VALUES (1, ?, ?)').run(installedToken(NOW, { refreshToken: 'd1-new', savedAt: NOW }), NOW)
+    expect((await readToken(env))!.refreshToken).toBe('d1-new')
+    kv.set(TOKEN_KEY, installedToken(NOW, { refreshToken: 'kv-newer', savedAt: NOW + 1 }))
+    expect((await readToken(env))!.refreshToken).toBe('kv-newer')
   })
 
   test('nothing to refresh before the install', async () => {
