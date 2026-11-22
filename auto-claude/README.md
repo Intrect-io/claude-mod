@@ -288,6 +288,7 @@ The MCP sync above writes as the person, so Linear's agent model is out of its r
 
 - **Decomposition.** When a plan is accepted and its open lines name exactly one delegated issue (a mapped session), each line that is untagged, or tagged only with that issue, becomes a sub-issue. This applies only when there are at least 2 such lines, using `decomposeTargets`.
   - The sub-issue is created with `POST /v1/issue`. Its parent is the issue, it takes the repository's project and team, and it is delegated to the app.
+  - **Split first (1.17.3).** The split runs inside `auto_plan_ready`: one bridge poll (which maps the delegated session) and the decomposition, before the first milestone starts. A line being built is never split, so before 1.17.3 the first milestone kept the parent's tag (seen in the AGT-4924 e2e). A Worker that is down or refusing is told once, the run starts as before, and later polls split the lines not yet being built. The wait is bounded by curl's timeout for each call the poll makes.
   - Its line is retagged with `tagLine`, as in `- [ ] [AGT-101] ...`.
   - It is registered in the session map before its own created event arrives, so that event adds no second line.
   - The parent session's plan is replaced, and it keeps getting the plan afterwards.

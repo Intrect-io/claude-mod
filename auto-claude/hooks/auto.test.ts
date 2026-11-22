@@ -2290,7 +2290,8 @@ describe('the Linear agent session bridge (1.16.0)', () => {
       { id: 5, action: 'prompted', sessionId: 'sess-2', projectId: 'proj-1', identifier: 'AGT-2', prompt: '', signal: 'stop' },
     )
     await w.clock.advance(MIN + TICK)
-    expect(w.agent.calls.filter(c => c.method === 'GET').at(-1)!.path).toBe('/v1/events?since=2&project=proj-1')
+    // Polled at plan acceptance too (1.17.3), so the cursor after the first two events is in some poll, not the last.
+    expect(w.agent.calls.filter(c => c.method === 'GET').map(c => c.path)).toContain('/v1/events?since=2&project=proj-1')
     const queue = w.files.get(GOALS) ?? ''
     expect(queue).toContain('- [ ] [AGT-1] what the person asked in the Linear session is done: also handle floats')
     expect(queue).toMatch(/- \[!\] \[AGT-2\] sub\(\).*stopped in Linear/)
@@ -2478,6 +2479,69 @@ describe('the Linear agent session bridge (1.16.0)', () => {
     // Decomposed once per accepted plan.
     await w.clock.advance(2 * MIN)
     expect(posts(w, '/v1/issue')).toHaveLength(2)
+  })
+
+  // ---- 1.17.3: the split runs at plan acceptance, before the first milestone starts
+
+  // Plans the run and calls auto_plan_ready, with no clock advance: no tick has run yet.
+  async function accept($: Engine, w: W, queue: string) {
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start --once')
+    w.files.set(PLAN_FILE, PLAN)
+    w.files.set(GOALS, queue)
+    return String((await ready($)).result)
+  }
+  const logEvents = (w: W) => (w.files.get(LOG) ?? '').split('\n').filter(l => l.trim() !== '').map(l => JSON.parse(l) as Record<string, unknown>)
+
+  test('split first: every line of a delegated plan gets its sub-issue at plan acceptance, the first included, before the first milestone starts', async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    w.agent.events.push(created(1, 'AGT-1', 'sess-1', 'add and sub'))
+    expect(await accept($, w, QUEUE.replace('- [ ] add()', '- [ ] [AGT-1] add()').replace('- [ ] sub()', '- [ ] [AGT-1] sub()'))).toContain('Plan accepted')
+    // Split already, with no tick run: nothing was being built.
+    expect(posts(w, '/v1/issue').map(p => p.body.title)).toEqual(['add() returns a+b', 'sub() returns a-b'])
+    expect(parseQueue(w.files.get(GOALS) ?? '').map(i => i.condition)).toEqual(['[AGT-101] add() returns a+b', '[AGT-102] sub() returns a-b'])
+    // The first milestone then starts under its sub-issue's tag.
+    await w.clock.advance(1_200)
+    await w.clock.advance(TICK)
+    const events = logEvents(w)
+    const firstStart = events.findIndex(e => e.event === 'start')
+    expect(firstStart).toBeGreaterThan(-1)
+    expect(String(events[firstStart]!.goal)).toStartWith('[AGT-101] ')
+    expect(events.slice(0, firstStart).filter(e => e.event === 'agent-issue')).toHaveLength(2)
+    expect(posts(w, '/v1/issue')).toHaveLength(2)
+  })
+
+  test('split first: a Worker that is down at plan acceptance still starts the run; the split is told once and retried on later polls', async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    w.agent.down = true
+    expect(await accept($, w, QUEUE.replace('- [ ] add()', '- [ ] [AGT-1] add()').replace('- [ ] sub()', '- [ ] [AGT-1] sub()'))).toContain('Plan accepted')
+    expect(posts(w, '/v1/issue')).toHaveLength(0)
+    await w.clock.advance(1_200)
+    for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
+    expect(logEvents(w).some(e => e.event === 'start')).toBe(true)
+    expect(w.notifies.filter(n => n.includes('Linear agent Worker unreachable'))).toHaveLength(1)
+    // Back up with the session: the line not yet being built is split on a later poll.
+    w.agent.down = false
+    w.agent.events.push(created(1, 'AGT-1', 'sess-1', 'add and sub'))
+    for (let i = 0; i < 3; i++) await w.clock.advance(MIN)
+    expect(posts(w, '/v1/issue').map(p => p.body.title)).toEqual(['sub() returns a-b'])
+    expect(w.notifies.join('\n')).not.toContain(TOKEN)
+  })
+
+  test('split first: a delegated issue with one line in the plan starts at once with no sub-issue', async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    w.agent.events.push(created(1, 'AGT-1', 'sess-1', 'add'))
+    // The other line names another issue, so AGT-1 has a single milestone: nothing to split.
+    expect(await accept($, w, QUEUE.replace('- [ ] add()', '- [ ] [AGT-1] add()').replace('- [ ] sub()', '- [ ] [AGT-50] sub()'))).toContain('Plan accepted')
+    // The poll ran (the session is mapped) but nothing was split.
+    expect(w.agent.calls.filter(c => c.method === 'GET')).toHaveLength(1)
+    await w.clock.advance(1_200)
+    await w.clock.advance(TICK)
+    expect(posts(w, '/v1/issue')).toHaveLength(0)
+    expect(logEvents(w).find(e => e.event === 'start')?.goal).toBe('[AGT-1] add() returns a+b')
   })
 
   test('decompose: a stop on the parent issue stops the sub-issues it was split into', async ($, on) => {
