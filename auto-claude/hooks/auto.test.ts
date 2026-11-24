@@ -55,6 +55,8 @@ function world(on: On, store: Record<string, unknown> = {}) {
     merged: [] as string[],
     // `gh pr merge` answers an error (a lost reply), and what `gh pr view` says of the PR.
     mergeFails: false,
+    // `gh pr merge` refused outright (a conflict, a required review): the PR stays open.
+    mergeRefused: false,
     prState: 'OPEN',
     // `gh run list` for a PR's branch.
     runList: '[]',
@@ -68,6 +70,10 @@ function world(on: On, store: Record<string, unknown> = {}) {
     gitGone: false,
     sshDenied: false,
     repo: true,
+    // The PR branch's head on the remote, when it should read other than its default.
+    prHead: undefined as string | undefined,
+    // Run once, in the middle of a tick, when a command starting with `match` runs.
+    midRun: undefined as { match: string; go: ($: Engine) => void; fired?: boolean } | undefined,
     origin: true,
     originHead: 'origin/main',
     remoteHead: 'main',
@@ -156,6 +162,10 @@ function world(on: On, store: Record<string, unknown> = {}) {
   })
   on('process.run', (_, e) => {
     const a = e.argv.join(' ')
+    if (w.midRun !== undefined && w.midRun.fired !== true && a.startsWith(w.midRun.match)) {
+      w.midRun.fired = true
+      w.midRun.go(_ as unknown as Engine)
+    }
     w.runs.push(a)
     const ok = (stdout = '', exitCode = 0, stderr = '') => ({ value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false } })
     const cwd = String(e.init?.cwd ?? '')
@@ -218,6 +228,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
     }
     if (a.startsWith('gh pr view')) return ok(`{"state":"${w.prState}","mergeable":"MERGEABLE"}`)
     if (a.startsWith('gh pr merge')) {
+      if (w.mergeRefused) return ok('', 1, 'GraphQL: Pull request is not mergeable: review required')
       w.merged.push(a)
       if (w.mergeFails) {
         w.prState = 'MERGED'
@@ -234,6 +245,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
     if (/ rev-parse (origin\/)?main$/.test(a)) return ok(`${w.tip}\n`)
     if (e.argv[0] === 'test' && e.argv[1] === '-d') return ok('', w.gone.has(String(e.argv[2])) ? 1 : 0)
     if (e.argv[0] === 'test' && e.argv[1] === '-e') return ok('', w.missing.has(String(e.argv[2])) ? 1 : 0)
+    if (w.prHead !== undefined && a.includes('rev-parse --verify --quiet origin/goal/')) return ok(`${w.prHead}\n`)
     if (a.includes('rev-parse --verify')) return w.branchGone ? ok('', 1) : ok(`tip-of-${String(e.argv.at(-1)).replace(/\^\{commit\}$/, '')}\n`)
     if (a.includes(' rebase ')) w.rebases.push(a)
     if (a.includes(' rebase --onto') && w.rebaseFails) return ok('', 1, 'CONFLICT (content): Merge conflict in calc.py')
@@ -1056,6 +1068,174 @@ describe('protected paths (1.15.0)', () => {
     await meet($, w)
     await w.clock.advance(TICK)
     expect(w.merged.length).toBeGreaterThan(0)
+  })
+})
+
+describe('a person in the loop (1.18.0)', () => {
+  const touch = (w: W, files: string[]) => {
+    w.nameStatus = files.map(f => `M\t${f}`).join('\n')
+  }
+  const awaiting = async ($: Engine, w: W) => {
+    w.github = true
+    await planned($, w)
+    touch(w, ['.github/workflows/ci.yml'])
+    await meet($, w)
+    expect(w.merged).toHaveLength(0)
+  }
+  const HEAD = 'tip-of-origin/goal/01-add-returns-a-b'
+
+  test('start while a run is on replaces it with the new aim, says what was dropped, and logs the old run\'s end', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    const text = (await cmd($, 'start --once sub too')).text ?? ''
+    expect(text).toContain('Replaced the run that was on (phase run')
+    expect(text).toContain('auto-claude on in /repo')
+    expect(text).not.toContain('already on')
+    expect(w.files.get(LOG)).toContain('replaced by a new /auto-claude start')
+    await w.clock.advance(200)
+    expect(w.prompts.at(-1)).toContain('Their aim: sub too')
+    const status = (await cmd($, 'status')).text ?? ''
+    expect(status).toContain('auto-claude on · phase plan')
+    // The old run's milestone is not judged under the new plan.
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
+    expect(w.evaluations).toBe(0)
+  })
+
+  test('start that cannot start leaves the run that is on as it was', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    w.files.set('/repo/.claude/auto-deploy.json', '{"codeql": "python"}')
+    expect((await cmd($, 'start other aim')).text).toContain('Not started: .claude/auto-deploy.json needs a "command" string')
+    expect((await cmd($, 'status')).text).toContain('auto-claude on · phase run')
+    expect(w.files.get(LOG) ?? '').not.toContain('run-stopped')
+  })
+
+  test('start while an awaiting PR is open names it as no longer followed', async ($, on) => {
+    const w = world(on)
+    await awaiting($, w)
+    expect((await cmd($, 'start --once next')).text).toContain('Its open PRs are no longer followed: #7 (awaiting-human)')
+  })
+
+  test('off stops the run like stop', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    expect((await cmd($, 'off')).text).toContain('Stopped.')
+    expect((await cmd($, 'status')).text).toContain('phase stopped')
+  })
+
+  test('approve: the person approves a PR awaiting them, and the driver merges that head and goes on as after a merge', async ($, on) => {
+    const w = world(on)
+    await awaiting($, w)
+    expect((await cmd($, 'status')).text).toContain('/auto-claude approve 7 merges it')
+    expect(w.notifies.some(n => n.includes('/auto-claude approve 7'))).toBe(true)
+    expect(w.runs.some(r => r.startsWith('gh pr comment 7') && r.includes('/auto-claude approve 7'))).toBe(true)
+    const text = (await cmd($, 'approve')).text ?? ''
+    expect(text).toContain(`Approved PR #7 at ${HEAD.slice(0, 8)}`)
+    await w.clock.advance(TICK)
+    expect(w.merged).toHaveLength(1)
+    expect(w.merged[0]).toContain(`--match-head-commit ${HEAD}`)
+    expect(w.notifies.some(n => n.includes('merged as the person approved'))).toBe(true)
+    expect(w.notifies.some(n => n.includes('merged PR #7'))).toBe(true)
+    expect(w.files.get(LOG)).toContain('"event":"approved-merge"')
+    // Used once: nothing more is merged on later ticks.
+    await w.clock.advance(TICK)
+    expect(w.merged).toHaveLength(1)
+  })
+
+  test('approve: a command the person did not type is refused, and nothing merges', async ($, on) => {
+    const w = world(on)
+    await awaiting($, w)
+    const res = await $.command.run({ command: 'auto-claude', args: 'approve 7', origin: { kind: 'plugin', name: 'x' }, presentation: { isFullscreen: false, columns: 80 } } as never)
+    expect(res.text).toContain('Refused')
+    // Nor can the model type it into its own terminal, where it would read as the person's.
+    expect((await $.tool.call({ tool: 'Bash', command: "tmux send-keys -t de '/auto-claude approve 7' Enter" } as never)).deny).toContain("the person's word alone")
+    await w.clock.advance(TICK)
+    expect(w.merged).toHaveLength(0)
+  })
+
+  test('approve: a head pushed after the approval voids it; a PR number that does not wait is named', async ($, on) => {
+    const w = world(on)
+    await awaiting($, w)
+    expect((await cmd($, 'approve 9')).text).toContain('PR #9 does not wait for a person in this run (waiting: #7)')
+    expect((await cmd($, 'approve 7')).text).toContain('Approved PR #7')
+    w.prHead = 'moved123456'
+    await w.clock.advance(TICK)
+    expect(w.merged).toHaveLength(0)
+    expect(w.notifies.some(n => n.includes('its head moved since it was approved'))).toBe(true)
+    await w.clock.advance(TICK)
+    expect(w.merged).toHaveLength(0)
+  })
+
+  test('approve: a merge GitHub refuses is told once and the approval is spent, not retried every tick', async ($, on) => {
+    const w = world(on)
+    await awaiting($, w)
+    w.mergeRefused = true
+    await cmd($, 'approve 7')
+    for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
+    expect(w.notifies.filter(n => n.includes('the approved merge failed'))).toHaveLength(1)
+    expect(w.runs.filter(r => r.startsWith('gh pr merge 7')).length).toBe(1)
+    expect((await cmd($, 'status')).text).toContain('PR #7 waits for the person')
+  })
+
+  test('a tick already past its reads when the run is stopped under it neither merges nor writes the run back on', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    await planned($, w)
+    // The stop lands while this tick is between its reads and its merge.
+    w.midRun = { match: 'gh pr view', go: () => void cmd($, 'stop') }
+    await meet($, w)
+    await w.clock.advance(TICK)
+    expect(w.midRun.fired).toBe(true)
+    expect(w.merged).toHaveLength(0)
+    expect((await cmd($, 'status')).text).toContain('phase stopped')
+  })
+
+  test('the owning session is told what waits on the person and how they let it land', async ($, on) => {
+    const w = world(on)
+    await awaiting($, w)
+    const sections = ((await compose($)) as unknown as { sections: Array<{ id: string; text: string }> }).sections
+    const note = sections.find(s => s.id === 'auto-claude:awaiting')
+    expect(note?.text).toContain('PR #7 waits for the person')
+    expect(note?.text).toContain('/auto-claude approve <pr>')
+    expect(note?.text).toContain('Never say auto-claude will merge it on its own')
+  })
+
+  test('a Stop while a background git commit runs is not judged; one without it is', async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    w.dirty = 'M  calc.py\n'
+    const commit = { ...STOP, background_tasks: [{ id: 'b1', type: 'shell', status: 'running', description: 'commit', command: "git add calc.py && git commit -q -F - <<'EOF'" }] }
+    for (let i = 0; i < 4; i++) expect((await $.classic.Stop(commit as never)).block).toBeUndefined()
+    expect(w.files.get(LOG)).toContain('"event":"commit-in-flight"')
+    expect(w.files.get(LOG) ?? '').not.toContain('"event":"unmet"')
+    expect(w.files.get(GOALS)).not.toMatch(/- \[!\]/)
+    expect((await $.classic.Stop(STOP)).block).toContain('uncommitted changes')
+  })
+
+  test('a commit wait: the check does not run under it, the watchdog does not wake the session, and a clean Stop resets its clock', { timeoutMs: 30_000 }, async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    const commit = { ...STOP, background_tasks: [{ id: 'b1', type: 'shell', status: 'running', description: 'commit', command: 'git commit -q -m x' }] }
+    w.dirty = 'M  calc.py\n'
+    const checks = () => w.runs.filter(r => r.startsWith('bash -lc ') && !r.includes('auto-verify')).length
+    const before = checks()
+    await turnStart($)
+    expect((await $.classic.Stop(commit as never)).block).toBeUndefined()
+    await turnEnd($)
+    expect(checks()).toBe(before)
+    // Ten quiet minutes: no wake while the commit runs.
+    for (let i = 0; i < 20; i++) await w.clock.advance(TICK)
+    expect(w.prompts.filter(p => p.includes('the session sat idle'))).toHaveLength(0)
+    // The commit lands; a clean Stop clears the wait, and a later slow commit 31 min on is waited on again.
+    w.dirty = ''
+    w.verdicts.push('{"met": false, "reason": "more to do"}')
+    await $.classic.Stop(STOP)
+    // A turn runs meanwhile (the watchdog stays out of it).
+    await turnStart($)
+    await w.clock.advance(31 * 60_000)
+    w.dirty = 'M  calc.py\n'
+    expect((await $.classic.Stop(commit as never)).block).toBeUndefined()
+    expect((w.files.get(LOG) ?? '').match(/"event":"commit-in-flight"/g)?.length).toBe(2)
   })
 })
 

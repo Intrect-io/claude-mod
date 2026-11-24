@@ -7,10 +7,13 @@ An unattended run of one repository, through to what it built being live. Give i
 /auto-claude start --once [aim]       # the same, but end when this run's final check passes
 /auto-claude start --always-on [aim]  # the same, then stand by and wake for new work
 /auto-claude start --queue # build .claude/goals.md as it is: branches only, nothing shipped
+/auto-claude approve [pr]  # let a PR held for protected files land (see "Protected paths")
 /auto-claude standby       # a finished run (or the one going) stands by from now on
 /auto-claude stats [days]  # where each run's time went, over the last 7 days by default
-/auto-claude status | stop | resume
+/auto-claude status | stop (or off) | resume
 ```
+
+`/auto-claude start` while a run is on replaces it (1.18.0): the run that was on ends as `/auto-claude stop` would end it (`run-stopped`, "replaced by a new /auto-claude start"), and the new aim is planned at once. The reply names what was given up: the old run's phase, its owning session when that was another one, and its open PRs, which nobody follows any more. A start that cannot start (a broken deploy file, a dirty tree with no remote, a stop file that cannot be moved) refuses before anything ends, so the run that was on goes on. A bare `/auto-claude start` replaces too. A tick of the old run still in flight is let finish for up to 30 s; one that runs longer (a fresh-checkout check, a deploy), or one in another session, writes nothing back over the new run and takes no further merge, push, deploy or start. The same holds for a tick in flight when the person runs `/auto-claude stop`.
 
 goal-mode merged into auto-claude in 1.0.0 (see "From goal-mode" below). Its loop (worktrees, checks, the evaluator, stuck handling and guards) lives in `hooks/loop.ts`. Its session goals are gone: Claude Code's own `/goal` and `ProposeGoal` cover them.
 
@@ -150,8 +153,10 @@ Some files decide whether a run's own work is accepted: its detectors, its judge
   - it logs an `awaiting-human` event;
   - the ship item waits as `awaiting-human`, and the driver polls it on every tick.
 - **A person decides.**
+  - `/auto-claude approve [pr]` (1.18.0), typed by the person in a session of the repository (the PR number may be left out when only one waits). The driver reads the PR's head and merges it at that head (`gh pr merge --squash --match-head-commit`) on its next tick, then goes on as after its own merge: the deploy, then Linear. A push to the PR in between voids the approval, and the person is told to look again. Only a command the person typed counts (the engine's `composer` or Remote Control origin); one a plugin or the model ran is refused. While a run is on, a Bash command that would type it into the session's own terminal (`tmux send-keys`) is refused too, since it would arrive with the person's origin. The approval is kept apart from the run record, so a tick in flight cannot drop it. Like a merge by hand, an approved PR skips the fresh-checkout check and the diff judge: the person's review stands in for them.
   - Merging it by hand continues it exactly as the driver's own merge would: the deploy, then Linear.
   - Closing it holds the milestone.
+  - The tell, the PR comment and `status` all name the approve command. The session that owns the run is told, in a section of its own, which PR waits, that neither auto-claude nor the model merges it, and what the person types. Measured on de-artifact (2026-11-24): with none of this, the owning session told the person that auto-claude would merge #414 by itself, the person set `/goal` to release it, and the model, barred from merging, refused 18 times across two Stop-hook loops, until the person stopped the run and the session merged #414 on their word.
 - **Other milestones.**
   - A milestone stacked on the waiting PR's branch depends on it, so it waits with it.
   - A milestone started afterwards from the default branch is built and shipped as usual.
@@ -373,6 +378,7 @@ Measured in ArtifactNet (2026-11-09 to 11-15): lines carried prose start conditi
 
 ## The loop
 
+- **A commit still running (1.18.0).** A `git commit` whose pre-commit hook builds (cargo check in a fresh worktree) outlasts the Bash timeout and moves to the background with its changes staged. A Stop whose `background_tasks` has a live shell naming `git commit` is not judged while the worktree is uncommitted (a `commit-in-flight` event): the check does not run beside the commit's hook, nothing is counted, and the watchdog does not wake the session; the commit's completion opens the next turn. A Stop with no such shell ends the wait. After 30 min the Stop is judged as it stands. Measured on de-artifact (2026-11-23 18:08Z): 13 checks in 3 min read "uncommitted changes" and blocked a milestone whose commit landed seconds later.
 - **Stuck.** 5 unmet checks in one turn, two unreadable verdicts, or an evaluator that fails: the loop waits 2 minutes, then sends a "change your approach" prompt, at most twice. After that the line is marked `[!]` and the run moves on.
 - **Deferring (1.14.0).** The model may call `mcp__auto-claude__defer_goal` at any point, from the first check on. The call needs a `category`, one of:
   - credentials, payment, human-decision or access, for an external blocker;

@@ -1,4 +1,4 @@
-import type { EngineInterface, Register, Timer } from 'claude-code'
+import type { EngineInterface, PromptOrigin, Register, Timer } from 'claude-code'
 
 import type { AutoRecord, ShipItem, WaitState } from '../types'
 import { deployFixLine, finalCheckOf, fixLine, kickoffText, parseQueue, planNudgeText, POLICY, READY_TOOL, replanText, RUN_DONE_TOOL, validatePlan, WORKTREE_WAIT_HINT, worktreeRefs } from './plan'
@@ -9,7 +9,7 @@ import { deployMerged } from './deploy-run'
 import { bootstrapRepo } from './bootstrap'
 import { ensureLines, FILES, fetchRemote, LOCAL, out, readText, refOf, repoRoot, run, tell } from './io'
 import { agentMoment, agentSync, bridgeStatusLine, carryAgent, fileTriage, markPlanAccepted, noteBridge, noteCiRed, readAgentConfig, setMaxIssuesPerDay, SPEC_AMBIGUOUS_HINT, stoppedGoal } from './bridge'
-import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, WAIT_TOOL, WAIT_TOOL_ID, waitCall, guardRefusal, LOOP_EXCLUDES, loopPolicy, loopView, DEFER_CATEGORIES, deferRule, setDeferAfter, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop, AGENT_PARKS, backgroundBusy, noteBackground } from './loop'
+import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, WAIT_TOOL, WAIT_TOOL_ID, waitCall, guardRefusal, LOOP_EXCLUDES, loopPolicy, loopView, DEFER_CATEGORIES, deferRule, setDeferAfter, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop, AGENT_PARKS, backgroundBusy, commitBusy, noteBackground } from './loop'
 import { awaitingHuman, nextStacked, capReached, causeOf, ciAction, diagnose, httpsOf, idleDue, inFlight, isWaiting, onlyWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, summary, unfinished, wakeDue } from './ship'
 import { markItem, nextPending, waitingItems } from './queue'
 import { BUILTIN_PROTECTED, classifyDiff, diffAction, judgeDiffText, parseNameStatus, parseProtected, protectedHits, restorePlan } from './verify'
@@ -45,6 +45,23 @@ const STORE = (root: string) => `auto:${root}`
 // The owner's pulse, written on every timer fire even while a long tick (a
 // deploy, scan) runs, apart from the record so it never overwrites it.
 const BEAT = (root: string) => `beat:${root}`
+// PRs awaiting a person that the person approved with /auto-claude approve
+// (1.18.0): { "<pr>": { sha, at } }, apart from the record so that a tick in
+// flight, which writes the record it read, cannot drop an approval.
+const APPROVE = (root: string) => `approve:${root}`
+type Approvals = Record<string, { sha: string; at: number }>
+
+async function readApprovals($: EngineInterface, root: string): Promise<Approvals> {
+  const v = await $.store.get(APPROVE(root)).catch(() => undefined)
+  return typeof v === 'object' && v !== null ? (v as Approvals) : {}
+}
+
+async function dropApproval($: EngineInterface, root: string, pr: number): Promise<void> {
+  const all = await readApprovals($, root)
+  if (all[String(pr)] === undefined) return
+  delete all[String(pr)]
+  await $.store.set(APPROVE(root), all)
+}
 // When this session's background workflow was first seen running, kept across
 // a /reload-plugins (a deploy reloads sessions whose turn has ended, which a
 // session waiting on a workflow has). Written only when it changes.
@@ -150,12 +167,25 @@ async function readRecord($: EngineInterface, root: string): Promise<AutoRecord 
 }
 
 async function writeRecord($: EngineInterface, r: AutoRecord): Promise<void> {
+  // A tick still holding a run that a newer start replaced (1.18.0: start over
+  // a live run) must not write the old run back over the new one.
+  const stored = await readRecord($, r.root)
+  if (stored !== undefined && stored.startedAt > r.startedAt) return
   await $.store.set(STORE(r.root), r)
   // Other plugins cannot read this store: this file tells them a run owns the
   // repository.
   // A run standing by owns nothing: the person may work in the repository meanwhile.
   await $.fs.write(`${r.root}/.claude/auto-claude.on`, `${JSON.stringify({ on: owns(r), phase: r.phase, at: await $.clock.now() })}\n`).catch(() => undefined)
   await show($, r)
+}
+
+// A tick holding a run that was replaced by a newer start, or stopped by the
+// person, since the tick read it (1.18.0): it takes no further step with an
+// outside effect (a merge, a push to the default branch, a deploy, a start).
+// writeRecord already keeps its record out; this keeps its actions out.
+async function superseded($: EngineInterface, r: AutoRecord): Promise<boolean> {
+  const stored = await readRecord($, r.root)
+  return stored !== undefined && (stored.startedAt > r.startedAt || (r.on && !stored.on))
 }
 
 // The run holds the session and the repository: on, and not standing by
@@ -294,6 +324,7 @@ async function startWanted($: EngineInterface, r: AutoRecord, base: string, stac
   if ((await readLoop($, r.root))?.current !== undefined) return
   const tip = stacked ? (await run($, ['git', '-C', r.root, 'rev-parse', '--verify', '--quiet', `${base}^{commit}`], r.root, 15_000)).stdout.trim() : ''
   if (stacked && tip === '') return
+  if (await superseded($, r)) return
   const current = await startNext($, r.root, base, r.remote, readyOf(r))
   if (current !== undefined && stacked) await writeRecord($, { ...r, onto: { ...r.onto, [current.branch]: tip } })
 }
@@ -479,9 +510,9 @@ async function protectedFor($: EngineInterface, r: AutoRecord, ref: string): Pro
 async function awaitHuman($: EngineInterface, r: AutoRecord, item: ShipItem, hits: string[], repo: string[], wt: string): Promise<{ r: AutoRecord; item: ShipItem }> {
   await run($, ['gh', 'label', 'create', NEEDS_HUMAN_LABEL, ...repo, '--color', 'B60205', '--description', 'auto-claude held this PR for a person', '--force'], wt, 30_000)
   await run($, ['gh', 'pr', 'edit', String(item.pr), ...repo, '--add-label', NEEDS_HUMAN_LABEL], wt, 30_000)
-  await run($, ['gh', 'pr', 'comment', String(item.pr), ...repo, '--body', `[auto-claude] This PR changes protected files, so auto-claude does not merge it. A person reviews and merges it (auto-claude then deploys and goes on as after its own merge), or closes it (the milestone is held).\n\nProtected files changed:\n${hits.map(h => `- \`${h}\``).join('\n')}`], wt, 30_000)
+  await run($, ['gh', 'pr', 'comment', String(item.pr), ...repo, '--body', `[auto-claude] This PR changes protected files, so auto-claude does not merge it on its own. A person reviews it, then either types \`/${COMMAND} approve ${item.pr ?? ''}\` in a Claude Code session of this repository (auto-claude merges this head, deploys and goes on), merges it here (the same), or closes it (the milestone is held).\n\nProtected files changed:\n${hits.map(h => `- \`${h}\``).join('\n')}`], wt, 30_000)
   await appendLog($, r.root, { event: 'awaiting-human', run: r.startedAt, goal: item.goal, ...(item.pr !== undefined ? { pr: item.pr } : {}), files: hits })
-  await tell($, r, `PR #${item.pr ?? '?'} changes protected files (${hits.slice(0, 5).join(', ')}${hits.length > 5 ? ', …' : ''}): it waits for a person to merge or close it; other milestones go on`)
+  await tell($, r, `PR #${item.pr ?? '?'} changes protected files (${hits.slice(0, 5).join(', ')}${hits.length > 5 ? ', …' : ''}): it waits for a person: /${COMMAND} approve ${item.pr ?? ''} merges it, or merge or close it on GitHub; other milestones go on`)
   r = await agentMoment($, r, { kind: 'awaiting-human', goal: item.goal, reason: `Protected files changed: ${hits.join(', ')}`, ...(await prLink($, r, item.pr)) })
 
   return { r, item: { ...item, state: 'awaiting-human', protectedFiles: hits, since: await $.clock.now(), note: undefined } }
@@ -591,6 +622,46 @@ async function allQueued($: EngineInterface, wt: string, repo: string[], headRef
   }
 }
 
+// The commit a milestone's PR branch has on the remote, freshly fetched; '' when unknown.
+async function prHead($: EngineInterface, r: AutoRecord, headRef: string): Promise<string> {
+  await run($, ['git', '-C', r.root, 'fetch', '-q', r.remote, headRef], r.root)
+  const got = await run($, ['git', '-C', r.root, 'rev-parse', '--verify', '--quiet', `${r.remote}/${headRef}^{commit}`], r.root, 15_000)
+  return got.exitCode === 0 ? got.stdout.trim() : ''
+}
+
+// A PR awaiting a person that the person approved (/auto-claude approve,
+// 1.18.0): the driver merges it at the head they approved, never at one pushed
+// since (`--match-head-commit`). Like a merge by hand, it skips the fresh-checkout
+// check and the diff judge: the person's review of the protected files stands
+// in for them. 'none' while no approval is in force.
+async function mergeApproved($: EngineInterface, r: AutoRecord, item: ShipItem, repo: string[], wt: string): Promise<'none' | 'merged' | { note: string }> {
+  if (item.pr === undefined) return 'none'
+  const approval = (await readApprovals($, r.root))[String(item.pr)]
+  if (approval === undefined) return 'none'
+  const head = await prHead($, r, item.headRef)
+  if (head !== approval.sha) {
+    await dropApproval($, r.root, item.pr)
+    await tell($, r, `PR #${item.pr}: its head moved since it was approved (${approval.sha.slice(0, 8)} → ${head === '' ? 'unknown' : head.slice(0, 8)}), so it was not merged; look again and /${COMMAND} approve ${item.pr} again`)
+    return 'none'
+  }
+  if (await superseded($, r)) return 'none'
+  const merged = await run($, ['gh', 'pr', 'merge', String(item.pr), ...repo, '--squash', '--delete-branch', '--match-head-commit', approval.sha], wt)
+  if (merged.exitCode !== 0) {
+    // A lost reply after GitHub merged it counts as merged, as for the driver's own merge.
+    const again = mergeable((await run($, ['gh', 'pr', 'view', String(item.pr), ...repo, '--json', 'state,mergeable'], wt)).stdout)
+    if (!again.merged) {
+      // Told once, and the approval is spent: a conflict or a required review
+      // does not clear by retrying, and the person was told it would merge.
+      await dropApproval($, r.root, item.pr)
+      await tell($, r, `PR #${item.pr}: the approved merge failed (${out(merged).slice(0, 160)}); it still waits for a person`)
+      return { note: `the approved merge failed: ${out(merged)}` }
+    }
+  }
+  await dropApproval($, r.root, item.pr)
+  await appendLog($, r.root, { event: 'approved-merge', run: r.startedAt, goal: item.goal, pr: item.pr, sha: approval.sha })
+  return 'merged'
+}
+
 // One step of a milestone through push, CI and merge.
 async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promise<{ r: AutoRecord; item: ShipItem }> {
   const update = (patch: Partial<ShipItem>) => ({ ...item, ...patch })
@@ -636,6 +707,7 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
         if (gate.note !== undefined) await tell($, r, gate.note)
       }
       if (failure === undefined) {
+        if (await superseded($, r)) return { r, item }
         const pushed = await run($, ['git', '-C', wt, 'push', r.remote, `HEAD:${r.defaultBranch}`], wt)
         if (pushed.exitCode !== 0) failure = `push to ${r.defaultBranch} failed: ${out(pushed)}`
       }
@@ -645,10 +717,19 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
     let byHand = false
     if (item.state === 'awaiting-human') {
       const state = mergeable((await run($, ['gh', 'pr', 'view', String(item.pr), ...repo, '--json', 'state,mergeable'], wt)).stdout)
-      if (state.unknown || (state.open && !state.merged)) return { r, item }
-      if (!state.merged) return hold($, r, item, `a person closed PR #${item.pr ?? '?'}, which touched protected files`)
+      if (state.unknown) return { r, item }
+      let approved = false
+      if (state.open && !state.merged) {
+        const done = await mergeApproved($, r, item, repo, wt)
+        if (done === 'none') return { r, item }
+        if (done !== 'merged') return { r, item: update({ note: done.note }) }
+        approved = true
+      } else if (!state.merged) {
+        if (item.pr !== undefined) await dropApproval($, r.root, item.pr)
+        return hold($, r, item, `a person closed PR #${item.pr ?? '?'}, which touched protected files`)
+      }
       byHand = true
-      await tell($, r, `PR #${item.pr ?? '?'} was landed by a person; going on as after a merge`)
+      await tell($, r, approved ? `PR #${item.pr ?? '?'} was merged as the person approved; going on as after a merge` : `PR #${item.pr ?? '?'} was landed by a person; going on as after a merge`)
     }
     if (!byHand) {
       // A CI that does not finish (no runner takes it) is re-run once, then held.
@@ -697,6 +778,7 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
           }
         }
         if (failure === undefined && !state.merged) {
+          if (await superseded($, r)) return { r, item }
           const merged = await run($, ['gh', 'pr', 'merge', String(item.pr), ...repo, '--squash', '--delete-branch'], wt)
           if (merged.exitCode !== 0) {
             // The reply may be lost after GitHub merged it (measured: a 502): asked again before it counts as a failure.
@@ -747,7 +829,7 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
       next = { ...next, linear: done.sync }
     }
     const merged = update({ state: 'merged', note: undefined })
-    if (r.deploy !== undefined) next = await deployAfter($, next, r.deploy, landed)
+    if (r.deploy !== undefined && !(await superseded($, r))) next = await deployAfter($, next, r.deploy, landed)
     return { r: next, item: merged }
   }
 
@@ -865,7 +947,8 @@ async function finalCheck($: EngineInterface, r: AutoRecord, caps: Caps): Promis
 // How long the session has had no turn, while nothing else (a judge, an armed
 // retry) holds it; undefined while it is busy.
 function quietFor(now: number, since: number): number | undefined {
-  if (watch.turnActive || watch.judging || now < watch.retryUntil || backgroundBusy(now)) return undefined
+  // A background commit the last Stop waited on (commitBusy) opens the next turn itself.
+  if (watch.turnActive || watch.judging || now < watch.retryUntil || backgroundBusy(now) || commitBusy(now)) return undefined
   return now - Math.max(watch.lastTurnEndAt ?? watch.loadedAt, since)
 }
 
@@ -1456,7 +1539,7 @@ async function tick($: EngineInterface, caps: Caps, pollMs: number): Promise<voi
     const synced = await agentSync($, r, await $.clock.now())
     if (synced.agent !== r.agent || synced.bridge !== r.bridge) await writeRecord($, synced)
     r = await shipSteps($, await readEvents($, synced))
-    if (!r.on) return
+    if (!r.on || (await superseded($, r))) return
     if ((r.holdStreak ?? 0) >= MAX_HOLD_STREAK) {
       const last = [...r.ships].reverse().find(s => s.state === 'held')
       await stopRun($, r, `${r.holdStreak} milestones in a row were held for one cause (${r.holdCause}), which every later milestone would hit too: ${(last?.note ?? '').slice(0, 200)}`)
@@ -1633,6 +1716,29 @@ async function clearStop($: EngineInterface, root: string): Promise<{ cleared: b
 
 const clearedNote = (c: { cleared: boolean }) => (c.cleared ? ' A leftover .claude/auto-claude.stop was moved to .claude/auto-claude.stop.cleared.' : '')
 
+// /auto-claude start over a run that is on ends that run as /auto-claude stop
+// would, and says what the person gave up (1.18.0; before, start refused and
+// the person had to stop first). A tick of this session still in flight is let
+// finish first, for up to 30 s; a slower one is kept out by writeRecord.
+const REPLACE_WAIT_MS = 30_000
+
+const USAGE = `Usage: /${COMMAND} start [aim] (again while a run is on: replaces it) | start --once [aim] | start --always-on [aim] | start --queue | approve [pr] | standby | status | stats [days] | stop (or off) | resume`
+
+async function replaceRun($: EngineInterface, seen: AutoRecord): Promise<string> {
+  const deadline = (await $.clock.now()) + REPLACE_WAIT_MS
+  while (ticking && (await $.clock.now()) < deadline) await $.clock.sleep(250).catch(() => undefined)
+  // Read again: the tick that just finished may have moved its ships.
+  const old = (await readRecord($, seen.root)) ?? seen
+  await stopRun($, old, `replaced by a new /${COMMAND} start`)
+  const mine = old.sessionId === (await $.session.id())
+  const open = old.ships.filter(s => s.pr !== undefined && s.state !== 'merged' && s.state !== 'held').map(s => `#${s.pr} (${s.state})`)
+  return [
+    `Replaced the run that was on (phase ${old.phase}${mine ? '' : `, owned by session ${(old.sessionId ?? '?').slice(0, 8)}`}; ${summary(old.merges, old.held, old.ships)}).`,
+    open.length > 0 ? ` Its open PRs are no longer followed: ${open.join(', ')}.` : '',
+    '\n',
+  ].join('')
+}
+
 async function startCommand($: EngineInterface, hint: string, ciMode: string, buildOnly: boolean, alwaysOn = false, once = false): Promise<string> {
   const where = await sessionRoot($)
   let root = where.root
@@ -1647,8 +1753,9 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string, bu
     root = made.root
     notes.push(made.note)
   }
+  // A run already on is replaced (1.18.0), but only once nothing below can
+  // still refuse the new one: every "Not started" leaves it running.
   const existing = await readRecord($, root)
-  if (existing?.on === true) return `A run is already on here (phase ${existing.phase}); /${COMMAND} status, or /${COMMAND} stop first.`
   if (buildOnly) {
     const queue = await readText($, FILES(root).queue)
     if (queue === undefined) return `No queue: write goals to ${FILES(root).queue}, one per line, e.g.\n- [ ] make add() return a + b :: check: pytest -q`
@@ -1696,11 +1803,13 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string, bu
   if (deploy !== undefined && 'error' in deploy) return `Not started: ${deploy.error}.`
 
   const f = FILES(root)
-  const logLines = ((await readText($, f.log)) ?? '').split('\n').filter(l => l.trim() !== '')
   await run($, ['mkdir', '-p', `${root}/.git/info`], root, 15_000)
   await ensureLines($, f.exclude, EXCLUDES, '# auto-claude')
   const stop = await clearStop($, root)
   if ('error' in stop) return `Not started: ${stop.error}.`
+  const replaced = existing?.on === true ? await replaceRun($, existing) : undefined
+  // Read after the old run's end is logged: the new run's events start past it.
+  const logLines = ((await readText($, f.log)) ?? '').split('\n').filter(l => l.trim() !== '')
   await ensureLines($, f.deny, DENY, '# auto-claude: merging and releases are the driver\'s')
   const now = await $.clock.now()
   const r = freshRun(
@@ -1733,7 +1842,7 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string, bu
   clearSessionGoal($)
   if (buildOnly) {
     $.clock.after(100, () => void tickNow?.())
-    return `auto-claude building the queue in ${root}: one worktree per pending line, judged by its check; nothing is pushed, merged or deployed.${clearedNote(stop)}`
+    return `${replaced ?? ''}auto-claude building the queue in ${root}: one worktree per pending line, judged by its check; nothing is pushed, merged or deployed.${clearedNote(stop)}`
   }
   const text = kickoffText(hint, refOf({ remote, defaultBranch }), remote === LOCAL, deploy?.command, kick.brief)
   $.clock.after(100, async () => {
@@ -1746,7 +1855,7 @@ async function startCommand($: EngineInterface, hint: string, ciMode: string, bu
   const always = r.alwaysOn === true
     ? ' Always on: once the final check passes, it stands by and wakes for new work.'
     : continuesOf(r) ? ` Once its final check passes, the next run toward the same aim plans itself (at most ${runCfg.maxRunsPerDay} runs in 24 h; --once ends at the first).` : ''
-  return `auto-claude on in ${root}${moved} (${mode} CI, merges into ${defaultBranch}${deploys}). Claude plans the run now.${always}${clearedNote(stop)}${notes.length > 0 ? ` ${notes.join(' ')}` : ''}`
+  return `${replaced ?? ''}auto-claude on in ${root}${moved} (${mode} CI, merges into ${defaultBranch}${deploys}). Claude plans the run now.${always}${clearedNote(stop)}${notes.length > 0 ? ` ${notes.join(' ')}` : ''}`
 }
 
 async function stallFacts($: EngineInterface, r: AutoRecord): Promise<StallFacts> {
@@ -1803,6 +1912,49 @@ async function chainStatus($: EngineInterface, r: AutoRecord): Promise<string> {
     : `run ${r.runNo ?? 1} · ends when done (${r.continues === false ? 'started with --once' : 'continueRuns is off'})`
 }
 
+// What waits on the person (1.18.0): PRs that change protected files, and how
+// each can land. Shown in status, and told to the model of the owning session,
+// which once said such a PR would be merged by auto-claude (de-artifact,
+// 2026-11-24): the person then fought a /goal loop for two hours.
+function awaitingLines(r: AutoRecord): string[] {
+  return awaitingHuman(r.ships).map(s => {
+    const files = s.protectedFiles ?? []
+    return `PR #${s.pr ?? '?'} waits for the person: it changes protected files (${files.slice(0, 5).join(', ')}${files.length > 5 ? ', …' : ''}). /${COMMAND} approve ${s.pr ?? ''} merges it at its current head; merging or closing it on GitHub works too.`
+  })
+}
+
+function awaitingPolicy(lines: readonly string[]): string {
+  return [
+    '# auto-claude: waiting on the person',
+    ...lines.map(l => `- ${l}`),
+    `auto-claude does not merge these PRs by itself, and you never merge them, tag or release their work yourself. When the person asks about merging, releasing or deploying this work, or why it has not happened, say so plainly: the PR waits for their review, and typing \`/${COMMAND} approve <pr>\` (only the person can) makes auto-claude merge it and deploy as after its own merge. Never say auto-claude will merge it on its own.`,
+  ].join('\n')
+}
+
+// /auto-claude approve [pr] (1.18.0): the person's word that a PR held for
+// protected files may land. Only a command the person typed counts (the
+// composer, or Remote Control); one a plugin or the model ran is refused.
+const PERSON_ORIGINS: ReadonlySet<string> = new Set(['composer', 'bridge'])
+
+async function approveCommand($: EngineInterface, r: AutoRecord, arg: string | undefined, origin: PromptOrigin | undefined): Promise<string> {
+  if (origin === undefined || !PERSON_ORIGINS.has(origin.kind)) return `Refused: /${COMMAND} approve counts only when the person types it (this came from ${origin?.kind ?? 'an unknown origin'}).`
+  const waiting = awaitingHuman(r.ships)
+  if (waiting.length === 0) return 'No PR waits for a person in this run.'
+  const wanted = arg === undefined ? undefined : Number(arg.replace(/^#/, ''))
+  if (wanted !== undefined && !Number.isInteger(wanted)) return `Usage: /${COMMAND} approve [pr number]`
+  const names = waiting.map(s => `#${s.pr ?? '?'}`).join(', ')
+  const item = wanted === undefined ? (waiting.length === 1 ? waiting[0] : undefined) : waiting.find(s => s.pr === wanted)
+  if (item === undefined) return wanted === undefined ? `More than one PR waits; name one: ${names}.` : `PR #${wanted} does not wait for a person in this run (waiting: ${names}).`
+  if (item.pr === undefined) return 'That milestone has no PR to merge.'
+  const sha = await prHead($, r, item.headRef)
+  if (sha === '') return `Not approved: the head of PR #${item.pr} (${r.remote}/${item.headRef}) could not be read.`
+  await $.store.set(APPROVE(r.root), { ...(await readApprovals($, r.root)), [String(item.pr)]: { sha, at: await $.clock.now() } })
+  await appendLog($, r.root, { event: 'approved', run: r.startedAt, goal: item.goal, pr: item.pr, sha })
+  if (!r.on) return `Approved PR #${item.pr} at ${sha.slice(0, 8)}, but the run is ${r.phase}: /${COMMAND} resume lets auto-claude merge it, or merge it on GitHub.`
+  if (activeRoot === r.root) $.clock.after(100, () => void tickNow?.())
+  return `Approved PR #${item.pr} at ${sha.slice(0, 8)}: auto-claude merges it at that head on its next tick${r.deploy !== undefined ? ', deploys' : ''} and goes on. A push to the PR before then voids the approval.`
+}
+
 async function statusText($: EngineInterface): Promise<string> {
   const root = activeRoot ?? (await sessionRoot($)).root
   const r = root === undefined ? undefined : await readRecord($, root)
@@ -1822,6 +1974,7 @@ async function statusText($: EngineInterface): Promise<string> {
     current !== undefined ? `building: ${current.condition.slice(0, 80)} (${current.branch})` : undefined,
     ...(await waitLines($, r, queue)),
     ...r.ships.filter(s => s.state !== 'merged').map(s => `- ${s.state}${s.pr !== undefined ? ` PR #${s.pr}` : ''}: ${s.goal.slice(0, 70)}${s.note ? ` (${s.note.slice(0, 80)})` : ''}`),
+    ...awaitingLines(r),
     r.linear !== undefined
       ? `linear: project ${r.linear.project} · ${Object.keys(r.linear.seen).length} issue(s) covered · last sync ${r.linear.syncedAt !== undefined ? `${Math.round(((await $.clock.now()) - r.linear.syncedAt) / 60_000)} min ago` : 'never'}${r.linear.error !== undefined ? ` · error: ${r.linear.error}` : ''}`
       : r.buildOnly === true ? undefined : 'linear: off (this folder maps to no project in ~/.claude/linear.json repo_mapping: add projectId or projectName)',
@@ -1890,7 +2043,7 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    await $.command.register({ name: COMMAND, description: 'Unattended run of this repository: /auto-claude start [aim] | start --once [aim] | start --always-on [aim] | start --queue | standby | status | stop | resume' })
+    await $.command.register({ name: COMMAND, description: 'Unattended run of this repository: /auto-claude start [aim] (again: a new aim replaces the run) | start --once [aim] | start --always-on [aim] | start --queue | approve [pr] | standby | status | stop | resume' })
     await $.tool.register({
       name: READY_TOOL,
       description: 'auto-claude: call once .claude/auto-plan.md (with its Final check and Deploy lines) and .claude/goals.md (milestone lines with checks) are written. It validates them and starts or continues the run.',
@@ -1982,12 +2135,14 @@ export const register: Register = (on, options) => {
     // Only the session running it is unattended; another one has a person in it.
     if (!owns(r) || r!.sessionId !== (await $.session.id())) return composed
     const building = (await loopView($)) !== null
+    const waiting = awaitingLines(r!)
     return {
       ...composed,
       sections: [
         ...composed.sections,
         { id: 'auto-claude:policy', text: POLICY, scope: 'session' as const },
         ...(building ? [{ id: 'auto-claude:loop', text: loopPolicy(), scope: 'session' as const }] : []),
+        ...(waiting.length > 0 ? [{ id: 'auto-claude:awaiting', text: awaitingPolicy(waiting), scope: 'session' as const }] : []),
       ],
     }
   })
@@ -2091,7 +2246,9 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: COMMAND }, async ($, e) => {
-    const [action = 'status', ...rest] = e.args.trim().split(/\s+/).filter(w => w !== '')
+    const [typed = 'status', ...rest] = e.args.trim().split(/\s+/).filter(w => w !== '')
+    // `off` is what the person typed for stop on 2026-11-24 and got the usage line.
+    const action = typed === 'off' ? 'stop' : typed
     if (action === 'start') {
       const buildOnly = rest.includes('--queue')
       const once = rest.includes('--once')
@@ -2136,6 +2293,7 @@ export const register: Register = (on, options) => {
       if (r.on && r.sessionId === (await $.session.id())) return { text: 'The run is already on in this session.' }
       return { text: await takeOver($, r, 'resumed by the person') }
     }
-    return { text: `Usage: /${COMMAND} start [aim] | start --once [aim] | start --always-on [aim] | start --queue | standby | status | stats [days] | stop | resume` }
+    if (action === 'approve') return { text: await approveCommand($, r, rest[0], e.origin) }
+    return { text: USAGE }
   })
 }
