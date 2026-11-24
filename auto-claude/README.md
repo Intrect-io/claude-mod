@@ -352,7 +352,25 @@ A run never asks the person to look at `status` or to run a command. When someth
 | Nothing started, shipped or merged for 15 min | The person is told the cause and that the watchdog is on it: at 15 min, 30 min later, and once more. |
 | The owning session goes quiet for 10 min (exited, replaced after a reboot, or the person moved to another session) | Any session of the same repository takes the run over by itself, with the milestone being built, once it has been free for 2 min (no turn running), and says so. A busy session only reports the run as orphaned, until it is free. A `.claude/auto-claude.stop` left in place keeps it reported, not taken. Two sessions claiming at once: the claim still in the store after 3 s goes on. `/auto-claude resume` takes it over at once. |
 
-`/auto-claude status` ends with a `stalled:` line naming the cause whenever the run is not moving. Only the owning session receives the unattended rules. Progress shows in the status line piece (`auto·R1·M3/7·PR#12`) and in notifications.
+`/auto-claude status` ends with a `stalled:` line naming the cause whenever the run is not moving. Only the owning session receives the unattended rules. Progress shows in the status line piece and in notifications.
+
+### The status line piece (1.19.0)
+
+The piece says what the run is doing now and since when, ahead of its round, milestones and PR: `auto·working 42m·R1·M3/7·PR#12`. A milestone can take hours (an ArtifactNet training wait ran 6 h), and `auto·R1·M3/7` alone did not say whether those hours were work or a stall. A leading `!` draws the piece in red: something needs a look. The most urgent state wins:
+
+| Label | Means |
+|---|---|
+| `!driver hung 34m` | The driver's tick has run past 30 min without ending: nothing is polled, shipped or merged. Drawn from the pulse, which runs apart from the tick. |
+| `!stalled: <cause> 20m` | `/auto-claude status`'s `stalled:` cause, in short (`session idle`, `no progress`, `CI stuck #12`, `ship stuck #12`, `plan overdue`, `ticks failing`, `orphaned`). The same function decides both. `plan overdue` and `no progress` give way to a turn at work and to a PR waiting on approve, which explain them. |
+| `!needs you: approve #414 3h0m` | A PR held for protected files waits on `/auto-claude approve`. |
+| `!wait 6h0m, alive check failing` / `!wait 6h0m, unpolled 12m` | A watched job's `:: alive:` fails, or its `:: after:` has not been polled for 10 min. |
+| `working 42m` / `planning 4m` | A turn runs. `, no tool 12m` once no tool call (a subagent's included) came for 10 min; red past 30 min. |
+| `judging`, `committing 2m`, `background 50m` | The Stop hook runs the check; a background `git commit`; a workflow or subagent the session waits on. |
+| `CI 8m`, `final CI 9m` | A PR's CI; CI on the merged head before the final check. |
+| `wait 6h0m, polled 2m ago` | Only `:: after:` waits are left, and the driver polls them. |
+| `idle 3m`, `standby 2h0m` | No turn and nothing awaited (red once the watchdog's thresholds pass); standing by. |
+
+Only the owning session draws the piece (another session's run draws nothing there). It is written on each record write and on each pulse (every `ciPollSec`, 30 s), and an unchanged piece is written again each minute. The person's `~/.claude/statusline-command.sh` reads a live piece whose file is 10 min old as a writer that stopped and appends `no update Nm` in red; `statusLine.refreshInterval` (30 s in `~/.claude/settings.json`) redraws the status line of an idle session, which Claude Code otherwise redraws only on its own events. Both are per host (the Mac and vela), outside this repository.
 
 ## Waiting on compute
 
@@ -372,7 +390,7 @@ A milestone may need something with its own clock first: a training run, a cache
 - The fields go after the check, in this order, with `:: base:` last.
 - **They never wait on the host's load or uptime** (`vm.loadavg`, `uptime`, "load average"). The host also runs the person's own jobs, so such a test can stay false all night. Measured 2026-11-19 on the Mac: `test "$(sysctl -n vm.loadavg | ...)" -lt 8` held an intrect-plugin milestone from 01:13 to 11:27 with the load at 50-88 (a Python job, CodeQL, Ableton), and a CC-Router wait on `-lt 20` the same night. The plan check and `wait_until` refuse them; wait on the awaited job itself and give the line a `:: within:`.
 - **`mcp__auto-claude__wait_until`** does the same from inside a milestone: `{ until, alive?, within?, reason }`. It is refused if `until` already passes or the worktree has uncommitted changes. At the next stop the line goes back to the queue with `:: after:` and `:: base: <its branch>`, so it restarts from the work built so far. A milestone that was stacked keeps the commit it was stacked on, so its restarted branch is rebased off the parent like any stacked one.
-- `/auto-claude status` lists each wait, how long it has waited and its last poll; the status line piece shows `·waitN`.
+- `/auto-claude status` lists each wait, how long it has waited and its last poll; the status line piece shows the oldest wait and the last poll (`auto·wait 6h0m, polled 2m ago`), in red when the job's `alive` fails or the polls stopped.
 
 Measured in ArtifactNet (2026-11-09 to 11-15): lines carried prose start conditions the driver could not read, so each was started at once and deferred by the model. With every line deferred, the final check failed and a round was spent; three rounds went in 25 minutes, the run stopped, and nothing resumed it when the cache finished hours later.
 

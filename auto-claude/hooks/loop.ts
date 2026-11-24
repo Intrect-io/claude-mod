@@ -78,6 +78,10 @@ export const watch = {
   backgroundSince: undefined as number | undefined,
   // Since when Stops have found a background `git commit` running (commitInFlight).
   commitSince: undefined as number | undefined,
+  // When the main turn running now began, and the session's last tool call in
+  // any loop (a subagent's too): the status line's working/quiet (live.ts).
+  turnSince: undefined as number | undefined,
+  lastToolAt: undefined as number | undefined,
 }
 
 // Background work that wakes the session when it ends: a workflow (ultracode

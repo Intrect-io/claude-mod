@@ -14,6 +14,8 @@ import { activityDue, activityOf, HEARTBEAT_MS, idleShare, MAX_GAP_MS, statsDays
 import { deployFixLine, deployOf, finalCheckOf, fixLine, kickoffText, POLICY, validatePlan, worktreeRefs } from './plan'
 import { markItem, nextPending, parseDuration, parseQueue, requeueItem, slugify, summarize, waitingItems } from './queue'
 import { issueCandidates } from './agent'
+import { age, liveLabel } from './live'
+import type { LiveFacts } from './live'
 import { noteCiRed } from './bridge'
 import { awaitingHuman, nextStacked, capReached, onlyWaiting, causeOf, ciAction, httpsOf, idleDue, inFlight, isWaiting, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, unfinished, MAX_AHEAD, wakeDue } from './ship'
 
@@ -824,5 +826,67 @@ describe('Triage issue sources (1.17.0)', () => {
     expect(twice.agent?.ciRed?.CI?.polls).toBe(2)
     expect(issueCandidates({ held: [], ciRed: [{ workflow: 'CI', ...twice.agent!.ciRed!.CI! }], existing: [], createdToday: 0, cap: 3 }).map(c => c.title)).toEqual(['CI red on the default branch: CI'])
     expect(noteCiRed(twice, [], 'o/r').agent?.ciRed).toEqual({})
+  })
+})
+
+describe('the status line label (1.19.0)', () => {
+  const H = 60 * MIN
+  const base: LiveFacts = { now: 10 * H, phase: 'run', awaiting: [], judging: false, waits: [], quietSince: 10 * H - 3 * MIN }
+  const at = (over: Partial<LiveFacts>) => liveLabel({ ...base, ...over })
+
+  test('ages read in minutes, hours and days', () => {
+    expect([age(0), age(59 * 1000), age(42 * MIN), age(6 * H + 12 * MIN), age(27 * H + 5 * MIN)]).toEqual(['0m', '0m', '42m', '6h12m', '1d3h'])
+  })
+
+  test('each state, plain or red', () => {
+    expect(at({})).toBe('idle 3m')
+    expect(at({ turnSince: 10 * H - 40 * MIN, lastToolAt: 10 * H - 1 * MIN })).toBe('working 40m')
+    expect(at({ phase: 'plan', turnSince: 10 * H - 4 * MIN })).toBe('planning 4m')
+    expect(at({ turnSince: 10 * H - 2 * H, lastToolAt: 10 * H - 12 * MIN })).toBe('working 2h0m, no tool 12m')
+    expect(at({ turnSince: 10 * H - 2 * H, lastToolAt: 10 * H - 31 * MIN })).toBe('!working 2h0m, no tool 31m')
+    // A tool call from before the turn does not count for it.
+    expect(at({ turnSince: 10 * H - 15 * MIN, lastToolAt: 10 * H - 5 * H })).toBe('working 15m, no tool 15m')
+    expect(at({ judging: true })).toBe('judging')
+    expect(at({ commitSince: 10 * H - 2 * MIN })).toBe('committing 2m')
+    expect(at({ backgroundSince: 10 * H - 50 * MIN })).toBe('background 50m')
+    expect(at({ ci: { since: 10 * H - 8 * MIN, pr: 3 } })).toBe('CI 8m')
+    expect(at({ finalCiSince: 10 * H - 9 * MIN })).toBe('final CI 9m')
+    expect(at({ waits: [{ since: 10 * H - 6 * H, checkedAt: 10 * H - 2 * MIN }] })).toBe('wait 6h0m, polled 2m ago')
+    expect(at({ waits: [{ since: 10 * H - 6 * H, checkedAt: 10 * H - 12 * MIN }] })).toBe('!wait 6h0m, unpolled 12m')
+    expect(at({ waits: [{ since: 10 * H - 6 * H, checkedAt: 10 * H - 1 * MIN, aliveFails: 1 }] })).toBe('!wait 6h0m, alive check failing')
+    expect(at({ awaiting: [{ pr: 414, since: 10 * H - 3 * H }, { since: 10 * H - H }] })).toBe('!needs you: approve #414 #? 3h0m')
+    expect(at({ stall: { kind: 'ci-stuck', pr: 9, ms: 95 * MIN, text: 'x' } })).toBe('!stalled: CI stuck #9 1h35m')
+    expect(at({ stall: { kind: 'tick-fails', text: 'x' } })).toBe('!stalled: ticks failing')
+    expect(at({ tickHungMs: 31 * MIN })).toBe('!driver hung 31m')
+    expect(at({ phase: 'standby', quietSince: 10 * H - 2 * H })).toBe('standby 2h0m')
+  })
+
+  test('the most urgent wins: hung, stalled, the person, a dead wait, then work', () => {
+    const all: Partial<LiveFacts> = {
+      tickHungMs: 31 * MIN,
+      stall: { kind: 'session-quiet', ms: 20 * MIN, text: 'x' },
+      awaiting: [{ pr: 7, since: 10 * H - MIN }],
+      waits: [{ since: 10 * H - H, checkedAt: 10 * H, aliveFails: 2 }],
+      turnSince: 10 * H - MIN,
+      judging: true,
+      ci: { since: 10 * H - MIN },
+    }
+    expect(at(all)).toBe('!driver hung 31m')
+    expect(at({ ...all, tickHungMs: undefined })).toBe('!stalled: session idle 20m')
+    expect(at({ ...all, tickHungMs: undefined, stall: undefined })).toBe('!needs you: approve #7 1m')
+    expect(at({ ...all, tickHungMs: undefined, stall: undefined, awaiting: [] })).toBe('!wait 1h0m, alive check failing')
+    expect(at({ ...all, tickHungMs: undefined, stall: undefined, awaiting: [], waits: [] })).toBe('working 1m')
+    expect(at({ ...all, tickHungMs: undefined, stall: undefined, awaiting: [], waits: [], turnSince: undefined })).toBe('judging')
+  })
+
+  test('a soft stall yields to a turn at work and to a PR waiting on the person; a hard one does not', () => {
+    const turn = { turnSince: 10 * H - 20 * MIN, lastToolAt: 10 * H - MIN }
+    const overdue = { kind: 'plan-overdue' as const, ms: 20 * MIN, text: 'x' }
+    expect(at({ phase: 'plan', ...turn, stall: overdue })).toBe('planning 20m')
+    expect(at({ phase: 'plan', stall: overdue })).toBe('!stalled: plan overdue 20m')
+    const idle = { kind: 'idle' as const, ms: 20 * MIN, text: 'x' }
+    expect(at({ awaiting: [{ pr: 7, since: 10 * H - 30 * MIN }], stall: idle })).toBe('!needs you: approve #7 30m')
+    expect(at({ stall: idle, judging: true })).toBe('!stalled: no progress 20m')
+    expect(at({ ...turn, stall: { kind: 'ci-stuck', pr: 4, ms: 95 * MIN, text: 'x' } })).toBe('!stalled: CI stuck #4 1h35m')
   })
 })

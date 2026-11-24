@@ -175,33 +175,42 @@ export type StallFacts = {
 
 const ago = (now: number, at: number) => `${Math.max(0, Math.round((now - at) / 60_000))} min ago`
 
+// What keeps a run from moving, by kind, for the status line's short label
+// (live.ts) as well as the sentence in /auto-claude status and the idle tell.
+export type StallKind = 'orphaned' | 'tick-fails' | 'plan-overdue' | 'ship-stuck' | 'session-quiet' | 'ci-stuck' | 'idle'
+export type Stall = { kind: StallKind; text: string; ms?: number; pr?: number }
+
 export function diagnose(r: AutoRecord, f: StallFacts): string | undefined {
+  return stallOf(r, f)?.text
+}
+
+export function stallOf(r: AutoRecord, f: StallFacts): Stall | undefined {
   if (!r.on) return undefined
   const beat = r.beatAt ?? r.startedAt
   if (r.sessionId !== undefined && r.sessionId !== f.sessionId && f.now - beat >= f.staleMs) {
-    return `orphaned: the session running it (${r.sessionId.slice(0, 8)}) last ticked ${ago(f.now, beat)}, so nothing moves; /auto-claude resume here to go on`
+    return { kind: 'orphaned', ms: f.now - beat, text: `orphaned: the session running it (${r.sessionId.slice(0, 8)}) last ticked ${ago(f.now, beat)}, so nothing moves; /auto-claude resume here to go on` }
   }
-  if (f.tickFails !== undefined) return `every tick fails (${f.tickFails} in a row), so nothing moves: ${(f.tickError ?? '').slice(0, 200)}`
+  if (f.tickFails !== undefined) return { kind: 'tick-fails', text: `every tick fails (${f.tickFails} in a row), so nothing moves: ${(f.tickError ?? '').slice(0, 200)}` }
   // phaseAt is when planning began or was last reminded: a reminder already
   // sent, or the first one's wait run out, means the plan is overdue.
   const since = r.phaseAt ?? r.startedAt
   if (r.phase === 'plan' && ((r.nudges ?? 0) >= 1 || f.now - since >= f.planWaitMs)) {
     const lack = f.planErrors.length > 0 ? `the plan files lack: ${f.planErrors.join('; ').slice(0, 300)}` : 'the plan files look ready: call auto_plan_ready'
-    return `planning still waiting (reminder ${r.nudges ?? 0}/${f.maxNudges}, the last ${ago(f.now, since)}); ${lack}`
+    return { kind: 'plan-overdue', ms: f.now - r.startedAt, text: `planning still waiting (reminder ${r.nudges ?? 0}/${f.maxNudges}, the last ${ago(f.now, since)}); ${lack}` }
   }
   const item = inFlight(r.ships)
   if (item !== undefined && item.note !== undefined && (item.repeats ?? 0) >= 1) {
-    return `shipping stuck at ${item.state}${item.pr !== undefined ? ` (PR #${item.pr})` : ''}: the same error ${(item.repeats ?? 0) + 1} checks in a row: ${item.note.slice(0, 200)}`
+    return { kind: 'ship-stuck', pr: item.pr, ms: f.now - (item.noteSince ?? item.since), text: `shipping stuck at ${item.state}${item.pr !== undefined ? ` (PR #${item.pr})` : ''}: the same error ${(item.repeats ?? 0) + 1} checks in a row: ${item.note.slice(0, 200)}` }
   }
   if (r.phase === 'run' && r.started > r.finished && f.quietMs !== undefined && f.quietMs >= LOOP_QUIET_MS) {
-    return `the session has done nothing for ${Math.round(f.quietMs / 60_000)} min while a milestone is open; the watchdog prompts it again`
+    return { kind: 'session-quiet', ms: f.quietMs, text: `the session has done nothing for ${Math.round(f.quietMs / 60_000)} min while a milestone is open; the watchdog prompts it again` }
   }
   const stuck = r.phase === 'run' ? ciStuck(r, f.now) : undefined
   if (stuck !== undefined) {
-    return `PR #${stuck.pr ?? '?'} has waited ${stuck.minutes} min for CI to finish or GitHub to decide it can merge (a queued check with no runner?)`
+    return { kind: 'ci-stuck', pr: stuck.pr, ms: stuck.minutes * 60_000, text: `PR #${stuck.pr ?? '?'} has waited ${stuck.minutes} min for CI to finish or GitHub to decide it can merge (a queued check with no runner?)` }
   }
   if (r.phase === 'run' && f.idleMs !== undefined && f.idleMs >= IDLE_NUDGE_MS && !isWaiting(r, f.now)) {
-    return `idle ${Math.round(f.idleMs / 60_000)} min: nothing was started, shipped or merged`
+    return { kind: 'idle', ms: f.idleMs, text: `idle ${Math.round(f.idleMs / 60_000)} min: nothing was started, shipped or merged` }
   }
 
   return undefined

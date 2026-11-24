@@ -3,6 +3,8 @@ import type { EngineInterface, PromptOrigin, Register, Timer } from 'claude-code
 import type { AutoRecord, ShipItem, WaitState } from '../types'
 import { deployFixLine, finalCheckOf, fixLine, kickoffText, parseQueue, planNudgeText, POLICY, READY_TOOL, replanText, RUN_DONE_TOOL, validatePlan, WORKTREE_WAIT_HINT, worktreeRefs } from './plan'
 import { segment } from './segment'
+import { liveLabel } from './live'
+import type { LiveFacts } from './live'
 import { DEPLOY_FILE, parseDeploy, specOfPlan } from './deploy'
 import type { DeploySpec } from './deploy'
 import { deployMerged } from './deploy-run'
@@ -10,7 +12,7 @@ import { bootstrapRepo } from './bootstrap'
 import { ensureLines, FILES, fetchRemote, LOCAL, out, readText, refOf, repoRoot, run, tell } from './io'
 import { agentMoment, agentSync, bridgeStatusLine, carryAgent, fileTriage, markPlanAccepted, noteBridge, noteCiRed, readAgentConfig, setMaxIssuesPerDay, SPEC_AMBIGUOUS_HINT, stoppedGoal } from './bridge'
 import { appendLog, blockCurrent, DEFER_TOOL, DEFER_TOOL_ID, deferCall, WAIT_TOOL, WAIT_TOOL_ID, waitCall, guardRefusal, LOOP_EXCLUDES, loopPolicy, loopView, DEFER_CATEGORIES, deferRule, setDeferAfter, onStop, readLoop, resumeLoop, setOnFinish, startNext, stopLoop, watch, writeLoop, AGENT_PARKS, backgroundBusy, commitBusy, noteBackground } from './loop'
-import { awaitingHuman, nextStacked, capReached, causeOf, ciAction, diagnose, httpsOf, idleDue, inFlight, isWaiting, onlyWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, summary, unfinished, wakeDue } from './ship'
+import { awaitingHuman, nextStacked, capReached, causeOf, ciAction, diagnose, stallOf, httpsOf, idleDue, inFlight, isWaiting, onlyWaiting, LOOP_WAKES, MAX_IDLE_NUDGES, MAX_RED, mergeable, noRequired, onlyCancelled, parseChecks, prNumber, progressSig, readLog, repoSlug, shipRemedy, startBase, summary, unfinished, wakeDue } from './ship'
 import { markItem, nextPending, waitingItems } from './queue'
 import { BUILTIN_PROTECTED, classifyDiff, diffAction, judgeDiffText, parseNameStatus, parseProtected, protectedHits, restorePlan } from './verify'
 import { judgeDiff } from './evaluator'
@@ -253,26 +255,66 @@ async function linearKickoff($: EngineInterface, root: string): Promise<{ linear
   return { linear: got.sync, brief: `${got.brief}${hint}` }
 }
 
-async function show($: EngineInterface, r: AutoRecord | undefined) {
+// The run's piece of the status line: what it is doing now and since when
+// (live.ts), then its round, milestones and PR. Drawn by the owning session
+// only, whose memory holds the turn, judge and background state; written on
+// each record write and on each pulse, so a tick that hangs still shows.
+let shown: AutoRecord | undefined
+// A live piece is written again at least this often (~/.claude/statusline-command.sh
+// reads one 10 min old as a writer that stopped).
+const REWRITE_MS = 60_000
+
+async function show($: EngineInterface, r: AutoRecord | undefined, tickHungMs?: number) {
   if (r === undefined || !r.on) {
+    shown = undefined
     await segment($, r?.phase === 'done' ? 'auto·done' : '')
     return
   }
-  let total = 0
-  let done = 0
-  const queue = await readText($, FILES(r.root).queue)
-  if (queue !== undefined) {
-    const items = parseQueue(queue)
-    total = items.length
-    done = items.filter(i => i.mark !== ' ').length
-  }
-  if (r.phase === 'standby') {
-    await segment($, `auto·standby·c${r.cycle ?? 0}`)
+  // Another session's run: its own status line shows it.
+  if (r.sessionId !== (await $.session.id())) {
+    shown = undefined
+    await segment($, '')
     return
   }
+  shown = r
+  const label = liveLabel(await liveFacts($, r, tickHungMs))
+  const bang = label.startsWith('!') ? '!' : ''
+  const what = label.replace(/^!/, '')
+  if (r.phase === 'standby') {
+    await segment($, `${bang}auto·${what}·c${r.cycle ?? 0}`, undefined, REWRITE_MS)
+    return
+  }
+  let detail = 'plan'
+  if (r.phase !== 'plan') {
+    const queue = await readText($, FILES(r.root).queue)
+    const items = queue === undefined ? [] : parseQueue(queue)
+    detail = `M${items.filter(i => i.mark !== ' ').length}/${items.length}`
+  }
   const pr = inFlight(r.ships)?.pr
-  const waiting = (r.waitCount ?? 0) > 0 ? `·wait${r.waitCount}` : ''
-  await segment($, `auto·R${r.round}·${r.phase === 'plan' ? 'plan' : `M${done}/${total}`}${pr !== undefined ? `·PR#${pr}` : ''}${waiting}`)
+  await segment($, `${bang}auto·${what}·R${r.round}·${detail}${pr !== undefined ? `·PR#${pr}` : ''}`, undefined, REWRITE_MS)
+}
+
+const CI_STATES: ReadonlySet<string> = new Set(['push', 'ci', 'fixing'])
+
+async function liveFacts($: EngineInterface, r: AutoRecord, tickHungMs?: number): Promise<LiveFacts> {
+  const now = await $.clock.now()
+  const item = inFlight(r.ships)
+  return {
+    now,
+    phase: r.phase === 'plan' || r.phase === 'standby' ? r.phase : 'run',
+    // A hung tick may hang on what stallFacts reads too: no more I/O then.
+    ...(tickHungMs !== undefined ? { tickHungMs } : { stall: stallOf(r, await stallFacts($, r)) }),
+    awaiting: awaitingHuman(r.ships).map(s => ({ pr: s.pr, since: s.since })),
+    ...(watch.turnActive && watch.turnSince !== undefined ? { turnSince: watch.turnSince } : {}),
+    ...(watch.lastToolAt !== undefined ? { lastToolAt: watch.lastToolAt } : {}),
+    judging: watch.judging,
+    ...(backgroundBusy(now) ? { backgroundSince: watch.backgroundSince } : {}),
+    ...(commitBusy(now) ? { commitSince: watch.commitSince } : {}),
+    ...(item !== undefined && CI_STATES.has(item.state) ? { ci: { since: item.since, pr: item.pr } } : {}),
+    ...(r.finalCiSince !== undefined ? { finalCiSince: r.finalCiSince } : {}),
+    waits: r.phase === 'run' ? Object.values(r.waits ?? {}).filter(w => w.ok !== true) : [],
+    quietSince: r.phase === 'standby' ? (r.standbyAt ?? now) : (watch.lastTurnEndAt ?? watch.loadedAt),
+  }
 }
 
 // The repository of the session's directory, or of its nearest ancestor that
@@ -333,10 +375,17 @@ async function pulse($: EngineInterface): Promise<void> {
   if (activeRoot === undefined) return
   try {
     const now = await $.clock.now()
-    if (ticking && now - tickStartedAt > PULSE_MAX_TICK_MS) return
+    if (ticking && now - tickStartedAt > PULSE_MAX_TICK_MS) {
+      // No beat: a hung owner must look quiet to the others. The piece says so,
+      // from what was last shown (the store may be what the tick hangs on).
+      if (shown !== undefined) await show($, shown, now - tickStartedAt)
+      return
+    }
     const r = await readRecord($, activeRoot)
     const me = await $.session.id()
     if (r?.on === true && r.sessionId === me) await $.store.set(BEAT(r.root), { sessionId: me, at: now })
+    // The piece is redrawn between ticks too: its ages move, and a quiet session shows.
+    if (r?.on === true && r.sessionId === me && r.root === activeRoot) await show($, r)
   } catch {
     // A missed pulse only makes the owner look quieter.
   }
@@ -2085,7 +2134,7 @@ export const register: Register = (on, options) => {
       isDeferred: false,
     })
     // A fresh load knows nothing of the turns before it: quiet counts from now.
-    Object.assign(watch, { turnActive: false, lastTurnEndAt: undefined, judging: false, retryUntil: 0, backgroundSince: undefined, loadedAt: await $.clock.now() })
+    Object.assign(watch, { turnActive: false, turnSince: undefined, lastToolAt: undefined, lastTurnEndAt: undefined, judging: false, retryUntil: 0, backgroundSince: undefined, loadedAt: await $.clock.now() })
     // A reload while a workflow runs: the session still waits on it.
     const bg = (await $.store.get(BG(await $.session.id())).catch(() => undefined)) as { since?: unknown; process?: unknown } | undefined
     if (typeof bg?.since === 'number' && bg.process === (await processToken($))) watch.backgroundSince = bg.since
@@ -2117,13 +2166,17 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
-    if ((e as { agentId?: string }).agentId === undefined) watch.turnActive = true
+    if ((e as { agentId?: string }).agentId === undefined) {
+      watch.turnActive = true
+      watch.turnSince = await $.clock.now()
+    }
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
       watch.turnActive = false
+      watch.turnSince = undefined
       watch.lastTurnEndAt = await $.clock.now()
     }
     return next(e)
@@ -2235,6 +2288,8 @@ export const register: Register = (on, options) => {
 
   // Refusals: while a run is on in this session, and while a milestone is built in it.
   on('tool.call', async ($, e, next) => {
+    // Any loop's tool call (a subagent's too) shows the session working.
+    watch.lastToolAt = await $.clock.now()
     const view = await loopView($)
     const r = activeRoot === undefined ? undefined : await readRecord($, activeRoot)
     const runOn = owns(r) && r!.sessionId === (await $.session.id())

@@ -10,13 +10,18 @@ import type { EngineInterface } from 'claude-code'
 
 const MOD = '{{MOD}}'
 let last: string | undefined
+let lastAt = 0
 
 // `sessionId`: whose piece, when it is not the running session's (a
 // session.end names the ending one; after /clear the process goes on under
-// a new id).
-export async function segment($: EngineInterface, text: string, sessionId?: string): Promise<void> {
-  if (text === last && sessionId === undefined) return
+// a new id). `rewriteMs`: an unchanged piece is written again once this old,
+// so a mod that keeps calling (auto-claude's pulse) keeps the file's mtime
+// fresh, and the status line can read an old mtime as a writer that stopped.
+export async function segment($: EngineInterface, text: string, sessionId?: string, rewriteMs?: number): Promise<void> {
+  const now = rewriteMs === undefined ? 0 : await $.clock.now()
+  if (text === last && sessionId === undefined && (rewriteMs === undefined || now - lastAt < rewriteMs)) return
   last = text
+  lastAt = now
   try {
     const home = await $.env.get('HOME')
     if (home === undefined) return
