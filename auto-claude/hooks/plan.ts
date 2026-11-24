@@ -201,7 +201,7 @@ export function replanText(round: number, finalCheck: string, output: string, li
 export const POLICY = [
   'auto-claude is running this repository unattended (CLAUDE.md §6.5 rules for an unanswered question apply at once: nobody will answer).',
   '- Decide every choice yourself: the recommended option, or the safest when it is plainly wrong; write it with its reason under ## Decisions in .claude/auto-plan.md.',
-  '- Starting milestones, pushing, PRs, merging and deploying are auto-claude\'s: never run gh pr merge, a release or a deploy yourself, and never ask the person to run /auto-claude, /goal or merge anything. Commit your milestone on its goal/* branch.',
+  '- Starting milestones, pushing, PRs, merging and deploying are auto-claude\'s: never run gh pr merge, a release or a deploy yourself, and never ask the person to run /auto-claude, /goal or merge anything, except for a PR the "waiting on the person" section names. Commit your milestone on its goal/* branch.',
   '- When you are waiting on something (CI, the next milestone, a merge), just end the turn: auto-claude carries on by itself and prompts you when there is work. Never end a turn asking the person to check status.',
   '- Waiting on compute (training, a cache build, a job you launched) is not a blocker and never a reason to defer: inside a milestone call mcp__auto-claude__wait_until with a shell command that exits 0 once it is done; in goals.md write `:: after: <command>` on the line. auto-claude polls it and resumes the work itself.',
   '- auto-claude sets each milestone as the goal itself: never call ProposeGoal or /goal during the run (a session goal would hold the loop).',

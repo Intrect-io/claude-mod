@@ -76,6 +76,8 @@ export const watch = {
   // Since when the last Stop left a workflow or subagent running in the
   // background: the session is waiting on it, not idle (see backgroundBusy).
   backgroundSince: undefined as number | undefined,
+  // Since when Stops have found a background `git commit` running (commitInFlight).
+  commitSince: undefined as number | undefined,
 }
 
 // Background work that wakes the session when it ends: a workflow (ultracode
@@ -94,6 +96,30 @@ export function wakingWork(tasks: unknown): string[] {
     if (!WAKING_TASKS.has(String(task.type)) || !LIVE_STATUS.has(String(task.status))) return []
     return [`${String(task.type)} ${String(task.name ?? task.description ?? '').slice(0, 80)}`.trim()]
   })
+}
+
+// A `git commit` still running as a background shell (1.18.0). A pre-commit hook
+// that builds (cargo check in a fresh worktree) outlasts the Bash timeout, so
+// the commit moves to the background with its changes staged. Judged then, the
+// worktree reads as uncommitted at every Stop: de-artifact (2026-11-23 18:08Z)
+// spent 13 checks in 3 min on it and blocked a milestone whose commit landed
+// seconds later. Such a Stop is left unjudged; the commit's completion opens the
+// next turn. A watcher whose command names `git commit` counts as well.
+export function commitInFlight(tasks: unknown): boolean {
+  if (!Array.isArray(tasks)) return false
+  return tasks.some(t => {
+    const task = t as { type?: unknown; status?: unknown; command?: unknown }
+    return String(task.type) === 'shell' && LIVE_STATUS.has(String(task.status)) && /\bgit\b[^\n]*\bcommit\b/.test(String(task.command ?? ''))
+  })
+}
+
+// A commit still running after this long (a hook that hangs) is judged as it stands.
+export const COMMIT_WAIT_MS = 30 * 60_000
+
+// The session waits on a background commit (commitInFlight) within its bound:
+// not idle, so the watchdog does not wake it.
+export function commitBusy(now: number): boolean {
+  return watch.commitSince !== undefined && now - watch.commitSince < COMMIT_WAIT_MS
 }
 
 // Records what a main-thread Stop left running. Each such Stop restarts the
@@ -253,6 +279,10 @@ function submitLater($: EngineInterface, root: string, text: string, delayMs: nu
 
 // The Stop of a turn in which a goal runs: judge it.
 export async function onStop<R extends { block?: string }>($: EngineInterface, e: StopFields, below: R): Promise<R> {
+  // The commit wait (commitInFlight) holds only while a Stop still sees the commit running.
+  const now = await $.clock.now()
+  if (!commitInFlight((e as { background_tasks?: unknown }).background_tasks)) watch.commitSince = undefined
+  else watch.commitSince ??= now
   const goal = await read($, goalAtom)
   if (goal === null) return below
   const view = await read($, viewAtom)
@@ -288,6 +318,18 @@ async function judge<R extends { block?: string }>($: EngineInterface, { rec, vi
   if (goal.waitPending !== undefined) {
     await finishWait($, rec, goal.waitPending)
     return below
+  }
+
+  // 0. A commit still running in the background (commitInFlight) with the
+  // worktree not yet clean: nothing is run or counted until it lands, so the
+  // check does not race the commit's own hook either.
+  if (watch.commitSince !== undefined && (await $.clock.now()) - watch.commitSince < COMMIT_WAIT_MS) {
+    const dirty = await run($, ['git', '-C', view.worktree, 'status', '--porcelain'], view.worktree, 60_000).catch(() => undefined)
+    if (dirty !== undefined && uncommitted(dirty.stdout).length > 0) {
+      await appendLog($, view.repoRoot, { event: 'commit-in-flight', goal: goal.condition.slice(0, 80) })
+      return below
+    }
+    watch.commitSince = undefined
   }
 
   // 1. The queue's own check, run deterministically in the worktree.
@@ -463,6 +505,9 @@ export function guardRefusal(e: Record<string, unknown>, view: LoopView | null, 
     if (tool === 'EnterPlanMode') return 'auto-claude run: plan mode would hold the run; plan inline and keep working.'
     if (tool === 'ProposeGoal' || tool === 'mcp__goal-mode__set_goal') return 'auto-claude run: the loop sets each milestone as the goal itself; a session goal would block it.'
     if (WAIT_TOOLS.has(tool) || (tool === 'Bash' && typeof e.command === 'string' && waitsLong(e.command))) return WAIT_REFUSAL
+    // Typed into the session's own terminal (tmux send-keys), the command would
+    // reach the plugin as the person's own (composer origin) and pass its check.
+    if (tool === 'Bash' && typeof e.command === 'string' && /auto-claude\s+approve\b/.test(e.command)) return 'auto-claude run: /auto-claude approve is the person\'s word alone; tell them the PR waits for it, and never send it yourself.'
   }
   if (view === null) return undefined
   if (tool === 'Bash' && typeof e.command === 'string') return checkBash(e.command, view)
