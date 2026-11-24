@@ -21,6 +21,8 @@ const STOP = { stop_hook_active: false, last_assistant_message: 'done', transcri
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
 const MIN = 60_000
 const TICK = 30_000
+// The run's piece of the status line in this world's home.
+const PIECE = '/home/.claude/statusline/me/auto-claude.txt'
 
 // The machine beneath the plugin: files in memory, git, gh and checks answered
 // by argv, the evaluator by a queue of verdicts.
@@ -74,6 +76,10 @@ function world(on: On, store: Record<string, unknown> = {}) {
     prHead: undefined as string | undefined,
     // Run once, in the middle of a tick, when a command starting with `match` runs.
     midRun: undefined as { match: string; go: ($: Engine) => void; fired?: boolean } | undefined,
+    // How many times each path was written.
+    writes: new Map<string, number>(),
+    // A process whose argv starts with this never returns: the tick that ran it hangs.
+    hang: undefined as string | undefined,
     origin: true,
     originHead: 'origin/main',
     remoteHead: 'main',
@@ -141,6 +147,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
   on('fs.write', (_, e) => {
     if (w.unwritable.has(e.path)) return { deny: `EACCES ${e.path}` }
     w.files.set(e.path, e.text)
+    w.writes.set(e.path, (w.writes.get(e.path) ?? 0) + 1)
     return { value: undefined }
   })
   on('prompt.submit', (_, e) => {
@@ -167,6 +174,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
       w.midRun.go(_ as unknown as Engine)
     }
     w.runs.push(a)
+    if (w.hang !== undefined && a.startsWith(w.hang)) return new Promise<never>(() => {})
     const ok = (stdout = '', exitCode = 0, stderr = '') => ({ value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false } })
     const cwd = String(e.init?.cwd ?? '')
     // git cannot start in a directory that is gone (Bun: posix_spawn ENOENT).
@@ -741,7 +749,7 @@ describe('a run, local CI', () => {
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     expect(w.files.get(PIECE)).toBe('')
     await cmd($, 'start')
-    expect(w.files.get(PIECE)).toContain('auto·R1·plan')
+    expect(w.files.get(PIECE)).toMatch(/^auto·\w+ 0m·R1·plan$/)
     await $.session.end({ reason: 'clear', sessionId: 'me', resume: { id: 'me' } })
     expect(w.files.get(PIECE)).toBe('')
   })
@@ -1031,6 +1039,11 @@ describe('protected paths (1.15.0)', () => {
     for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
     expect(w.merged).toHaveLength(0)
     expect((await cmd($, 'status')).text).toContain('auto-claude on')
+    // The status line asks for the person, in red, ahead of the run's counts
+    // (with the session at work on the next milestone, not idle).
+    await turnStart($)
+    await w.clock.advance(TICK)
+    expect(w.files.get(PIECE)).toMatch(/^!auto·needs you: approve #7 \d+m·R1·M/)
     // A person merges it.
     w.prState = 'MERGED'
     await w.clock.advance(TICK)
@@ -1947,6 +1960,8 @@ describe('waits on compute (:: after:, wait_until)', () => {
     await meet($, w)
     await w.clock.advance(10 * MIN)
     expect(w.prompts.some(p => p.includes('A wait looks dead'))).toBe(false)
+    // Only the wait is left: the status line says how long, and that it is polled.
+    expect(w.files.get(PIECE)).toMatch(/^auto·wait \d+m, polled [0-3]m ago·R1·M1\/2$/)
     w.cmdExit.set(ALIVE, 1)
     await w.clock.advance(7 * MIN)
     const asked = w.prompts.filter(p => p.includes('A wait looks dead'))
@@ -1957,6 +1972,7 @@ describe('waits on compute (:: after:, wait_until)', () => {
     await w.clock.advance(30 * MIN)
     expect(w.prompts.filter(p => p.includes('A wait looks dead'))).toHaveLength(1)
     expect((await cmd($, 'status')).text).toContain('alive failing')
+    expect(w.files.get(PIECE)).toMatch(/^!auto·wait \d+m, alive check failing·R1/)
   })
 
   test('a wait past its within asks the model once; past twice it the line is held and the run goes on', { timeoutMs: 60_000 }, async ($, on) => {
@@ -2945,5 +2961,79 @@ describe('the Linear agent session bridge (1.16.0)', () => {
     await standingWithHold($, w)
     await w.clock.advance(25 * MIN)
     expect(w.agent.calls).toHaveLength(0)
+  })
+})
+
+describe('the status line (1.19.0)', () => {
+  test('working while a turn runs, red once no tool was called for 30 min, then idle; a tool call counts as work', { timeoutMs: 60_000 }, async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    await turnStart($)
+    // Pulses come every 30 s: a label's minutes may trail the clock by one.
+    await w.clock.advance(5 * MIN)
+    expect(w.files.get(PIECE)).toMatch(/^auto·working [45]m·R1·M0\/2$/)
+    await w.clock.advance(6 * MIN)
+    expect(w.files.get(PIECE)).toMatch(/^auto·working 1[01]m, no tool 1[01]m·/)
+    await $.tool.call({ tool: 'Bash', command: 'ls' } as never)
+    await w.clock.advance(TICK)
+    expect(w.files.get(PIECE)).toMatch(/^auto·working 1[01]m·R1/)
+    await w.clock.advance(31 * MIN)
+    expect(w.files.get(PIECE)).toMatch(/^!auto·working 4[12]m, no tool 3[01]m·/)
+    await turnEnd($)
+    await w.clock.advance(TICK)
+    expect(w.files.get(PIECE)).toMatch(/^auto·idle 0m·R1·M0\/2$/)
+    // Quiet past a minute with the milestone open is the watchdog's (session idle), in red.
+    await w.clock.advance(2 * TICK)
+    expect(w.files.get(PIECE)).toMatch(/^!auto·stalled: session idle 1m·R1·M0\/2$/)
+  })
+
+  test('a tick that hangs is shown from the pulse, in red', { timeoutMs: 60_000 }, async ($, on) => {
+    const AFTER = 'grep -q "CACHE DONE" /data/cache.log'
+    const WAITQ = `- [ ] add() returns a+b :: check: python3 -m unittest -q test_add\n- [ ] record the cache :: check: python3 -m unittest -q test_cache :: after: ${AFTER}\n`
+    const w = world(on)
+    w.cmdExit.set(AFTER, 1)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start')
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set(GOALS, WAITQ)
+    await ready($)
+    await w.clock.advance(1_200)
+    await meet($, w)
+    await w.clock.advance(5 * MIN)
+    expect(w.files.get(PIECE)).toMatch(/^auto·wait \d+m, polled/)
+    // The wait's next poll never returns: that tick hangs, and no other starts.
+    w.hang = 'bash -lc'
+    await w.clock.advance(20 * MIN)
+    // Within the hung-tick bound the label stands, its poll growing old.
+    expect(w.files.get(PIECE)).toMatch(/^!auto·wait \d+m, unpolled 2\dm/)
+    await w.clock.advance(15 * MIN)
+    expect(w.files.get(PIECE)).toMatch(/^!auto·driver hung 3\dm·R1·M1\/2$/)
+  })
+
+  test('an unchanged piece is written again each minute, so its mtime shows the writer alive', { timeoutMs: 30_000 }, async ($, on) => {
+    const w = world(on)
+    await planned($, w)
+    // Every tick fails the same way: the label stays the same.
+    await meet($, w, () => {
+      w.freshExit = 1
+      w.unwritable.add(GOALS)
+    })
+    for (let i = 0; i < 8; i++) await w.clock.advance(TICK)
+    const piece = w.files.get(PIECE)
+    expect(piece).toMatch(/^!auto·stalled: ticks failing·R1·M/)
+    const before = w.writes.get(PIECE) ?? 0
+    await w.clock.advance(5 * MIN)
+    expect(w.files.get(PIECE)).toBe(piece)
+    // Once a minute, not on each 30 s pulse.
+    expect((w.writes.get(PIECE) ?? 0) - before).toBeGreaterThanOrEqual(4)
+    expect((w.writes.get(PIECE) ?? 0) - before).toBeLessThanOrEqual(6)
+  })
+
+  test('a run owned by another session draws nothing here', async ($, on) => {
+    const rec = { on: true, phase: 'run', root: '/repo', sessionId: 'other', hint: '', round: 1, startedAt: 0, beatAt: 0, remote: 'origin', defaultBranch: 'main', ciMode: 'local', logOffset: 0, started: 0, finished: 0, worktrees: {}, ships: [], fixes: {}, merges: 0, held: 0, queueEmpty: false }
+    const w = world(on, { 'auto:/repo': rec })
+    w.files.set(PIECE, 'auto·R1·M2/7')
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect(w.files.get(PIECE)).toBe('')
   })
 })
