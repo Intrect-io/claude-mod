@@ -729,7 +729,17 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
   const repo = slug === undefined ? [] : ['--repo', slug]
   const now = await $.clock.now()
 
+  // A met milestone whose branch adds nothing over the default branch (its check already held
+  // there) has nothing to ship: `gh pr create` fails on it with "No commits between", on every
+  // retry, until the milestone is held (1.19.4). It is done without a PR and without a deploy.
+  let noChange = false
   if (item.state === 'push') {
+    await fetchRemote($, r, wt)
+    const ahead = await run($, ['git', '-C', wt, 'rev-list', '--count', `${refOf(r)}..${item.branch}`], wt, 15_000)
+    noChange = item.pr === undefined && ahead.exitCode === 0 && ahead.stdout.trim() === '0'
+  }
+
+  if (item.state === 'push' && !noChange) {
     if (r.ciMode === 'local') return { r, item: update({ state: 'ci' }) }
     // An SSH remote that refused (no key in an unattended shell) is pushed over https instead.
     const target = (item.tried ?? []).includes('https-push') && slug !== undefined ? httpsOf(slug) : r.remote
@@ -744,7 +754,9 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
   }
 
   let failure: string | undefined
-  if (r.ciMode === 'local') {
+  if (noChange) {
+    // Nothing to verify or push: the milestone's check passed on this very tree, which is the default branch's.
+  } else if (r.ciMode === 'local') {
     await fetchRemote($, r, wt)
     const rebased = await run($, ['git', '-C', wt, 'rebase', refOf(r)], wt)
     if (rebased.exitCode !== 0) {
@@ -850,7 +862,7 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
     for (const path of new Set([item.worktree, r.worktrees[item.headRef]].filter((p): p is string => p !== undefined))) {
       await run($, ['git', '-C', r.root, 'worktree', 'remove', path], r.root)
     }
-    const landed = item.pr !== undefined ? `PR #${item.pr}` : `into ${r.defaultBranch}`
+    const landed = noChange ? `with no change (already met on ${r.defaultBranch}, no PR opened)` : item.pr !== undefined ? `PR #${item.pr}` : `into ${r.defaultBranch}`
     const mergedAt = await $.clock.now()
     let next: AutoRecord = {
       ...r,
@@ -878,12 +890,14 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
       const shipping = next.ships.filter(s => s.goal !== item.goal && s.state !== 'merged' && s.state !== 'held').map(s => s.goal)
       const remaining = Object.fromEntries(ids.map(id => [id, [...open, ...shipping].filter(c => lineIssues(c).includes(id)).length]))
       const agentOwned = agentOwnedIn(next, ids)
-      const done = await onMerged($, next.linear, ids, `Merged ${landed}${sha !== '' ? ` (${r.defaultBranch} at ${sha})` : ''}: ${item.goal.slice(0, 160)}`, { remaining, agentOwned })
+      const evidence = noChange ? `Already met on ${r.defaultBranch}${sha !== '' ? ` (at ${sha})` : ''}, so no PR was opened and nothing was deployed: ${item.goal.slice(0, 160)}` : `Merged ${landed}${sha !== '' ? ` (${r.defaultBranch} at ${sha})` : ''}: ${item.goal.slice(0, 160)}`
+      const done = await onMerged($, next.linear, ids, evidence, { remaining, agentOwned })
       for (const line of done.lines) await appendQueue($, r.root, line)
       next = { ...next, linear: done.sync }
     }
     const merged = update({ state: 'merged', note: undefined })
-    if (r.deploy !== undefined && !(await superseded($, r))) next = await deployAfter($, next, r.deploy, landed)
+    // Nothing changed, so there is nothing to deploy.
+    if (!noChange && r.deploy !== undefined && !(await superseded($, r))) next = await deployAfter($, next, r.deploy, landed)
     return { r: next, item: merged }
   }
 
