@@ -24,6 +24,9 @@ export type LiveFacts = {
   stall?: Stall
   // PRs held for the person (protected files), and since when.
   awaiting: readonly { pr?: number; since: number }[]
+  // PR numbers among `awaiting` the person already approved (/auto-claude approve): the driver
+  // merges them on its next tick, so they no longer ask for the person.
+  approved?: readonly number[]
   // The main turn running now, and the last tool call of the session (any loop).
   turnSince?: number
   lastToolAt?: number
@@ -70,10 +73,16 @@ export function liveLabel(f: LiveFacts): string {
   const stalled = (st: Stall) => `!stalled: ${STALL_WORD[st.kind]}${st.pr !== undefined ? ` #${st.pr}` : ''}${st.ms !== undefined ? ` ${age(st.ms)}` : ''}`
   if (f.tickHungMs !== undefined) return `!driver hung ${age(f.tickHungMs)}`
   if (f.stall !== undefined && !SOFT.has(f.stall.kind)) return stalled(f.stall)
-  if (f.awaiting.length > 0) {
-    const first = Math.min(...f.awaiting.map(a => a.since))
-    return `!needs you: approve ${f.awaiting.map(a => `#${a.pr ?? '?'}`).join(' ')} ${since(first)}`
+  const isApproved = (a: { pr?: number }) => a.pr !== undefined && (f.approved ?? []).includes(a.pr)
+  const pending = f.awaiting.filter(a => !isApproved(a))
+  if (pending.length > 0) {
+    const first = Math.min(...pending.map(a => a.since))
+    return `!needs you: approve ${pending.map(a => `#${a.pr ?? '?'}`).join(' ')} ${since(first)}`
   }
+  // Approved, not yet landed: the person has nothing left to do (the merge, and a deploy after
+  // it, can take a while before the PR leaves this state).
+  const approving = f.awaiting.filter(isApproved)
+  if (approving.length > 0) return `merging approved ${approving.map(a => `#${a.pr}`).join(' ')}`
   // A watched job that looks dead, or that the driver stopped polling.
   const dead = f.waits.find(w => (w.aliveFails ?? 0) > 0)
   if (dead !== undefined) return `!wait ${since(dead.since)}, alive check failing`

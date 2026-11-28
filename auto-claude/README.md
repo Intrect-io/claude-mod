@@ -373,6 +373,7 @@ The piece says what the run is doing now and since when, ahead of its round, mil
 | `!driver hung 34m` | The driver's tick has run past 30 min without ending: nothing is polled, shipped or merged. Drawn from the pulse, which runs apart from the tick. |
 | `!stalled: <cause> 20m` | `/auto-claude status`'s `stalled:` cause, in short (`session idle`, `no progress`, `CI stuck #12`, `ship stuck #12`, `plan overdue`, `ticks failing`, `orphaned`). The same function decides both. `plan overdue` and `no progress` give way to a turn at work and to a PR waiting on approve, which explain them. |
 | `!needs you: approve #414 3h0m` | A PR held for protected files waits on `/auto-claude approve`. |
+| `merging approved #414` | The person approved it. Since 1.20.3 the label changes at once (before, it kept asking until the merge and any deploy after it had finished). The driver merges that head on its next tick; a push to the PR voids the approval and the label asks again. |
 | `!wait 6h0m, alive check failing` / `!wait 6h0m, unpolled 12m` | A watched job's `:: alive:` fails, or its `:: after:` has not been polled for 10 min. |
 | `working 42m` / `planning 4m` | A turn runs. `, no tool 12m` once no tool call (a subagent's included) came for 10 min; red past 30 min. |
 | `judging`, `committing 2m`, `background 50m` | The Stop hook runs the check; a background `git commit`; a workflow or subagent the session waits on. |

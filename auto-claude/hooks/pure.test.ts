@@ -890,6 +890,12 @@ describe('the status line label (1.19.0)', () => {
     expect(at({ waits: [{ since: 10 * H - 6 * H, checkedAt: 10 * H - 12 * MIN }] })).toBe('!wait 6h0m, unpolled 12m')
     expect(at({ waits: [{ since: 10 * H - 6 * H, checkedAt: 10 * H - 1 * MIN, aliveFails: 1 }] })).toBe('!wait 6h0m, alive check failing')
     expect(at({ awaiting: [{ pr: 414, since: 10 * H - 3 * H }, { since: 10 * H - H }] })).toBe('!needs you: approve #414 #? 3h0m')
+    // Approved with /auto-claude approve: nothing is left for the person, only the merge.
+    const waiting = [{ pr: 414, since: 10 * H - 3 * H }, { pr: 415, since: 10 * H - H }]
+    expect(at({ awaiting: waiting, approved: [414] })).toBe('!needs you: approve #415 1h0m')
+    expect(at({ awaiting: waiting, approved: [414, 415] })).toBe('merging approved #414 #415')
+    // An approval for a PR that no longer waits changes nothing.
+    expect(at({ awaiting: [waiting[0]!], approved: [999] })).toBe('!needs you: approve #414 3h0m')
     expect(at({ stall: { kind: 'ci-stuck', pr: 9, ms: 95 * MIN, text: 'x' } })).toBe('!stalled: CI stuck #9 1h35m')
     expect(at({ stall: { kind: 'tick-fails', text: 'x' } })).toBe('!stalled: ticks failing')
     expect(at({ tickHungMs: 31 * MIN })).toBe('!driver hung 31m')
