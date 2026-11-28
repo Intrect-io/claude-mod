@@ -1771,6 +1771,9 @@ describe('Linear sync', () => {
       issues: [{ id: 'KT-1', title: 'add() is wrong', updatedAt: '2026-11-13T10:00:00Z', status: 'Todo', statusType: 'unstarted' }] as Array<Record<string, string>>,
       comments: {} as Record<string, Array<{ body: string; createdAt: string }>>,
       writes: [] as string[],
+      // Like Linear on 2026-11-22 (AGT-4926): a comment moves the issue's updatedAt (1.20.1).
+      commentMoves: false,
+      commentN: 0,
     }
     w.files.set('/home/.claude/linear.json', JSON.stringify({ repo_mapping: { repo: { team: 'T', projectName: 'Repo' } } }))
     const text = (v: unknown) => ({ value: { content: [{ type: 'text' as const, text: JSON.stringify(v) }], isError: false } })
@@ -1788,6 +1791,8 @@ describe('Linear sync', () => {
       }
       if (e.tool === 'save_comment') {
         l.writes.push(`comment ${String(a.issueId)} ${String(a.body)}`)
+        const moved = l.commentMoves ? l.issues.find(i => i.id === a.issueId) : undefined
+        if (moved !== undefined) moved.updatedAt = `2026-11-13T15:00:${String(l.commentN++).padStart(2, '0')}Z`
         ;(l.comments[String(a.issueId)] ??= []).push({ body: String(a.body), createdAt: '2026-11-13T11:00:00Z' })
         return text({ id: 'c' })
       }
@@ -1882,6 +1887,29 @@ describe('Linear sync', () => {
     expect((await $.classic.Stop(STOP)).block).toBeUndefined()
     await w.clock.advance(TICK)
     expect(l.writes.filter(x => x.startsWith('comment KT-9')).at(-1)).toContain('was held')
+  })
+
+  test('held comment is not a change: a deferred milestone on a person-owned issue queues no follow-up from its own comment, even when the comment moves updatedAt; a person\'s later comment still does (1.20.1)', async ($, on) => {
+    const w = world(on)
+    const l = linear(on, w)
+    l.commentMoves = true
+    l.issues.push({ id: 'KT-9', title: 'sub() is wrong', updatedAt: '2026-11-13T10:00:00Z', status: 'Todo', statusType: 'unstarted' })
+    await plannedWith($, w, QUEUE.replace('- [ ] add()', '- [ ] [KT-9] add()'))
+    await w.clock.advance(TICK)
+    expect((await $.tool.call({ tool: 'mcp__auto-claude__defer_goal', reason: 'needs a decision on rounding', category: 'human-decision' } as never)).deny).toBeUndefined()
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
+    await w.clock.advance(TICK)
+    expect(l.writes.filter(x => x.startsWith('comment KT-9')).at(-1)).toContain('was held')
+    expect(l.issues.find(i => i.id === 'KT-9')!.updatedAt).toBe('2026-11-13T15:00:00Z')
+    const followUps = () => parseQueue(w.files.get(GOALS) ?? '').filter(i => i.condition.startsWith('[KT-9]') && i.condition.includes('comments and changes'))
+    // The next sync (every 10 min) reads KT-9, whose updatedAt the held comment moved: no follow-up.
+    await w.clock.advance(11 * MIN)
+    expect(l.writes.filter(x => x.startsWith('comment KT-9'))).toHaveLength(1)
+    expect(followUps()).toEqual([])
+    // A person's comment after it is still a change (before the run's other milestone ends it).
+    l.comments['KT-9'] = [...(l.comments['KT-9'] ?? []), { body: 'please handle negatives too', createdAt: '2026-11-13T20:00:00Z' }]
+    await w.clock.advance(10 * MIN)
+    expect(followUps()).toHaveLength(1)
   })
 
   test('last line: a single line naming an issue moves it to Done with the evidence comment, as before', async ($, on) => {

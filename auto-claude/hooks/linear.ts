@@ -322,6 +322,10 @@ export async function onHeld($: EngineInterface, sync: LinearSync, ids: readonly
     if (agentOwned.has(id)) continue
     try {
       await comment($, id, `The milestone for this issue was held: ${why.slice(0, 300)}. The issue stays open.`)
+      // Linear can move updatedAt for the driver's own comment (AGT-4926, 2026-11-22: the issue's
+      // updatedAt equals the held comment's), which the next sync read as a change and queued a
+      // follow-up for (1.20.1). Covered like onStart's state write.
+      sync = await restamp($, sync, id)
     } catch (error) {
       sync = { ...sync, error: `${id}: ${String(error).slice(0, 160)}` }
     }
