@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { baselineSeen, lineIssues, MAX_FOLLOW_UPS, planSync } from './linear'
+import { baselineSeen, isOwnComment, lineIssues, MAX_FOLLOW_UPS, planSync, stampOf } from './linear'
+import { activityFor } from './agent'
 
 import { findingsOf, parseDeploy, scriptsOf, specOfPlan } from './deploy'
 import { parseVerdict, transcriptTail } from './evaluator'
@@ -888,5 +889,36 @@ describe('the status line label (1.19.0)', () => {
     expect(at({ awaiting: [{ pr: 7, since: 10 * H - 30 * MIN }], stall: idle })).toBe('!needs you: approve #7 30m')
     expect(at({ stall: idle, judging: true })).toBe('!stalled: no progress 20m')
     expect(at({ ...turn, stall: { kind: 'ci-stuck', pr: 4, ms: 95 * MIN, text: 'x' } })).toBe('!stalled: CI stuck #4 1h35m')
+  })
+})
+
+describe('Linear sync: the app is not a person (1.19.1)', () => {
+  const issue = { id: 'AGT-4926', title: 'make the docs nicer', updatedAt: '2026-11-22T14:01:00Z', statusType: 'started' }
+  const seen = { 'AGT-4926': '2026-11-22T14:15:56Z' }
+  const bodyOf = (kind: 'merged' | 'stopped' | 'held' | 'deferred' | 'diff-judge-hold' | 'awaiting-human') => {
+    const a = activityFor({ kind, goal: '[AGT-4926] make the docs nicer', reason: 'no end state', pr: 'https://github.com/o/r/pull/9' })
+    return a.type === 'action' ? a.action : a.body
+  }
+
+  test('activity comments are not changes: an elicitation and the session root after a deferral queue no follow-up line', () => {
+    const own = [
+      { body: bodyOf('deferred'), createdAt: '2026-11-22T14:24:49Z' },
+      { body: '[auto-claude] The milestone for this issue was held: deferred.', createdAt: '2026-11-22T14:24:48Z' },
+      { body: 'This thread is for an agent session with auto-claude.', createdAt: '2026-11-22T14:24:50Z' },
+    ]
+    const got = planSync([issue], { 'AGT-4926': own }, seen, new Set(), new Set())
+    expect(got.append).toEqual([])
+    expect(got.seen['AGT-4926']).toBe('2026-11-22T14:15:56Z')
+  })
+
+  test('activity comments are not changes: every body activityFor writes is the app\'s own, a person\'s reply is not', () => {
+    for (const kind of ['merged', 'stopped', 'held', 'deferred', 'diff-judge-hold', 'awaiting-human'] as const) expect(isOwnComment(bodyOf(kind))).toBe(true)
+    expect(isOwnComment('  This thread is for an agent session with auto-claude.')).toBe(true)
+    expect(isOwnComment('Landed is a word I use too, but this is my answer: add a table of endpoints.')).toBe(false)
+    const person = { body: 'Add a table of the session API endpoints.', createdAt: '2026-11-22T15:00:00Z' }
+    const own = { body: bodyOf('held'), createdAt: '2026-11-22T16:00:00Z' }
+    expect(stampOf(issue, [person, own])).toBe('2026-11-22T15:00:00Z')
+    const got = planSync([issue], { 'AGT-4926': [own, person] }, seen, new Set(), new Set())
+    expect(got.append.map(i => i.id)).toEqual(['AGT-4926'])
   })
 })
