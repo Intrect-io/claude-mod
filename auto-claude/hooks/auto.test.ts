@@ -110,7 +110,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
     nameStatus: '',
     patch: '',
     // The linear-agent Worker behind curl: events served once each, every call, and whether it is down.
-    agent: { events: [] as unknown[], calls: [] as Array<{ method: string; path: string; body: any }>, down: false, failPosts: false, nextIssue: 101, fingerprints: [] as string[], issueFails: 0, triaged: true },
+    agent: { events: [] as unknown[], calls: [] as Array<{ method: string; path: string; body: any }>, down: false, failPosts: false, nextIssue: 101, fingerprints: [] as string[], issueFails: 0, triaged: true, closed: [] as string[], issueReadFails: false },
     clock: mock.clock(on, { now: 1_000 }),
   }
   const removed = (path: string) => [...w.gone].some(g => path === g || path.startsWith(`${g}/`))
@@ -2472,6 +2472,8 @@ describe('the Linear agent session bridge (1.16.0)', () => {
     on('mcp.call', (_, e) => {
       if (e.tool === 'list_issues') return text({ issues: openIssues(String(e.args.state)), hasNextPage: false })
       if (e.tool === 'list_comments') return text({ comments: [] })
+      if (e.tool === 'get_issue' && w.agent.issueReadFails) return { value: { content: [{ type: 'text' as const, text: 'Linear API 502' }], isError: true } }
+      if (e.tool === 'get_issue' && w.agent.closed.includes(String(e.args.id))) return text({ id: String(e.args.id), updatedAt: '2026-11-20T00:00:00Z', statusType: 'completed' })
       return text({ id: String(e.args.id ?? 'x'), updatedAt: '2026-11-20T00:00:00Z' })
     })
   }
@@ -2552,6 +2554,48 @@ describe('the Linear agent session bridge (1.16.0)', () => {
     expect(w.files.get(LOG)).toContain('"event":"agent-stop"')
     expect(w.files.get(LOG)).toContain('"as":"line"')
     expect(w.files.get(LOG)).toContain('"as":"decision"')
+  })
+
+  test('bridge skips a deferred delegation: an issue the plan deferred as spec-ambiguous gets no line, its reply still lands (1.19.2)', async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    w.agent.events.push(created(1, 'AGT-2', 'sess-2'), created(2, 'AGT-3', 'sess-3'))
+    await start($, w, QUEUE, `${PLAN}- **Deferred (spec-ambiguous).** [AGT-3] "make the docs nicer" names no end state.\n`)
+    await w.clock.advance(TICK)
+    let queue = parseQueue(w.files.get(GOALS) ?? '')
+    // An open, non-deferred delegation is still queued.
+    expect(queue.filter(i => i.condition.startsWith('[AGT-2]'))).toHaveLength(1)
+    expect(queue.some(i => i.condition.startsWith('[AGT-3]'))).toBe(false)
+    expect(w.files.get(LOG)).toContain('"issue":"AGT-3","queued":false,"reason":"spec-ambiguous"')
+    // It is asked in its session instead (1.17.0), once.
+    expect(posts(w, '/v1/activity').filter(p => p.body.sessionId === 'sess-3' && p.body.content.type === 'elicitation')).toHaveLength(1)
+    w.agent.events.push({ id: 3, action: 'prompted', sessionId: 'sess-3', projectId: 'proj-1', identifier: 'AGT-3', prompt: 'add a table of the session API endpoints' })
+    await w.clock.advance(MIN + TICK)
+    queue = parseQueue(w.files.get(GOALS) ?? '')
+    expect(queue.some(i => i.condition.startsWith('[AGT-3] what the person asked'))).toBe(false)
+    expect(w.files.get(PLAN_FILE)).toContain('- **Linear AGT-3 (agent session).** The person wrote: add a table of the session API endpoints')
+    expect(w.files.get(LOG)).toContain('"event":"agent-prompt"')
+  })
+
+  test('bridge skips a closed delegation: a created event for an issue already done gets no line; an unreadable issue is queued (1.19.2)', async ($, on) => {
+    const w = world(on)
+    bridge(on, w)
+    w.agent.closed = ['AGT-4']
+    w.agent.events.push(created(1, 'AGT-4', 'sess-4'), created(2, 'AGT-5', 'sess-5'))
+    await start($, w, QUEUE)
+    await w.clock.advance(TICK)
+    let queue = parseQueue(w.files.get(GOALS) ?? '')
+    expect(queue.some(i => i.condition.startsWith('[AGT-4]'))).toBe(false)
+    expect(queue.filter(i => i.condition.startsWith('[AGT-5]'))).toHaveLength(1)
+    expect(w.files.get(LOG)).toContain('"issue":"AGT-4","queued":false,"reason":"closed"')
+    expect(w.files.get(LOG)).toContain('"issue":"AGT-5","queued":true')
+    // Fail open: when the issue cannot be read, the delegation is queued and the error logged.
+    w.agent.issueReadFails = true
+    w.agent.events.push(created(3, 'AGT-6', 'sess-6'))
+    await w.clock.advance(MIN + TICK)
+    queue = parseQueue(w.files.get(GOALS) ?? '')
+    expect(queue.filter(i => i.condition.startsWith('[AGT-6]'))).toHaveLength(1)
+    expect(w.files.get(LOG)).toMatch(/"issue":"AGT-6","queued":true,"error":"[^"]*502/)
   })
 
   test('agent session: an unreachable Worker is told once and retried on the next poll; the run goes on', async ($, on) => {
