@@ -306,6 +306,7 @@ async function liveFacts($: EngineInterface, r: AutoRecord, tickHungMs?: number)
     // A hung tick may hang on what stallFacts reads too: no more I/O then.
     ...(tickHungMs !== undefined ? { tickHungMs } : { stall: stallOf(r, await stallFacts($, r)) }),
     awaiting: awaitingHuman(r.ships).map(s => ({ pr: s.pr, since: s.since })),
+    approved: Object.keys(await readApprovals($, r.root)).map(Number),
     ...(watch.turnActive && watch.turnSince !== undefined ? { turnSince: watch.turnSince } : {}),
     ...(watch.lastToolAt !== undefined ? { lastToolAt: watch.lastToolAt } : {}),
     judging: watch.judging,
@@ -2074,6 +2075,8 @@ async function approveCommand($: EngineInterface, r: AutoRecord, arg: string | u
   if (sha === '') return `Not approved: the head of PR #${item.pr} (${r.remote}/${item.headRef}) could not be read.`
   await $.store.set(APPROVE(r.root), { ...(await readApprovals($, r.root)), [String(item.pr)]: { sha, at: await $.clock.now() } })
   await appendLog($, r.root, { event: 'approved', run: r.startedAt, goal: item.goal, pr: item.pr, sha })
+  // The status line stops asking for the person now, not when the next tick has merged it.
+  if (activeRoot === r.root) await show($, r)
   if (!r.on) return `Approved PR #${item.pr} at ${sha.slice(0, 8)}, but the run is ${r.phase}: /${COMMAND} resume lets auto-claude merge it, or merge it on GitHub.`
   if (activeRoot === r.root) $.clock.after(100, () => void tickNow?.())
   return `Approved PR #${item.pr} at ${sha.slice(0, 8)}: auto-claude merges it at that head on its next tick${r.deploy !== undefined ? ', deploys' : ''} and goes on. A push to the PR before then voids the approval.`

@@ -1193,6 +1193,30 @@ describe('a person in the loop (1.18.0)', () => {
     expect(w.merged).toHaveLength(1)
   })
 
+  test('approve: the status line stops asking for the person as soon as they approve, before the merge', async ($, on) => {
+    const w = world(on)
+    await awaiting($, w)
+    await turnStart($)
+    await w.clock.advance(TICK)
+    expect(w.files.get(PIECE)).toMatch(/^!auto·needs you: approve #7 /)
+    await cmd($, 'approve')
+    // Written by the command itself: no tick has run yet.
+    expect(w.merged).toHaveLength(0)
+    expect(w.files.get(PIECE)).toMatch(/^auto·merging approved #7·/)
+    expect(w.files.get(PIECE)).not.toContain('needs you')
+  })
+
+  test('approve: a head pushed after the approval puts the status line back to asking for the person', async ($, on) => {
+    const w = world(on)
+    await awaiting($, w)
+    await turnStart($)
+    await cmd($, 'approve 7')
+    w.prHead = 'moved123456'
+    await w.clock.advance(TICK)
+    expect(w.merged).toHaveLength(0)
+    expect(w.files.get(PIECE)).toMatch(/^!auto·needs you: approve #7 /)
+  })
+
   test('approve: a command the person did not type is refused, and nothing merges', async ($, on) => {
     const w = world(on)
     await awaiting($, w)
