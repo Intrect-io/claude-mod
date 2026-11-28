@@ -57,6 +57,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
     merged: [] as string[],
     // `gh pr merge` answers an error (a lost reply), and what `gh pr view` says of the PR.
     mergeFails: false,
+    emptyBranch: false,
     // `gh pr merge` refused outright (a conflict, a required review): the PR stays open.
     mergeRefused: false,
     prState: 'OPEN',
@@ -224,6 +225,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
     if (a.includes('symbolic-ref')) return w.originHead === '' ? ok('', 128) : ok(`${w.originHead}\n`)
     if (a.includes('ls-remote --symref')) return ok(`ref: refs/heads/${w.remoteHead}\tHEAD\nabc123\tHEAD\n`)
     if (a.startsWith('gh repo view')) return ok('', w.github ? 0 : 1)
+    if (a.includes(' rev-list --count ') && w.emptyBranch) return ok('0\n')
     if (a.startsWith('gh pr create')) return ok('https://github.com/o/r/pull/7\n')
     if (a.startsWith('gh pr checks')) {
       if (a.includes('--required')) {
@@ -772,6 +774,19 @@ describe('a run, local CI', () => {
   })
 })
 
+describe('a run, local CI, empty branch (1.19.4)', () => {
+  test('empty branch lands without a PR: with local CI the milestone is done with no push to main and no deploy', async ($, on) => {
+    const w = world(on)
+    w.emptyBranch = true
+    await planned($, w, PLAN_DEPLOY)
+    await meet($, w)
+    await w.clock.advance(TICK)
+    expect(w.runs.some(r => r.includes('HEAD:main'))).toBe(false)
+    expect(deployRuns(w)).toEqual([])
+    expect(w.files.get(GOALS)).toMatch(/- \[x\] add\(\) returns a\+b/)
+  })
+})
+
 describe('a run, github CI', () => {
   test('a met milestone with green CI reaches its successor\'s start in one tick; a pending CI is looked at every 10 s', async ($, on) => {
     const w = world(on)
@@ -790,6 +805,27 @@ describe('a run, github CI', () => {
     await w.clock.advance(10_000)
     expect(w.ciLooks).toBe(looks + 1)
     expect(w.merged).toHaveLength(2)
+  })
+
+  test('empty branch lands without a PR: a met milestone whose branch adds no commits over main is done with no gh pr create, no merge and no deploy (1.19.4)', async ($, on) => {
+    const w = world(on)
+    w.github = true
+    w.emptyBranch = true
+    await planned($, w, PLAN_DEPLOY)
+    await meet($, w)
+    await w.clock.advance(TICK)
+    expect(w.runs.some(a => a.startsWith('gh pr create'))).toBe(false)
+    expect(w.merged).toEqual([])
+    expect(deployRuns(w)).toEqual([])
+    expect(w.files.get(GOALS)).toMatch(/- \[x\] add\(\) returns a\+b/)
+    expect(w.notifies.some(n => n.includes('merged with no change (already met on main, no PR opened): add() returns a+b'))).toBe(true)
+    // The run went on to the next milestone, which is built as usual.
+    expect(w.adds).toHaveLength(2)
+    // A branch that does add commits still gets its PR (the mock's default rev-list answer is empty output).
+    w.emptyBranch = false
+    await meet($, w)
+    expect(w.runs.some(a => a.startsWith('gh pr create'))).toBe(true)
+    expect(w.merged).toHaveLength(1)
   })
 
   test('the session keeps building while a PR waits on CI: the next milestone is stacked on its branch, then rebased off it and shipped once it lands', { timeoutMs: 30_000 }, async ($, on) => {
