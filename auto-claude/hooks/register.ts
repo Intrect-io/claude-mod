@@ -18,6 +18,7 @@ import { BUILTIN_PROTECTED, classifyDiff, diffAction, judgeDiffText, parseNameSt
 import { judgeDiff } from './evaluator'
 import { activityDue, activityOf, statsDays, statsText, summarizeStats } from './stats'
 import type { Activity } from './stats'
+import { addStep, emptyLedger, isEmpty, takeGoal, type StepUsage, type TokenBucket, type TokenLedger } from './tokens'
 import type { QueueItem } from './queue'
 import { baseline, getIssue, isOpen, lineIssues, onHeld, onMerged, onStart, projectOf, readChanges, SYNC_MS } from './linear'
 import type { StallFacts } from './ship'
@@ -501,11 +502,64 @@ async function takeOver($: EngineInterface, r: AutoRecord, why: string, gapMs?: 
   return `Resumed: phase ${next.phase}, round ${next.round}.${clearedNote(stop)}`
 }
 
+// ---------------------------------------------------------------- token use per milestone (1.20.0)
+
+// The ledger lives in the plugin store, one key per repository: a reload keeps it, and
+// it is apart from the run record, which a tick reads, works on and writes back (a step
+// counted in between would be lost, or would undo the tick's write).
+const TOKENS = (root: string) => `tokens:${root}`
+// Steps are counted one at a time, in order: subagents' steps arrive concurrently.
+let tokenChain: Promise<void> = Promise.resolve()
+
+async function readLedger($: EngineInterface, root: string): Promise<TokenLedger | undefined> {
+  const v = await $.store.get(TOKENS(root)).catch(() => undefined)
+  return v !== null && typeof v === 'object' && typeof (v as TokenLedger).run === 'number' ? (v as TokenLedger) : undefined
+}
+
+// One step the owning session took: counted to the milestone the loop is building, or to `other`.
+async function countStep($: EngineInterface, root: string, subagent: boolean, usage: StepUsage): Promise<void> {
+  const r = await readRecord($, root)
+  // Only the session running the run: another session in the repository has a person in it.
+  if (r === undefined || !owns(r) || r.sessionId !== (await $.session.id())) return
+  const goal = (await readLoop($, root))?.current?.condition
+  await $.store.set(TOKENS(root), addStep(await readLedger($, root), r.startedAt, goal, subagent, usage))
+}
+
+function noteStep($: EngineInterface, root: string, subagent: boolean, usage: StepUsage): Promise<void> {
+  tokenChain = tokenChain.then(() => countStep($, root, subagent, usage)).catch(() => undefined)
+  return tokenChain
+}
+
+const tokenFields = (b: TokenBucket) => ({ main: b.main, sub: b.sub })
+
+// A milestone finished (met, blocked or deferred): its tokens, and what `other` gathered since, go
+// to the log as one event each, so a run's history holds what every milestone cost.
+async function logTokens($: EngineInterface, r: AutoRecord, goal: string | undefined): Promise<void> {
+  try {
+    await tokenChain
+    let ledger = await readLedger($, r.root)
+    if (ledger === undefined || ledger.run !== r.startedAt) return
+    if (goal !== undefined) {
+      const taken = takeGoal(ledger, goal)
+      ledger = taken.ledger
+      if (taken.bucket !== undefined && !isEmpty(taken.bucket)) await appendLog($, r.root, { event: 'tokens', run: r.startedAt, goal, ...tokenFields(taken.bucket) })
+    }
+    if (!isEmpty(ledger.other)) {
+      await appendLog($, r.root, { event: 'tokens', run: r.startedAt, scope: 'other', ...tokenFields(ledger.other) })
+      ledger = { ...ledger, other: emptyLedger(r.startedAt).other }
+    }
+    await $.store.set(TOKENS(r.root), ledger)
+  } catch {
+    // Accounting never stops the run.
+  }
+}
+
 async function stopRun($: EngineInterface, r: AutoRecord, why: string, phase: 'stopped' | 'done' = 'stopped'): Promise<AutoRecord> {
   const next: AutoRecord = { ...r, on: false, phase, note: why, pausedPhase: r.phase === 'plan' || r.phase === 'standby' ? r.phase : 'run' }
   await stopLoop($, r.root)
   await writeRecord($, next)
   // The log is where a run's history is read back; its end was missing there.
+  await logTokens($, r, undefined)
   await appendLog($, r.root, { event: `run-${phase}`, reason: why })
   await tell($, next, `${phase === 'done' ? 'finished' : 'stopped'}: ${why}. ${summary(next.merges, next.held, next.ships)}`)
   return next
@@ -1675,6 +1729,7 @@ async function readEvents($: EngineInterface, r: AutoRecord): Promise<AutoRecord
       if (e.goal !== undefined && r.buildOnly !== true) r = await agentMoment($, r, { kind: 'start', goal: e.goal })
     } else if (e.event === 'met' && e.goal !== undefined && e.branch !== undefined) {
       r = { ...r, finished: r.finished + 1 }
+      await logTokens($, r, e.goal)
       // Stopped in its Linear session while it was built: not shipped.
       if (r.buildOnly !== true && stoppedGoal(r, e.goal)) {
         r = { ...r, held: r.held + 1 }
@@ -1682,6 +1737,7 @@ async function readEvents($: EngineInterface, r: AutoRecord): Promise<AutoRecord
       } else if (r.buildOnly !== true) r = await metToShip($, r, e.goal, e.branch)
     } else if (e.event === 'blocked' || e.event === 'deferred') {
       r = { ...r, held: r.held + 1, finished: r.finished + 1 }
+      await logTokens($, r, e.goal)
       // A repair that could not be built: the stacked milestones go on, and their deploys count toward the stop.
       if (e.goal !== undefined && e.goal === r.repair) r = { ...r, repair: undefined }
       const parent: string | undefined = e.goal === undefined ? undefined : r.fixes[e.goal]
@@ -2190,6 +2246,17 @@ export const register: Register = (on, options) => {
       watch.turnSince = await $.clock.now()
     }
     return next(e)
+  })
+
+  // Pass-through: the step goes on unchanged, its usage is counted afterwards (1.20.0).
+  // A subagent's step (Agent spawns; workflow agents where the engine reports them as
+  // subagents) carries agentId.
+  on('turn.step', async function* ($, e, next) {
+    const result = yield* next(e)
+    const usage = (result as { usage?: StepUsage } | undefined)?.usage
+    // Awaited (a few store reads, after the answer has streamed), so a step is counted before the turn goes on.
+    if (usage !== undefined && activeRoot !== undefined) await noteStep($, activeRoot, (e as { agentId?: string }).agentId !== undefined, usage)
+    return result
   })
 
   on('turn.complete', async ($, e, next) => {

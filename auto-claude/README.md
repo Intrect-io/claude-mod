@@ -9,7 +9,7 @@ An unattended run of one repository, through to what it built being live. Give i
 /auto-claude start --queue # build .claude/goals.md as it is: branches only, nothing shipped
 /auto-claude approve [pr]  # let a PR held for protected files land (see "Protected paths")
 /auto-claude standby       # a finished run (or the one going) stands by from now on
-/auto-claude stats [days]  # where each run's time went, over the last 7 days by default
+/auto-claude stats [days]  # where each run's time and tokens went, over the last 7 days by default
 /auto-claude status | stop (or off) | resume
 ```
 
@@ -98,6 +98,14 @@ For each run it also prints its merges, holds and deferrals, and the idle-quiet 
 - A run ends at its `run-done` or `run-stopped` event, or where the next run's first event comes. Stopped time inside a run is left out.
 - Merges and holds are logged by the driver (`merged`, `held`) in the same file from 1.11.0. It is a file of its own because the loop's Stop hook rewrites `goal-loop.log` whole, and in 1.11.0 a tick writing that log at the same moment lost the hook's `met` line (seen in the tests). Since 1.12.0 those appends run one after another, and the activity events, which are frequent, stay in their own file. Blocked lines and deferrals come from the loop's `blocked` and `deferred` events. Runs before 1.11.0 have no activity events, so they are not shown.
 - The log keeps its last 2000 lines, so stats covers about as far back as those reach.
+
+**Token use per milestone (since 1.20.0).** Runs work in ultracode, a standing multi-agent mode, and multi-agent work costs many times the tokens of a single agent. So the driver measures what each milestone cost:
+- A pass-through `turn.step` hook reads each step's usage after the answer: `input_tokens`, `output_tokens`, `cache_read_input_tokens` and `cache_creation_input_tokens`. It never changes the step.
+- Only the session that owns the run counts. Main-loop steps and subagent steps (those with an `agentId`: Agent spawns, and workflow agents where the engine reports them as subagents) are kept apart.
+- A step goes to the milestone the loop is building, or to an `other` bucket while none is (planning, replans, the final check's turn).
+- The ledger is in the plugin store, one key per repository (`tokens:<root>`), so a reload keeps it. It is apart from the run record, so a step never races a tick's write.
+- When a milestone ends (met, blocked or deferred), one `tokens` event goes to `.claude/goal-loop.log`: `{ goal, main, sub }`, each with `steps`, `input`, `output`, `cacheRead` and `cacheWrite`. What `other` gathered goes with it as `{ scope: "other", … }`, and once more when the run ends. That is one line per milestone, not one per step, because the log is capped.
+- `/auto-claude stats` adds a line per run: total tokens and steps, each kind, the subagents' share, and the three costliest milestones. A milestone built twice (deferred, then again) adds up.
 
 ## The diff judge
 

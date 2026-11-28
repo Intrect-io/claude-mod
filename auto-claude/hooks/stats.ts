@@ -6,6 +6,7 @@
 // pure: it takes the log's lines and the time now.
 
 import type { AutoPhase, ShipState } from '../types'
+import { bucketOf, bucketTotal, countTotal, shortCount, sumBuckets, type TokenBucket } from './tokens'
 
 export const STATES = ['building', 'waiting-ci', 'waiting-after', 'standby', 'idle-quiet'] as const
 export type StatState = (typeof STATES)[number]
@@ -66,9 +67,12 @@ export type RunStats = {
   judged: number
   judgeHolds: number
   open: boolean
+  // Token use (1.20.0), from the run's `tokens` events: all of it, the subagents' share of the
+  // total, and the costliest milestones. Undefined when the run logged none.
+  tokens?: { total: TokenBucket; subShare: number; top: Array<{ goal: string; total: number }> }
 }
 
-type Entry = { ts: number; event: string; state?: string; run?: number; action?: string; verdict?: string; category?: string }
+type Entry = { ts: number; event: string; state?: string; run?: number; action?: string; verdict?: string; category?: string; goal?: string; bucket?: TokenBucket }
 
 function parse(lines: readonly string[]): Entry[] {
   const out: Entry[] = []
@@ -84,7 +88,7 @@ function parse(lines: readonly string[]): Entry[] {
     const o = raw as Record<string, unknown>
     const ts = typeof o.ts === 'string' ? Date.parse(o.ts) : NaN
     if (!Number.isFinite(ts) || typeof o.event !== 'string') continue
-    out.push({ ts, event: o.event, state: typeof o.state === 'string' ? o.state : undefined, run: typeof o.run === 'number' ? o.run : undefined, action: typeof o.action === 'string' ? o.action : undefined, verdict: typeof o.verdict === 'string' ? o.verdict : undefined, category: typeof o.category === 'string' ? o.category : undefined })
+    out.push({ ts, event: o.event, state: typeof o.state === 'string' ? o.state : undefined, run: typeof o.run === 'number' ? o.run : undefined, action: typeof o.action === 'string' ? o.action : undefined, verdict: typeof o.verdict === 'string' ? o.verdict : undefined, category: typeof o.category === 'string' ? o.category : undefined, goal: typeof o.goal === 'string' ? o.goal : undefined, bucket: o.event === 'tokens' ? bucketOf(o) : undefined })
   }
 
   return out.sort((a, b) => a.ts - b.ts)
@@ -128,7 +132,18 @@ export function summarizeStats(lines: readonly string[], now: number, days = 7):
     const count = (names: readonly string[]) => entries.filter(e => names.includes(e.event) && inRun(e)).length
     const deferralsBy: Record<string, number> = {}
     for (const e of entries) if (e.event === 'deferred' && inRun(e)) deferralsBy[e.category ?? 'uncategorized'] = (deferralsBy[e.category ?? 'uncategorized'] ?? 0) + 1
-    out.push({ run, from, to, deferralsBy, ms, unobservedMs, merges: count(['merged']), holds: count(['blocked', 'held']), deferrals: count(['deferred']), judged: entries.filter(e => e.event === 'diff-judge' && e.verdict !== 'skipped' && inRun(e)).length, judgeHolds: entries.filter(e => e.event === 'diff-judge' && e.action === 'hold' && inRun(e)).length, open })
+    const tokenEvents = entries.filter(e => e.event === 'tokens' && e.bucket !== undefined && e.run === run)
+    let tokens: RunStats['tokens']
+    if (tokenEvents.length > 0) {
+      const total = sumBuckets(tokenEvents.map(e => e.bucket as TokenBucket))
+      const all = bucketTotal(total)
+      // A milestone deferred and built again logs twice: its events add up.
+      const byGoal = new Map<string, number>()
+      for (const e of tokenEvents) if (e.goal !== undefined) byGoal.set(e.goal, (byGoal.get(e.goal) ?? 0) + bucketTotal(e.bucket as TokenBucket))
+      const top = [...byGoal].map(([goal, t]) => ({ goal, total: t })).sort((a, b) => b.total - a.total).slice(0, 3)
+      tokens = { total, subShare: all === 0 ? 0 : countTotal(total.sub) / all, top }
+    }
+    out.push({ ...(tokens !== undefined ? { tokens } : {}), run, from, to, deferralsBy, ms, unobservedMs, merges: count(['merged']), holds: count(['blocked', 'held']), deferrals: count(['deferred']), judged: entries.filter(e => e.event === 'diff-judge' && e.verdict !== 'skipped' && inRun(e)).length, judgeHolds: entries.filter(e => e.event === 'diff-judge' && e.action === 'hold' && inRun(e)).length, open })
   }
 
   return out.filter(r => r.to >= now - days * 86_400_000).sort((a, b) => a.from - b.from)
@@ -155,9 +170,19 @@ export function statsText(runs: readonly RunStats[], days: number): string {
     const parts = STATES.map(s => `${s} ${hm(r.ms[s])}`).join(', ')
     const unobserved = r.unobservedMs > 0 ? `, unobserved ${hm(r.unobservedMs)}` : ''
     lines.push(`- run ${when}: ${parts}${unobserved}; idle-quiet ${(idleShare(r) * 100).toFixed(1)}%; ${r.merges} merged, ${r.holds} held, ${r.deferrals} deferred${r.deferrals > 0 ? ` (${Object.entries(r.deferralsBy).map(([k, n]) => `${k} ${n}`).join(', ')})` : ''}${r.judged > 0 ? `; diff judge ${r.judged} judged, ${r.judgeHolds} held` : ''}`)
+    if (r.tokens !== undefined) lines.push(`  ${tokensText(r.tokens)}`)
   }
 
   return lines.join('\n')
+}
+
+// One line of a run's token use: by kind (main loop and subagents together), the subagents'
+// share, and the three costliest milestones.
+export function tokensText(t: NonNullable<RunStats['tokens']>): string {
+  const k = (f: 'input' | 'output' | 'cacheRead' | 'cacheWrite') => shortCount(t.total.main[f] + t.total.sub[f])
+  const steps = t.total.main.steps + t.total.sub.steps
+  const top = t.top.map(g => `${g.goal.slice(0, 60)} (${shortCount(g.total)})`).join('; ')
+  return `tokens: ${shortCount(bucketTotal(t.total))} in ${steps} step(s): input ${k('input')}, output ${k('output')}, cache read ${k('cacheRead')}, cache write ${k('cacheWrite')}; subagents ${(t.subShare * 100).toFixed(1)}%${top !== '' ? `; costliest: ${top}` : ''}`
 }
 
 // `/auto-claude stats [days]`: the days argument, 7 when absent or not a positive number.
