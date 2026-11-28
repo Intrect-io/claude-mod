@@ -1,6 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { LinearSync } from '../types'
+import { APP_COMMENT_PREFIXES } from './agent'
 
 // Linear sync (2026-11-13: runs kept missing issue updates). The driver, not
 // the model, reads the repository's Linear project on a timer and writes back:
@@ -47,11 +48,20 @@ export function isOpen(issue: Pick<LinearIssue, 'statusType'>): boolean {
   return !DONE_TYPES.has((issue.statusType ?? '').toLowerCase())
 }
 
+// A comment auto-claude or Linear wrote, never a person: the driver's own
+// (marked), the app's agent activities and Linear's session root comment
+// (1.19.1). Counting those as changes queued a follow-up after every deferral,
+// which posts them (AGT-4926, 2026-11-22: three deferrals for nothing).
+export function isOwnComment(body: string): boolean {
+  const text = body.trimStart()
+  return text.startsWith(MARK) || APP_COMMENT_PREFIXES.some(p => text.startsWith(p))
+}
+
 // The latest change on an issue: its own update, or the newest comment a
-// person wrote (the driver's own, marked, do not count).
+// person wrote (auto-claude's and Linear's own do not count).
 export function stampOf(issue: Pick<LinearIssue, 'updatedAt'>, comments: readonly LinearComment[]): string {
   let stamp = issue.updatedAt
-  for (const c of comments) if (!c.body.trimStart().startsWith(MARK) && c.createdAt > stamp) stamp = c.createdAt
+  for (const c of comments) if (!isOwnComment(c.body) && c.createdAt > stamp) stamp = c.createdAt
   return stamp
 }
 

@@ -98,23 +98,40 @@ export function eventLines(
   return { lines, sessions, prompts, stops, cursor }
 }
 
+// The fixed openings of the comment bodies activityFor writes. The app posts
+// them through the Worker as its own user, with no MARK, so the MCP sync
+// (stampOf in linear.ts) reads this list to tell them from a person's comment
+// (1.19.1). Prefixes, not author names: a display name can be renamed.
+export const ACTIVITY_PREFIXES = {
+  merged: 'Landed:',
+  stopped: 'Stopped as asked:',
+  held: 'Held, needs a person:',
+  deferred: 'Deferred, needs a person:',
+  diffJudgeHold: 'Held by the diff judge before merging:',
+  awaitingHuman: 'This PR changes protected files, so a person merges or closes it:',
+} as const
+// The root comment Linear itself writes when an agent session opens.
+export const SESSION_ROOT_PREFIX = 'This thread is for an agent session with'
+// Every comment opening that is the app's or Linear's own, never a person's.
+export const APP_COMMENT_PREFIXES: readonly string[] = [...Object.values(ACTIVITY_PREFIXES), SESSION_ROOT_PREFIX]
+
 export function activityFor(m: Moment): ActivityContent {
   const tail = [m.reason, m.pr].filter((x): x is string => typeof x === 'string' && x !== '').join('\n\n')
   switch (m.kind) {
     case 'start':
       return { type: 'action', action: 'Building', parameter: m.goal }
     case 'merged':
-      return { type: 'response', body: `Landed: ${m.goal}${m.pr !== undefined ? `\n\n${m.pr}` : ''}` }
+      return { type: 'response', body: `${ACTIVITY_PREFIXES.merged} ${m.goal}${m.pr !== undefined ? `\n\n${m.pr}` : ''}` }
     case 'stopped':
-      return { type: 'response', body: `Stopped as asked: ${m.goal} is not built or shipped further.` }
+      return { type: 'response', body: `${ACTIVITY_PREFIXES.stopped} ${m.goal} is not built or shipped further.` }
     case 'held':
-      return { type: 'elicitation', body: `Held, needs a person: ${m.goal}${tail !== '' ? `\n\n${tail}` : ''}` }
+      return { type: 'elicitation', body: `${ACTIVITY_PREFIXES.held} ${m.goal}${tail !== '' ? `\n\n${tail}` : ''}` }
     case 'deferred':
-      return { type: 'elicitation', body: `Deferred, needs a person: ${m.goal}${tail !== '' ? `\n\n${tail}` : ''}` }
+      return { type: 'elicitation', body: `${ACTIVITY_PREFIXES.deferred} ${m.goal}${tail !== '' ? `\n\n${tail}` : ''}` }
     case 'diff-judge-hold':
-      return { type: 'elicitation', body: `Held by the diff judge before merging: ${m.goal}${tail !== '' ? `\n\n${tail}` : ''}` }
+      return { type: 'elicitation', body: `${ACTIVITY_PREFIXES.diffJudgeHold} ${m.goal}${tail !== '' ? `\n\n${tail}` : ''}` }
     case 'awaiting-human':
-      return { type: 'elicitation', body: `This PR changes protected files, so a person merges or closes it: ${m.goal}${tail !== '' ? `\n\n${tail}` : ''}` }
+      return { type: 'elicitation', body: `${ACTIVITY_PREFIXES.awaitingHuman} ${m.goal}${tail !== '' ? `\n\n${tail}` : ''}` }
   }
 }
 
