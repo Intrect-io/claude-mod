@@ -1786,7 +1786,8 @@ describe('Linear sync', () => {
         l.writes.push(`state ${String(a.id)} ${String(a.state)}`)
         const issue = l.issues.find(i => i.id === a.id)
         // A write moves updatedAt, as Linear does.
-        if (issue !== undefined) Object.assign(issue, { updatedAt: '2026-11-13T11:00:00Z', statusType: a.state === 'completed' ? 'completed' : 'started' })
+        // Never backwards, as in Linear: a comment may have moved it later already.
+        if (issue !== undefined) Object.assign(issue, { updatedAt: issue.updatedAt > '2026-11-13T11:00:00Z' ? issue.updatedAt : '2026-11-13T11:00:00Z', statusType: a.state === 'completed' ? 'completed' : 'started' })
         return text(issue ?? {})
       }
       if (e.tool === 'save_comment') {
@@ -1847,6 +1848,32 @@ describe('Linear sync', () => {
     for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
     expect(l.writes.filter(x => x === 'state KT-1 completed')).toHaveLength(1)
     expect(l.writes.filter(x => x.startsWith('comment KT-1')).at(-1)).toContain('Moved to Done by auto-claude')
+  })
+
+  test('merge comment is not a change: the first of two lines naming an issue lands while the second is built, its comment moves updatedAt; the second still moves it to Done, with no follow-up (1.20.2)', async ($, on) => {
+    const w = world(on)
+    const l = linear(on, w)
+    l.commentMoves = true
+    w.github = true
+    w.checks = '[{"bucket":"pending"}]'
+    await plannedWith($, w, QUEUE.replace('- [ ] add()', '- [ ] [KT-1] add()').replace('- [ ] sub()', '- [ ] [KT-1] sub()'))
+    // Milestone 1 waits on CI; milestone 2 starts stacked (its start restamps KT-1 at 11:00).
+    await meet($, w)
+    expect(w.adds).toHaveLength(2)
+    // Milestone 1 lands: its "still open" comment moves updatedAt to 15:00.
+    w.checks = '[{"bucket":"pass"}]'
+    await w.clock.advance(10_000)
+    expect(w.merged).toHaveLength(1)
+    expect(l.writes.find(x => x.startsWith('comment KT-1'))).toContain('1 more milestone(s) naming this issue are still open')
+    expect(l.issues.find(i => i.id === 'KT-1')!.updatedAt).toBe('2026-11-13T15:00:00Z')
+    // Milestone 2 lands: nothing a person did, so KT-1 moves to Done.
+    await meet($, w)
+    for (let i = 0; i < 3; i++) await w.clock.advance(TICK)
+    expect(w.merged).toHaveLength(2)
+    expect(l.writes.some(x => x.includes('changed in Linear while this was built'))).toBe(false)
+    expect(l.writes.filter(x => x === 'state KT-1 completed')).toHaveLength(1)
+    expect(l.writes.filter(x => x.startsWith('comment KT-1')).at(-1)).toContain('Moved to Done by auto-claude')
+    expect(parseQueue(w.files.get(GOALS) ?? '').filter(i => i.condition.includes('comments and changes on KT-1'))).toEqual([])
   })
 
   test('last line: an issue that is a mapped agent session gets no comment under the person, and still moves to Done', async ($, on) => {

@@ -1,6 +1,6 @@
 {
   "name": "auto-claude",
-  "version": "1.20.1",
+  "version": "1.20.2",
   "description": "Finishes a repository's work unattended and live: Claude plans the long-term end state, its milestones and how it deploys; the built-in loop builds each milestone in its own worktree and judges it; auto-claude ships it (push, PR, CI, merge when green), deploys and smoke-checks it, and a watchdog keeps the run moving until the final check passes. With --always-on it does not end there: it stands by with no model turn and wakes for a new cycle when Linear, the live smoke check, the default branch's CI or a labelled GitHub issue gives it work (1.4.0). Once a run's final check passes, the next run toward the same aim plans itself, within daily caps, unless started with --once (1.6.0). Absorbs goal-mode's loop (1.0.0).",
   "author": {
     "name": "unohee"

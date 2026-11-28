@@ -291,8 +291,13 @@ export async function onMerged($: EngineInterface, sync: LinearSync, ids: readon
       const stamp = stampOf(issue, await listComments($, id))
       if (left > 0) {
         // Not the last line: the state stays, and the last landing line checks for changes.
-        if (!owned) await comment($, id, `${evidence}. ${left} more milestone(s) naming this issue are still open, so it stays open until the last one lands.`)
         sync = { ...sync, seen: { ...sync.seen, [id]: stamp } }
+        if (!owned) {
+          await comment($, id, `${evidence}. ${left} more milestone(s) naming this issue are still open, so it stays open until the last one lands.`)
+          // The comment can move updatedAt; read before it, the last landing line took it for a
+          // person's change and queued a follow-up instead of moving the issue to Done (1.20.2).
+          sync = await restamp($, sync, id)
+        }
         continue
       }
       const covered = sync.seen[id]
@@ -301,6 +306,8 @@ export async function onMerged($: EngineInterface, sync: LinearSync, ids: readon
         await comment($, id, `${evidence}. It changed in Linear while this was built, so it stays open and a follow-up milestone is queued.`)
         lines.push(issueLine(issue, true, covered))
         sync = { ...sync, seen: { ...sync.seen, [id]: stamp }, followUps: { ...(sync.followUps ?? {}), [id]: ups + 1 } }
+        // The follow-up covers the person's change (stamp); the driver's own comment is covered too.
+        sync = await restamp($, sync, id)
         continue
       }
       if (!owned) await comment($, id, `${evidence}. Moved to Done by auto-claude.`)
