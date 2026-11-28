@@ -1823,6 +1823,29 @@ describe('Linear sync', () => {
     expect(w.agent.calls.some(c => c.method === 'POST' && c.path === '/v1/activity' && c.body.sessionId === 'sess-1' && c.body.content.type === 'response')).toBe(true)
   })
 
+  test('held app issue gets no person comment: a deferred milestone naming a mapped session issue makes no save_comment; another issue still does (1.19.3)', async ($, on) => {
+    const w = world(on)
+    const l = linear(on, w)
+    l.issues.push({ id: 'KT-9', title: 'sub() is wrong', updatedAt: '2026-11-13T10:00:00Z', status: 'Todo', statusType: 'unstarted' })
+    w.files.set('/home/.claude/linear.json', JSON.stringify({ repo_mapping: { repo: { team: 'T', projectId: 'proj-1', projectName: 'Repo' } } }))
+    w.files.set('/home/.claude/linear-agent.json', JSON.stringify({ url: 'https://agent.test', token: 'tok-x' }))
+    w.agent.events.push({ id: 1, action: 'created', sessionId: 'sess-1', projectId: 'proj-1', identifier: 'KT-1', title: 'add() is wrong' })
+    await plannedWith($, w, QUEUE.replace('- [ ] add()', '- [ ] [KT-1] add()').replace('- [ ] sub()', '- [ ] [KT-9] sub()'))
+    await w.clock.advance(TICK)
+    const defer = (reason: string) => $.tool.call({ tool: 'mcp__auto-claude__defer_goal', reason, category: 'human-decision' } as never)
+    // The app-owned issue: deferred, told in its session, no comment as the person.
+    expect((await defer('needs a decision on rounding')).deny).toBeUndefined()
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
+    await w.clock.advance(TICK)
+    expect(l.writes.filter(x => x.startsWith('comment KT-1'))).toEqual([])
+    expect(w.agent.calls.some(c => c.method === 'POST' && c.path === '/v1/activity' && c.body.sessionId === 'sess-1' && c.body.content.type === 'elicitation')).toBe(true)
+    // A non-session issue still gets the held comment.
+    expect((await defer('needs a decision on sign')).deny).toBeUndefined()
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
+    await w.clock.advance(TICK)
+    expect(l.writes.filter(x => x.startsWith('comment KT-9')).at(-1)).toContain('was held')
+  })
+
   test('last line: a single line naming an issue moves it to Done with the evidence comment, as before', async ($, on) => {
     const w = world(on)
     const l = linear(on, w)

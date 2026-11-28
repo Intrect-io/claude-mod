@@ -628,6 +628,12 @@ async function prLink($: EngineInterface, r: AutoRecord, pr: number | undefined)
   return slug === undefined ? {} : { pr: `https://github.com/${slug}/pull/${pr}` }
 }
 
+// The issues among `ids` that are the Linear app's agent sessions: they get no MCP comment under the person.
+function agentOwnedIn(r: AutoRecord, ids: readonly string[]): Set<string> {
+  const sessions = r.agent?.sessions ?? {}
+  return new Set(ids.filter(id => Object.prototype.hasOwnProperty.call(sessions, id)))
+}
+
 // A milestone given up on: held, told, and counted for the circuit breaker
 // (two in a row for one cause stop the run, in tick).
 async function hold($: EngineInterface, r: AutoRecord, item: ShipItem, note: string): Promise<{ r: AutoRecord; item: ShipItem }> {
@@ -635,7 +641,7 @@ async function hold($: EngineInterface, r: AutoRecord, item: ShipItem, note: str
   const streak = r.holdCause === cause ? (r.holdStreak ?? 0) + 1 : 1
   await tell($, r, `held: ${item.goal.slice(0, 60)}${item.pr !== undefined ? ` (PR #${item.pr})` : ''}: ${note.slice(0, 160)}; going on with the next milestone`)
   const ids = lineIssues(item.goal)
-  if (r.linear !== undefined && ids.length > 0) r = { ...r, linear: await onHeld($, r.linear, ids, `${item.pr !== undefined ? `PR #${item.pr}: ` : ''}${note}`) }
+  if (r.linear !== undefined && ids.length > 0) r = { ...r, linear: await onHeld($, r.linear, ids, `${item.pr !== undefined ? `PR #${item.pr}: ` : ''}${note}`, agentOwnedIn(r, ids)) }
   await appendActivity($, r.root, { event: 'held', run: r.startedAt, goal: item.goal, ...(item.pr !== undefined ? { pr: item.pr } : {}), cause })
   r = await agentMoment($, r, { kind: note.startsWith('diff judge:') ? 'diff-judge-hold' : 'held', goal: item.goal, reason: note, ...(await prLink($, r, item.pr)) })
   // A held repair frees the stacked milestones; their deploys count toward the stop.
@@ -871,8 +877,7 @@ async function advance($: EngineInterface, r: AutoRecord, item: ShipItem): Promi
       const open = parseQueue((await readText($, FILES(r.root).queue)) ?? '').filter(i => i.mark === ' ' && i.condition !== item.goal).map(i => i.condition)
       const shipping = next.ships.filter(s => s.goal !== item.goal && s.state !== 'merged' && s.state !== 'held').map(s => s.goal)
       const remaining = Object.fromEntries(ids.map(id => [id, [...open, ...shipping].filter(c => lineIssues(c).includes(id)).length]))
-      const sessions = next.agent?.sessions ?? {}
-      const agentOwned = new Set(ids.filter(id => Object.prototype.hasOwnProperty.call(sessions, id)))
+      const agentOwned = agentOwnedIn(next, ids)
       const done = await onMerged($, next.linear, ids, `Merged ${landed}${sha !== '' ? ` (${r.defaultBranch} at ${sha})` : ''}: ${item.goal.slice(0, 160)}`, { remaining, agentOwned })
       for (const line of done.lines) await appendQueue($, r.root, line)
       next = { ...next, linear: done.sync }
@@ -1669,7 +1674,7 @@ async function readEvents($: EngineInterface, r: AutoRecord): Promise<AutoRecord
       if (parent !== undefined) r = { ...r, ships: r.ships.map((s): ShipItem => (s.headRef === parent ? { ...s, state: 'held', note: 'its fix goal was blocked' } : s)) }
       await tell($, r, `${e.event}: ${(e.goal ?? '').slice(0, 80)}${e.reason !== undefined ? ` (${e.reason.slice(0, 100)})` : ''}; going on`)
       const ids = e.goal === undefined ? [] : lineIssues(e.goal)
-      if (r.linear !== undefined && r.buildOnly !== true && ids.length > 0) r = { ...r, linear: await onHeld($, r.linear, ids, `${e.event}${e.reason !== undefined ? `: ${e.reason}` : ''}`) }
+      if (r.linear !== undefined && r.buildOnly !== true && ids.length > 0) r = { ...r, linear: await onHeld($, r.linear, ids, `${e.event}${e.reason !== undefined ? `: ${e.reason}` : ''}`, agentOwnedIn(r, ids)) }
       if (e.goal !== undefined && r.buildOnly !== true) r = await agentMoment($, r, { kind: e.event === 'deferred' ? 'deferred' : 'held', goal: e.goal, ...(e.reason !== undefined ? { reason: e.reason } : {}) })
     } else if (e.event === 'waiting') {
       // Back in the queue, waiting on its command: finished as a build, not held.

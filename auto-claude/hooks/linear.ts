@@ -314,8 +314,12 @@ export async function onMerged($: EngineInterface, sync: LinearSync, ids: readon
 }
 
 // A milestone naming issues was held or blocked: a comment, the state kept.
-export async function onHeld($: EngineInterface, sync: LinearSync, ids: readonly string[], why: string): Promise<LinearSync> {
+// `agentOwned`: issues that are the Linear app's agent sessions (1.19.3). They get no comment under
+// the person's identity: the session already gets the app's elicitation, and the extra comment
+// read as a person's change on the next sync (AGT-4926, 2026-11-22).
+export async function onHeld($: EngineInterface, sync: LinearSync, ids: readonly string[], why: string, agentOwned: ReadonlySet<string> = new Set()): Promise<LinearSync> {
   for (const id of ids) {
+    if (agentOwned.has(id)) continue
     try {
       await comment($, id, `The milestone for this issue was held: ${why.slice(0, 300)}. The issue stays open.`)
     } catch (error) {
