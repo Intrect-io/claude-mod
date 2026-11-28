@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
+import type { HookStream, TurnStepChunk, TurnStepInput, TurnStepResult } from 'claude-code'
 
 import { parseQueue } from './plan'
 
@@ -58,6 +59,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
     // `gh pr merge` answers an error (a lost reply), and what `gh pr view` says of the PR.
     mergeFails: false,
     emptyBranch: false,
+    sessionId: 'me',
     // `gh pr merge` refused outright (a conflict, a required review): the PR stays open.
     mergeRefused: false,
     prState: 'OPEN',
@@ -121,7 +123,7 @@ function world(on: On, store: Record<string, unknown> = {}) {
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('command.list', () => ({ value: w.commandNames.map(name => ({ name })) as never }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('session.id', () => ({ value: 'me' }))
+  on('session.id', () => ({ value: w.sessionId }))
   on('session.cwd', () => ({ value: w.cwd }))
   on('prompt.compose', () => ({ sections: [] }))
   on('classic.Stop', () => ({}))
@@ -3138,5 +3140,90 @@ describe('the status line (1.19.0)', () => {
     w.files.set(PIECE, 'auto·R1·M2/7')
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     expect(w.files.get(PIECE)).toBe('')
+  })
+})
+
+describe('token use per milestone (1.20.0)', () => {
+  const STEP: TurnStepInput = { turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 3 }
+  // The engine answers each step with the usage the test sets.
+  function steps(on: On) {
+    const next = { usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }
+    on('turn.step', async function* (_, e): HookStream<TurnStepChunk, TurnStepResult> {
+      return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: { model: e.model, ...next.usage } } as TurnStepResult
+    })
+    return next
+  }
+  async function drain(stream: HookStream<TurnStepChunk, TurnStepResult>) {
+    for (;;) {
+      const r = await stream.next()
+      if (r.done) return r.value
+    }
+  }
+  const tokenEvents = (w: W) => (w.files.get(LOG) ?? '').split('\n').filter(l => l.includes('"event":"tokens"')).map(l => JSON.parse(l) as Record<string, any>)
+
+  test('token usage per milestone: main and subagent steps during a milestone become one tokens event; later steps go to the next; planning goes to other', async ($, on) => {
+    const w = world(on)
+    const u = steps(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await cmd($, 'start --once')
+    await w.clock.advance(200)
+    // Planning: no milestone is being built yet, so it is `other`.
+    u.usage = { input_tokens: 7, output_tokens: 3, cache_read_input_tokens: 0, cache_creation_input_tokens: 100 }
+    const r0 = await drain($.turn.step(STEP))
+    // Pass-through: the step's result reaches the engine unchanged.
+    expect(r0?.usage).toMatchObject({ input_tokens: 7, cache_creation_input_tokens: 100 })
+    w.files.set('/repo/.claude/auto-plan.md', PLAN)
+    w.files.set(GOALS, QUEUE)
+    await ready($)
+    await w.clock.advance(1_200)
+
+    // Milestone 1: two main-loop steps and one subagent step.
+    u.usage = { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 1000, cache_creation_input_tokens: 50 }
+    await drain($.turn.step(STEP))
+    await drain($.turn.step({ ...STEP, index: 1 }))
+    u.usage = { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 300, cache_creation_input_tokens: 4 }
+    await drain($.turn.step({ ...STEP, index: 2, agentId: 'sub-1' } as TurnStepInput))
+    await meet($, w)
+    await w.clock.advance(TICK)
+    let ev = tokenEvents(w)
+    const first = ev.find(e => e.goal === 'add() returns a+b')
+    expect(first).toBeDefined()
+    expect(first!.main).toEqual({ steps: 2, input: 20, output: 40, cacheRead: 2000, cacheWrite: 100 })
+    expect(first!.sub).toEqual({ steps: 1, input: 1, output: 2, cacheRead: 300, cacheWrite: 4 })
+    expect(typeof first!.run).toBe('number')
+    const other = ev.find(e => e.scope === 'other')
+    expect(other?.main).toEqual({ steps: 1, input: 7, output: 3, cacheRead: 0, cacheWrite: 100 })
+
+    // Milestone 2: its own step only, none of milestone 1's.
+    u.usage = { input_tokens: 5, output_tokens: 5, cache_read_input_tokens: 5, cache_creation_input_tokens: 5 }
+    await drain($.turn.step({ ...STEP, index: 3 }))
+    expect((await $.tool.call({ tool: 'mcp__auto-claude__defer_goal', reason: 'needs a decision', category: 'human-decision' } as never)).deny).toBeUndefined()
+    expect((await $.classic.Stop(STOP)).block).toBeUndefined()
+    await w.clock.advance(TICK)
+    ev = tokenEvents(w)
+    const second = ev.find(e => e.goal === 'sub() returns a-b')
+    expect(second?.main).toEqual({ steps: 1, input: 5, output: 5, cacheRead: 5, cacheWrite: 5 })
+    expect(second?.sub).toEqual({ steps: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
+    expect(ev.filter(e => e.goal === 'add() returns a+b')).toHaveLength(1)
+
+    // /auto-claude stats shows them.
+    const stats = (await cmd($, 'stats')).text
+    expect(stats).toContain('tokens: ')
+    expect(stats).toContain('costliest: add() returns a+b')
+  })
+
+  test('token usage per milestone: a step in a session that does not own the run is not counted', async ($, on) => {
+    const w = world(on)
+    const u = steps(on)
+    await planned($, w)
+    u.usage = { input_tokens: 10, output_tokens: 10, cache_read_input_tokens: 10, cache_creation_input_tokens: 10 }
+    w.sessionId = 'someone-else'
+    await drain($.turn.step(STEP))
+    w.sessionId = 'me'
+    await drain($.turn.step({ ...STEP, index: 1 }))
+    await meet($, w)
+    await w.clock.advance(TICK)
+    const first = tokenEvents(w).find(e => e.goal === 'add() returns a+b')
+    expect(first?.main).toEqual({ steps: 1, input: 10, output: 10, cacheRead: 10, cacheWrite: 10 })
   })
 })

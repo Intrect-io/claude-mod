@@ -676,6 +676,40 @@ describe('stats', () => {
     expect(activityDue({ state: 'building', at: T0 }, 'idle-quiet', T0 + 1)).toBe(true)
   })
 
+  test('stats token totals: per-run totals by kind, the subagent share and the three costliest milestones (1.20.0)', () => {
+    const c = (steps: number, input: number, output: number, cacheRead: number, cacheWrite: number) => ({ steps, input, output, cacheRead, cacheWrite })
+    const zero = c(0, 0, 0, 0, 0)
+    const log = [
+      act(0, 'building'),
+      line(10, { event: 'tokens', run: T0, goal: 'a', main: c(10, 1000, 2000, 400_000, 50_000), sub: c(5, 500, 500, 100_000, 10_000) }),
+      line(20, { event: 'tokens', run: T0, scope: 'other', main: c(2, 100, 100, 1000, 0), sub: zero }),
+      line(30, { event: 'tokens', run: T0, goal: 'b', main: c(1, 10, 10, 10, 10), sub: zero }),
+      line(40, { event: 'tokens', run: T0, goal: 'c', main: c(4, 0, 0, 2_000_000, 0), sub: zero }),
+      // Deferred and built again: both events add up.
+      line(50, { event: 'tokens', run: T0, goal: 'b', main: c(1, 1_000_000, 0, 0, 0), sub: zero }),
+      line(55, { event: 'tokens', run: T0, goal: 'd', main: c(1, 1, 1, 1, 1), sub: zero }),
+      // Another run's tokens are not this run's.
+      line(56, { event: 'tokens', run: T0 + 1, goal: 'x', main: c(1, 9e9, 0, 0, 0), sub: zero }),
+      line(57, { event: 'tokens', run: T0, goal: 'broken', main: 'nope' }),
+      act(60, 'idle-quiet'),
+    ]
+    const [r] = summarizeStats(log, T0 + 70 * MIN)
+    expect(r.tokens).toBeDefined()
+    const t = r.tokens!
+    expect(t.total.main).toEqual(c(19, 1_001_111, 2111, 2_401_011, 50_011))
+    expect(t.total.sub).toEqual(c(5, 500, 500, 100_000, 10_000))
+    const all = 1_001_111 + 2111 + 2_401_011 + 50_011 + 500 + 500 + 100_000 + 10_000
+    expect(Math.abs(t.subShare - 111_000 / all) < 1e-9).toBe(true)
+    expect(t.top.map(g => g.goal)).toEqual(['c', 'b', 'a'])
+    expect(t.top[1]!.total).toBe(1_000_040)
+    const text = statsText([r], 7)
+    expect(text).toContain('tokens: 3.6M in 24 step(s): input 1.0M, output 2.6k, cache read 2.5M, cache write 60.0k; subagents 3.1%; costliest: c (2.0M); b (1.0M); a (564.0k)')
+    // A run with no tokens events shows no tokens line.
+    const [plain] = summarizeStats([act(0, 'building'), act(10, 'idle-quiet')], T0 + 20 * MIN)
+    expect(plain.tokens).toBeUndefined()
+    expect(statsText([plain], 7)).not.toContain('tokens:')
+  })
+
   test('stats: wall time is split by state, with merges, holds and deferrals counted in the run', () => {
     const log = [
       act(0, 'building'),
