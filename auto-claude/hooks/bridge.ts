@@ -9,6 +9,7 @@ import type { EngineInterface } from 'claude-code'
 import type { AgentBridge, AutoRecord, ShipItem } from '../types'
 import { activityFor, agentLine, type AgentEvent, type Candidate, cleanTitle, decomposeTargets, eventLines, type HeldInput, issueCandidates, issuesOf, type Moment, planOf, type RedInput, sha256Hex, tagLine, untagged } from './agent'
 import { FILES, readText, run, tell } from './io'
+import { getIssue, isOpen } from './linear'
 import { appendLog, readLoop } from './loop'
 import { markItem, parseQueue, type QueueItem } from './queue'
 
@@ -324,14 +325,29 @@ export async function agentSync($: EngineInterface, r: AutoRecord, now: number):
   r = await askSpecAmbiguous($, r)
 
   let queue = parseQueue((await readText($, FILES(r.root).queue)) ?? '')
+  // Issues the accepted plan deferred as spec-ambiguous are asked in their session, not built:
+  // a line for one only made the builder defer it again (1.19.2). A reply still reaches it
+  // through applyPrompt below.
+  const deferred = new Set(specAmbiguous((await readText($, FILES(r.root).plan)) ?? '').map(d => d.identifier))
+  let queued = 0
   for (const line of got.lines) {
     const id = issuesOf(parseQueue(line)[0]?.condition ?? '')[0]
     // The MCP sync may have queued the issue already, or the run split it into sub-issues.
     if (id !== undefined && (queue.some(i => issuesOf(i.condition).includes(id)) || (r.agent?.parents ?? []).includes(id))) continue
+    if (id !== undefined && deferred.has(id)) {
+      await appendLog($, r.root, { event: 'agent-session', run: r.startedAt, issue: id, queued: false, reason: 'spec-ambiguous' })
+      continue
+    }
+    const open = id === undefined ? true : await delegationOpen($, id)
+    if (open === false) {
+      await appendLog($, r.root, { event: 'agent-session', run: r.startedAt, issue: id, queued: false, reason: 'closed' })
+      continue
+    }
     await appendQueueLine($, r.root, line)
-    await appendLog($, r.root, { event: 'agent-session', run: r.startedAt, issue: id, queued: true })
+    await appendLog($, r.root, { event: 'agent-session', run: r.startedAt, issue: id, queued: true, ...(typeof open === 'string' ? { error: open } : {}) })
+    queued++
   }
-  if (got.lines.length > 0) await tell($, r, `Linear: ${got.lines.length} delegated issue(s) queued from agent sessions`)
+  if (queued > 0) await tell($, r, `Linear: ${queued} delegated issue(s) queued from agent sessions`)
   queue = parseQueue((await readText($, FILES(r.root).queue)) ?? '')
   for (const p of got.prompts) {
     const as = await applyPrompt($, r, queue, p)
@@ -387,6 +403,19 @@ function sessionIssueOf(r: AutoRecord, queueText: string): string | undefined {
   const sessions = r.agent?.sessions ?? {}
   const named = new Set(parseQueue(queueText).filter(i => i.mark === ' ').flatMap(i => issuesOf(i.condition)).filter(id => (sessions[id] ?? '') !== ''))
   return named.size === 1 ? [...named][0] : undefined
+}
+
+// Whether a delegated issue is still open, read through the MCP before its line is queued: a stale
+// `created` event for an issue already done (AGT-4924, 2026-11-22) became a line with nothing to
+// build (1.19.2). A failed or empty read is the error text: the caller queues it anyway (fail open),
+// because losing a delegation is worse than a line that finds nothing to do.
+async function delegationOpen($: EngineInterface, id: string): Promise<boolean | string> {
+  try {
+    const issue = await getIssue($, id)
+    return issue === undefined ? 'get_issue returned no issue' : isOpen(issue)
+  } catch (error) {
+    return String(error).slice(0, 160)
+  }
 }
 
 // `- **Deferred (spec-ambiguous).** [AGT-12] <what is unclear>` lines the planner wrote under ## Decisions.
